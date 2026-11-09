@@ -20,7 +20,11 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 |---|---|---|
 | `src/cli.ts`, `src/commands.ts`, `src/exit.ts` | the command table and exit codes; later commands answer "not available in this build" | 1 |
 | `src/db/` | `bridge.sqlite` on better-sqlite3 (WAL, synchronous=FULL, foreign keys): `schema.ts` (migrations over `user_version`, each with its `down`), `database.ts` (open, `migrateTo`, newer schema refused), `holds.ts` (a set per binding), `journal.ts`, `stop.ts` (the STOP file) | 2 |
-| `src/lfcp/` | SectionHost, `commitGuarded`, readiness, delivery; SDK gap fallbacks (G1: the pairing journal) until sdk-ts ships them | 3a, 3b |
+| `src/lfcp/section-host.ts` | SectionHost: one SyncClient per coordinator; restore/rebuild of checkpoints, applier, snapshot binding (load only, never publish), sync driver, outbound; `commitGuarded` is the only commit; `onNodesChanged`; `isLive` / `generation` | 3a |
+| `src/lfcp/commit-guard.ts` | the atomic basis check (§5.8): a wrapper of `CommitBinding.stage` with a guard registry by array object; unguarded stage → `UnguardedCommitError`, failed check → `BasisChangedError` | 3a |
+| `src/lfcp/live.ts` | `lfcp_live` (§5.3, R2-13): LIVE now, in the current generation of the connection; reset on disconnect, wake, rebuild | 3a |
+| `src/lfcp/fallback/` | **SDK gap fallbacks**, one file each, marked `FALLBACK for sdk-ts G…`: `node-installation.ts` (G3), `paired-sections.ts` (G1). Removed by the chore that moves to the sdk-ts release with 504 | 3a |
+| `src/lfcp/` (3b) | liveness probe, reconnect / `networkBack`, identity barrier → `access_checked_now` / `offline_commit_allowed`; delivery §5.9 | 3b |
 | `src/executor/` | intents, recovery, guards, limits, Safe Mode | 7 |
 
 ## The SDK
@@ -28,6 +32,12 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 `@openlfcp/*` from npm at 0.5.2, exact versions. The bridge API of sdk-ts (pairedResources,
 deviceIdentity, openNodeInstallation, sectionEnd, connection reuse) comes in a separate chore
 once sdk-ts releases it; until then the host keeps its own fallbacks in `src/lfcp/`.
+
+## Live tests
+
+`packages/host/test/*.live.test.ts` run against the Rust reference server named by
+`LFCP_SERVER_BIN` (built at `server.lock`); without it they are skipped, and with
+`LFCP_REQUIRE_LIVE=1` a skip fails the run. CI runs them with the `e2e` job (PR 9+).
 
 ## CI (§1.3)
 
