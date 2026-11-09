@@ -80,12 +80,14 @@ export function openBridgeDatabase(path: string, options: OpenOptions = {}): Bri
   const migrations = options.migrations ?? MIGRATIONS;
   const db = new Database(path);
   try {
-    db.pragma("journal_mode = WAL");
-    db.pragma("synchronous = FULL");
-    db.pragma("foreign_keys = ON");
+    // Read-only pragmas first: a database of a newer bridge is refused before
+    // anything (journal_mode = WAL rewrites the header) touches the file.
     db.pragma(`busy_timeout = ${options.busyTimeoutMs ?? 5000}`);
     const found = schemaVersion(db);
     if (found > migrations.length) throw new SchemaTooNewError(found, migrations.length);
+    db.pragma("journal_mode = WAL");
+    db.pragma("synchronous = FULL");
+    db.pragma("foreign_keys = ON");
     if (options.migrate !== false) migrateTo(db, migrations.length, migrations);
     return db;
   } catch (e) {

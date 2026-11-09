@@ -230,7 +230,6 @@ describe("holds", () => {
     });
     expect(holds.of("b1").map((h) => h.reason)).toEqual(["foreign_bridge", "ownership_lost"]);
     expect(holds.blocked("b1")).toBe(true);
-    expect(holds.blocked("b1", ["foreign_bridge", "ownership_lost"])).toBe(false);
     expect(holds.lift("b1", "foreign_bridge")).toBe(true);
     expect(holds.lift("b1", "foreign_bridge")).toBe(false);
     expect(holds.has("b1", "ownership_lost")).toBe(true);
@@ -294,5 +293,93 @@ describe("STOP", () => {
     // A directory named STOP cannot be read as a file.
     mkdirSync(join(dir, "STOP"));
     expect(stopState(dir)?.reason).toMatch(/unreadable/);
+  });
+});
+
+// Review PR 2 (r2).
+describe("review PR 2: r4 states, holds, version check, journal pages, STOP durability", () => {
+  it("bootstrap_ops keeps unknown_outcome across a reopen (B17, §6.5); N8 has no quiescent phase (r4)", () => {
+    const d = db();
+    seedV1(d);
+    d.prepare(
+      "INSERT INTO bootstrap_ops (binding_id, step, client_id, state) VALUES ('b1', 'list', 'op-1', 'unknown_outcome')",
+    ).run();
+    d.close();
+    const again = db();
+    expect(
+      again
+        .prepare("SELECT state FROM bootstrap_ops WHERE binding_id = 'b1' AND step = 'list'")
+        .get(),
+    ).toEqual({ state: "unknown_outcome" });
+    const phase = (p: string) =>
+      again
+        .prepare(
+          "INSERT INTO migrations (id, from_installation, phase, created_at, updated_at) VALUES (?, 'i1', ?, ?, ?)",
+        )
+        .run(`m-${p}`, p, now, now);
+    phase("freezing");
+    expect(() => phase("quiescent")).toThrow(/CHECK/);
+  });
+
+  it("the migration hold exists, and blocked() has no exceptions (§7.1 r4)", () => {
+    const d = db();
+    seedV1(d);
+    const holds = new Holds(d);
+    holds.lift("b1", "ownership_lost");
+    expect(holds.blocked("b1")).toBe(false);
+    expect(holds.set("b1", "migration", { migration: "m1" })).toBe(true);
+    expect(holds.blocked("b1")).toBe(true);
+    expect(holds.blocked.length).toBe(1);
+  });
+
+  it("a database of a newer bridge is refused before anything writes it: same bytes, same journal mode", async () => {
+    const path = join(dir, "newer.sqlite");
+    const Database = (await import("better-sqlite3")).default;
+    const raw = new Database(path);
+    raw.pragma("journal_mode = DELETE");
+    raw.exec("CREATE TABLE t (a) ; INSERT INTO t VALUES (1)");
+    raw.pragma(`user_version = ${SCHEMA_VERSION + 1}`);
+    raw.close();
+    const before = readFileSync(path);
+    expect(() => openBridgeDatabase(path)).toThrow(SchemaTooNewError);
+    expect(readFileSync(path).equals(before)).toBe(true);
+    expect(existsSync(`${path}-wal`)).toBe(false);
+    const check = new Database(path, { readonly: true });
+    expect(check.pragma("journal_mode", { simple: true })).toBe("delete");
+    check.close();
+  });
+
+  it("afterId pages forward from the cursor: nothing is skipped past the limit", () => {
+    const d = db();
+    const j = new Journal(d);
+    for (let i = 0; i < 105; i++) j.append("info", "tick", `#${i}`);
+    expect(j.list({ afterId: 0 }).map((e) => e.id)).toEqual(
+      Array.from({ length: 100 }, (_, i) => i + 1),
+    );
+    const seen: number[] = [];
+    let cursor = 0;
+    for (;;) {
+      const page = j.list({ afterId: cursor, limit: 40 });
+      if (page.length === 0) break;
+      seen.push(...page.map((e) => e.id));
+      cursor = page.at(-1)?.id ?? cursor;
+    }
+    expect(seen).toEqual(Array.from({ length: 105 }, (_, i) => i + 1));
+    // Without a cursor: the newest page (the start of `log`), oldest first.
+    expect(j.list({ limit: 3 }).map((e) => e.id)).toEqual([103, 104, 105]);
+  });
+
+  it("stop and resume make the directory durable after the rename and after the unlink", () => {
+    const seen: [string, boolean][] = [];
+    const sync = { directorySync: (d: string) => seen.push(["sync", existsSync(join(d, "STOP"))]) };
+    stop(dir, "test", Date.now, sync);
+    expect(seen).toEqual([["sync", true]]);
+    expect(resume(dir, sync)).toBe(true);
+    expect(seen).toEqual([
+      ["sync", true],
+      ["sync", false],
+    ]);
+    expect(resume(dir, sync)).toBe(false);
+    expect(seen).toHaveLength(2);
   });
 });

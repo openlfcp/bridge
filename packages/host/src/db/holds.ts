@@ -1,12 +1,12 @@
 // The holds of a binding (D-010 §7): a set of reasons, each with the time it
 // was first set and an optional detail. A binding with any hold runs no
-// effect (§7.1, except the fixed set N8 freezing allows, §9). Setting a hold
+// effect (§7.1 r4: no exceptions, the N8 `migration` hold included). Setting a hold
 // that is set keeps its `since`; a hold is lifted by `resume --accept
 // <hold>` or by the condition that set it going away.
 
 import type { BridgeDatabase } from "./database.js";
 
-/** The hold reasons D-010 r3 names (§6.5, §7.2, §7.3–7.5); a PR that needs another adds it here. */
+/** The hold reasons D-010 r4 names (§6.5, §7.2, §7.3–7.5, §9); a PR that needs another adds it here. */
 export const HOLD_REASONS = Object.freeze([
   "guard_mass_unlink",
   "guard_mass_import",
@@ -16,6 +16,8 @@ export const HOLD_REASONS = Object.freeze([
   "ownership_lost",
   "foreign_bridge",
   "import_ambiguous",
+  // N8 (§9 r4): set in the freezing transaction on every binding of the old installation.
+  "migration",
 ] as const);
 
 export type HoldReason = (typeof HOLD_REASONS)[number];
@@ -104,8 +106,11 @@ export class Holds {
     );
   }
 
-  /** Whether `binding` has a hold outside `allowed` (§7.1: none at all, by default). */
-  blocked(binding: string, allowed: readonly HoldReason[] = []): boolean {
-    return this.of(binding).some((h) => !allowed.includes(h.reason));
+  /** Whether `binding` has any hold: then no effect runs (§7.1 r4: no exceptions). */
+  blocked(binding: string): boolean {
+    return (
+      this.db.prepare("SELECT 1 FROM binding_holds WHERE binding_id = ? LIMIT 1").get(binding) !==
+      undefined
+    );
   }
 }

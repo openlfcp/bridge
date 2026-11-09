@@ -190,7 +190,7 @@ const V2: Migration = {
       binding_id TEXT NOT NULL REFERENCES bindings(id),
       step TEXT NOT NULL,
       client_id TEXT NOT NULL,
-      state TEXT NOT NULL CHECK (state IN ('prepared','effecting','done')),
+      state TEXT NOT NULL CHECK (state IN ('prepared','effecting','done','unknown_outcome')),
       result_json TEXT,
       PRIMARY KEY (binding_id, step)
     ) STRICT, WITHOUT ROWID`,
@@ -205,7 +205,7 @@ const V2: Migration = {
       id TEXT PRIMARY KEY,
       from_installation TEXT NOT NULL REFERENCES installations(id),
       to_installation TEXT REFERENCES installations(id),
-      phase TEXT NOT NULL CHECK (phase IN ('pairing','freezing','quiescent','catching_up','switching',
+      phase TEXT NOT NULL CHECK (phase IN ('pairing','freezing','catching_up','switching',
         'switched','closing','awaiting_revocation','done','aborted')),
       blocked_reason TEXT,
       created_at TEXT NOT NULL,

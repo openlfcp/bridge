@@ -22,9 +22,9 @@ export interface JournalEntry {
 export interface JournalFilter {
   readonly bindingId?: string;
   readonly minLevel?: JournalLevel;
-  /** Entries after this id (follow). */
+  /** The first `limit` entries after this id (a page forward: follow). */
   readonly afterId?: number;
-  /** The newest `limit` entries (default 100), returned oldest first. */
+  /** At most this many (default 100); without afterId the newest ones. Oldest first. */
   readonly limit?: number;
 }
 
@@ -91,13 +91,17 @@ export class Journal {
       where.push("id > ?");
       args.push(filter.afterId);
     }
+    // With a cursor: the first `limit` entries after it (a page forward, `log --follow`).
+    // Without: the newest `limit` entries (the start of `log`). Both oldest first.
+    const forward = filter.afterId !== undefined;
     const rows = this.db
       .prepare(
         `SELECT * FROM journal ${where.length === 0 ? "" : `WHERE ${where.join(" AND ")}`}
-         ORDER BY id DESC LIMIT ?`,
+         ORDER BY id ${forward ? "ASC" : "DESC"} LIMIT ?`,
       )
       .all(...args, filter.limit ?? 100) as Row[];
-    return rows.reverse().map((r) =>
+    if (!forward) rows.reverse();
+    return rows.map((r) =>
       Object.freeze({
         id: r.id,
         at: r.at,

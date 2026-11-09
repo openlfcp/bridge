@@ -11,4 +11,4 @@ export {
 export { HOLD_REASONS, type Hold, type HoldReason, Holds } from "./holds.js";
 export { Journal, type JournalEntry, type JournalFilter, type JournalLevel } from "./journal.js";
 export type { Migration } from "./schema.js";
-export { resume, STOP_FILE, type StopState, stop, stopState } from "./stop.js";
+export { resume, STOP_FILE, type StopFs, type StopState, stop, stopState } from "./stop.js";
