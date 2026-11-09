@@ -12,13 +12,14 @@
 ```sh
 cd ~/dev/openlfcp-work/mvp-0.5/bridge/helper
 scripts/build.sh
-scripts/sign-dev.sh
+scripts/sign-dev.sh --login-keychain
 node scripts/smoke.mjs
 node scripts/live-check.mjs
 ```
 
-- `scripts/sign-dev.sh` один раз создаёт в login keychain самоподписанный сертификат «LFCP Bridge Dev» и подписывает им
-  приложение. При первой подписи macOS может спросить «codesign wants to use the key…» → **Always Allow**.
+- `scripts/sign-dev.sh --login-keychain` один раз создаёт в login keychain самоподписанный сертификат «LFCP Bridge Dev»
+  и подписывает им приложение. Без флага скрипт login keychain только читает: если сертификата нет, он останавливается.
+  При первой подписи macOS может спросить «codesign wants to use the key…» → **Always Allow**.
 - `live-check.mjs` запускает приложение через `open`, как это будет делать мост. При первом запуске появится диалог
   «LFCP Reminders Helper» → Напоминания → **Разрешить**.
 - Ручные шаги выделены жёлтым, после каждого нужно нажать Enter. Ввод `s` + Enter пропускает шаг.

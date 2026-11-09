@@ -49,6 +49,12 @@ once sdk-ts releases it; until then the host keeps its own fallbacks in `src/lfc
 | `unit` | vitest |
 | `crash`, `e2e`, `helper`, `helper-protocol` | with PRs 7, 9, 5a, 6 |
 
+## Testing
+
+| Document | What |
+|---|---|
+| `docs/devel/testing/helper-live-checklist.md` | the owner's live EventKit check of the helper (TCC, `live-check.mjs`, `sign-dev.sh`), linked to the R-001 live run |
+
 ## Runtime files (§2.2)
 
 `~/Library/Application Support/org.openlfcp.bridge/`: `config.json`, `bridge.sqlite`,
