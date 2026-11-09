@@ -24,7 +24,9 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 | `src/lfcp/commit-guard.ts` | the atomic basis check (§5.8): a wrapper of `CommitBinding.stage` with a guard registry by array object; unguarded stage → `UnguardedCommitError`, failed check → `BasisChangedError` | 3a |
 | `src/lfcp/live.ts` | `lfcp_live` (§5.3, R2-13): LIVE now, in the current generation of the connection; reset on disconnect, wake, rebuild | 3a |
 | `src/lfcp/fallback/` | **SDK gap fallbacks**, one file each, marked `FALLBACK for sdk-ts G…`: `node-installation.ts` (G3), `paired-sections.ts` (G1). Removed by the chore that moves to the sdk-ts release with 504 | 3a |
-| `src/lfcp/` (3b) | liveness probe, reconnect / `networkBack`, identity barrier → `access_checked_now` / `offline_commit_allowed`; delivery §5.9 | 3b |
+| `src/lfcp/liveness.ts`, `reconnect.ts` | a PING after 15 s of silence, dead after 5 s more → drop and reconnect; backoff 1 s → 15 s ±20 %, restartable; `SectionHost.wake()` (drop, reconnect, new generation) and `networkBack()` | 3b |
+| `src/lfcp/access.ts` | `access_checked_now` (an answer in the current generation: allowed or read-only), `offline_commit_allowed` (the last answer kept in `meta`); a refusal → `revocationStatus` (the §8.6 write barrier) → refused / revoked for good; hold `access_refused` | 3b |
+| `src/lfcp/delivery.ts` | §5.9: batch status → intent; no-op receipt delivered at once; rejected and partial by the field's generation (`bases.intent_id`), conflicts `lfcp_rejected` / `lfcp_partial`; blocked → hold `access_refused` | 3b |
 | `src/executor/` | intents, recovery, guards, limits, Safe Mode | 7 |
 
 ## The SDK

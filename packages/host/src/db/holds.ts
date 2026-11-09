@@ -18,6 +18,8 @@ export const HOLD_REASONS = Object.freeze([
   "import_ambiguous",
   // N8 (§9 r4): set in the freezing transaction on every binding of the old installation.
   "migration",
+  // §5.9: the server refuses the section (a blocked batch, a refused open); revocationStatus follows.
+  "access_refused",
 ] as const);
 
 export type HoldReason = (typeof HOLD_REASONS)[number];

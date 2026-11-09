@@ -19,12 +19,14 @@
 // the SDK's SectionHost is 505, after PR 8).
 
 import {
+  type BatchStatus,
   type CommitBinding,
   DataUnitApplier,
   dekResolver,
   isEngineTrap,
   OutboundQueue,
   ProfileCheckpointer,
+  platformWebSocket,
   type Receipt,
   type ReconnectPolicy,
   type SnapshotBinding,
@@ -32,6 +34,7 @@ import {
   type SyncEvent,
   startSyncDriver,
   type WebSocketFactory,
+  type WriteAccess,
 } from "@openlfcp/client";
 import { LfcpError, type PrincipalId, type ResourceId, toHex } from "@openlfcp/core";
 import type { AgreementKeyPair } from "@openlfcp/crypto";
@@ -45,6 +48,8 @@ import type { LfcpStorage, SecretStore } from "@openlfcp/storage";
 import type { Signer } from "@openlfcp/wire";
 import { type BasisCheck, type GuardedBinding, guardCommitBinding } from "./commit-guard.js";
 import { type LiveChange, LiveTracker } from "./live.js";
+import { LIVENESS, type LivenessOptions, LivenessProbe } from "./liveness.js";
+import { cappedReconnect, type RestartableReconnect, restartableReconnect } from "./reconnect.js";
 
 /** The outbound request timeout of the plugin (runtime.ts OUTBOUND_REQUEST_TIMEOUT). */
 const OUTBOUND_REQUEST_TIMEOUT = { baseMs: 4000, maxMs: 60_000 } as const;
@@ -64,7 +69,10 @@ export interface SectionHostOptions {
   readonly timers?: SectionHostTimers;
   /** The sync driver's tick (default 1 s). */
   readonly tickMs?: number;
+  /** The reconnect backoff (default cappedReconnect: 1 s doubling to 15 s, ±20 %); restartable. */
   readonly reconnect?: ReconnectPolicy;
+  /** The liveness probe of the connection (default LIVENESS: PING after 15 s, dead after 5 s more). */
+  readonly liveness?: LivenessOptions;
   readonly antiEntropyMs?: number;
   readonly webSocket?: WebSocketFactory;
   /** Checkpoints at most this often (default 2 s, as the plugin). */
@@ -136,13 +144,23 @@ export class SectionHost {
   readonly #events = new Set<(e: SyncEvent) => void>();
   readonly #rebuilt = new Set<(e: RebuiltEvent) => void>();
   readonly #live = new LiveTracker();
+  readonly #batches = new Set<(resource: ResourceId, b: BatchStatus) => void>();
+  readonly #reconnect: RestartableReconnect;
+  readonly #probe: LivenessProbe;
   #stopDriver: (() => void) | null = null;
   #stopped = false;
+  #started = false;
 
   constructor(options: SectionHostOptions) {
     this.#o = options;
     this.#timers = options.timers ?? defaultTimers;
     const { storage } = options;
+    this.#reconnect = restartableReconnect(options.reconnect ?? cappedReconnect());
+    this.#probe = new LivenessProbe(
+      (url, protocols) => (options.webSocket ?? platformWebSocket())(url, protocols),
+      () => this.#timers.now(),
+      options.liveness ?? LIVENESS,
+    );
     this.#client = new SyncClient({
       url: options.url,
       signer: options.installation.signer,
@@ -151,13 +169,15 @@ export class SectionHost {
       secrets: options.secrets,
       outbound: new OutboundQueue({ storage, requestTimeout: OUTBOUND_REQUEST_TIMEOUT }),
       now: () => this.#timers.now(),
-      ...(options.reconnect === undefined ? {} : { reconnect: options.reconnect }),
+      reconnect: this.#reconnect.policy,
       ...(options.antiEntropyMs === undefined ? {} : { antiEntropyMs: options.antiEntropyMs }),
-      ...(options.webSocket === undefined ? {} : { webSocket: options.webSocket }),
+      webSocket: this.#probe.factory,
       // No snapshotPolicy: the bridge never publishes a Snapshot.
     });
     this.#client.on((e) => {
       this.#live.event(e);
+      if (e.type === "status" && e.event.kind === "batch")
+        for (const l of this.#batches) l(e.resourceId, e.event);
       for (const l of this.#events) l(e);
     });
     clientOf.set(this, this.#client);
@@ -205,9 +225,54 @@ export class SectionHost {
     return this.#live.generation;
   }
 
-  /** The system woke up (helper `wake`, or a jump of the clock): lfcp_live is reset. */
+  /** Batch status changes of committed operations (§5.9: delivery), from the SDK's status events. */
+  onBatch(listener: (resource: ResourceId, b: BatchStatus) => void): () => void {
+    this.#batches.add(listener);
+    return () => this.#batches.delete(listener);
+  }
+
+  /**
+   * The Mac woke up (the helper's `wake`, or a jump of the clock, §2.2): the
+   * connection that looks open is not trusted. lfcp_live is reset (a new
+   * generation), and the connection is dropped and made again at once, with
+   * the backoff from its start; the Resources are LIVE again after it.
+   */
   wake(): void {
     this.#live.wake();
+    this.#reconnectNow();
+  }
+
+  /**
+   * The network is back (or may be): the next connection attempt is made now,
+   * and further ones wait as from the start (the plugin's networkBack). A
+   * connection that is up is left alone.
+   */
+  networkBack(): void {
+    this.#reconnect.restart();
+    if (!this.#stopped && this.#started && this.#client.connectionState === "DISCONNECTED")
+      this.#client.start();
+  }
+
+  /** Write access to `resource` as the SDK's validated Control state says (§6 SDK-SECTIONS-INTEGRATION-01). */
+  canWrite(resource: ResourceId): Promise<WriteAccess> {
+    return this.#client.canWrite(resource);
+  }
+
+  /** The connection is READY now. */
+  get connected(): boolean {
+    return this.#client.connectionState === "READY";
+  }
+
+  /** Drops the connection and reconnects at once (wake, a dead connection). */
+  #reconnectNow(): void {
+    this.#reconnect.restart();
+    if (this.#stopped || !this.#started) return;
+    void this.#client
+      .stop()
+      .then(() => {
+        if (!this.#stopped) this.#client.start();
+      })
+      .catch(() => undefined);
   }
 
   /** The replica of an open section, for reading (a plan reads it; it never writes it). */
@@ -308,8 +373,29 @@ export class SectionHost {
   /** Connects and starts the sync driver. */
   start(): void {
     if (this.#stopped) throw new Error("the section host is stopped");
+    this.#started = true;
     this.#client.start();
-    this.#stopDriver ??= startSyncDriver(this.#client, this.#timers, this.#o.tickMs ?? 1000);
+    // The liveness probe runs on the sync driver's timer, after each tick.
+    const timers = this.#timers;
+    this.#stopDriver ??= startSyncDriver(
+      this.#client,
+      {
+        now: () => timers.now(),
+        setInterval: (fn, ms) =>
+          timers.setInterval(() => {
+            fn();
+            this.#probing();
+          }, ms),
+        clearInterval: (h) => timers.clearInterval(h),
+      },
+      this.#o.tickMs ?? 1000,
+    );
+  }
+
+  /** A connection that answers nothing is dropped and made again (liveness.ts). */
+  #probing(): void {
+    if (!this.#probe.tick(this.#timers.now(), this.#client.connectionState === "READY"))
+      this.#reconnectNow();
   }
 
   /**
