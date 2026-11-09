@@ -8,5 +8,5 @@
     "sourceMap": false,
     "types": ["node"]
   },
-  "include": ["packages/*/test/**/*.ts", "vitest.config.ts"]
+  "include": ["packages/*/test/**/*.ts", "packages/*/test-support/**/*.ts", "vitest.config.ts"]
 }

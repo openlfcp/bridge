@@ -12,6 +12,11 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    }
+    },
+    "./fake": {
+      "types": "./dist/fake/index.d.ts",
+      "import": "./dist/fake/index.js"
+    },
+    "./test-support": "./test-support/contract.ts"
   }
 }

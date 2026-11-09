@@ -4,3 +4,7 @@
  * (`transport.ts`) and capability declaration (`capabilities.ts`).
  */
 export const PACKAGE = "@openlfcp/bridge-reminders";
+
+export * from "./capabilities.js";
+export * from "./transport.js";
+export * from "./values.js";
