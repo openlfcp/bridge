@@ -1,0 +1,21 @@
+name: helper
+
+on:
+  push:
+    paths: ["helper/**", ".github/workflows/helper.yml"]
+  pull_request:
+    paths: ["helper/**", ".github/workflows/helper.yml"]
+
+jobs:
+  helper-core:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build arm64 + x86_64 with swiftc and run HelperCore tests
+        working-directory: helper
+        run: scripts/build.sh
+      - name: SwiftPM build and tests (additional check)
+        working-directory: helper
+        run: |
+          swift build -c release
+          swift run -c release helper-core-tests
