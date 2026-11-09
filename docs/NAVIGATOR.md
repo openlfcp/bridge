@@ -19,7 +19,7 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 | Path | What | PR |
 |---|---|---|
 | `src/cli.ts`, `src/commands.ts`, `src/exit.ts` | the command table and exit codes; later commands answer "not available in this build" | 1 |
-| `src/db/` | `bridge.sqlite`: schema, migrations, holds, journal, STOP | 2 |
+| `src/db/` | `bridge.sqlite` on better-sqlite3 (WAL, synchronous=FULL, foreign keys): `schema.ts` (migrations over `user_version`, each with its `down`), `database.ts` (open, `migrateTo`, newer schema refused), `holds.ts` (a set per binding), `journal.ts`, `stop.ts` (the STOP file) | 2 |
 | `src/lfcp/` | SectionHost, `commitGuarded`, readiness, delivery; SDK gap fallbacks (G1: the pairing journal) until sdk-ts ships them | 3a, 3b |
 | `src/executor/` | intents, recovery, guards, limits, Safe Mode | 7 |
 
