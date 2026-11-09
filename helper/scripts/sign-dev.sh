@@ -34,10 +34,35 @@ for arg in "$@"; do
   esac
 done
 
+# The real file a keychain path names: symlinks followed, "." and ".." resolved (no realpath on macOS 12).
+canonical() {
+  local p="$1" target i=0 dir
+  while [ -L "$p" ] && [ "$i" -lt 40 ]; do
+    target="$(readlink "$p")"
+    case "$target" in /*) p="$target" ;; *) p="$(dirname "$p")/$target" ;; esac
+    i=$((i + 1))
+  done
+  dir="$(dirname "$p")"
+  if [ -d "$dir" ]; then dir="$(cd "$dir" && pwd -P)"; fi
+  printf '%s/%s\n' "$dir" "$(basename "$p")"
+}
+
+# Is $KEYCHAIN the login keychain, however it is spelled? Compared by canonical path with both the
+# conventional location and what `security login-keychain` reports.
+is_login_keychain() {
+  local k login reported
+  k="$(canonical "$KEYCHAIN")"
+  login="$(canonical "$LOGIN_KEYCHAIN")"
+  [ "$k" = "$login" ] && return 0
+  reported="$(security login-keychain 2>/dev/null | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//' | head -1)"
+  [ -n "$reported" ] && [ "$k" = "$(canonical "$reported")" ] && return 0
+  return 1
+}
+
 if security find-certificate -c "$IDENTITY" "$KEYCHAIN" >/dev/null 2>&1; then
   echo "== certificate \"$IDENTITY\" already in $KEYCHAIN"
 else
-  if [ "$KEYCHAIN" = "$LOGIN_KEYCHAIN" ] && [ "$allow_login" != 1 ]; then
+  if is_login_keychain && [ "$allow_login" != 1 ]; then
     echo "sign-dev: \"$IDENTITY\" is not in the login keychain, and this script does not add to it" >&2
     echo "  without consent. To create it there once, run:  scripts/sign-dev.sh --login-keychain" >&2
     echo "  (or set SIGN_KEYCHAIN to another keychain)" >&2

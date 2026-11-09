@@ -21,6 +21,7 @@ for cmd in security codesign; do
 { echo "$cmd"; for a in "\$@"; do echo "  [\$a]"; done; } >> "$LOG"
 case "$cmd \$1" in
   "security find-certificate") [ -f "$T/have-cert" ] && exit 0 || exit 44 ;;
+  "security login-keychain") printf '    "%s"\n' "$LOGIN" ;;
   "security list-keychains")
     if [ "\${3:-}" = "-s" ]; then exit 0; fi
     printf '    "%s"\n' "$LOGIN" "/tmp/Personal Keys.keychain-db" ;;
@@ -79,6 +80,19 @@ expect_restore="  [list-keychains]|  [-d]|  [user]|  [-s]|  [$LOGIN]|  [/tmp/Per
 if [ $rc -eq 0 ] && [[ "$sets" == *"$expect_add"* ]] && [[ "$sets" == *"$expect_restore" ]]; then
   ok "A4 paths with spaces stay whole when adding and when restoring the search list"
 else bad "A4 (rc=$rc): $sets"; fi
+
+# A6–A8: other spellings of the login keychain need the flag too (review 5b r2, P2-1)
+: > "$LOGIN"
+ln -s "$LOGIN" "$T/login-link.keychain-db"
+for alias in "$T/home/Library/Keychains/./login.keychain-db" \
+             "$T/home/Library/Keychains/../Keychains/login.keychain-db" \
+             "$T/login-link.keychain-db"; do
+  rm -f "$T/have-cert"
+  run SIGN_KEYCHAIN="$alias"; rc=$?
+  if [ $rc -eq 3 ] && ! grep -q '\[import\]' "$LOG"; then
+    ok "A6-8 login keychain spelled as $(basename "$(dirname "$alias")")/$(basename "$alias") still needs --login-keychain"
+  else bad "A6-8 alias $alias (rc=$rc): $(cat "$T/out.txt")"; fi
+done
 
 # A5: unknown flag
 run; env PATH="$T/bin:$PATH" HOME="$T/home" "$HELPER/scripts/sign-dev.sh" --yes > "$T/out.txt" 2>&1; rc=$?
