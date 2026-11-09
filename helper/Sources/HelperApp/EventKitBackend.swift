@@ -218,10 +218,11 @@ final class EventKitBackend: Backend {
     // MARK: Backend writes
 
     func createList(title: String) throws -> ListInfo {
-        if store.calendars(for: .reminder).contains(where: { $0.title == title }) {
-            throw HelperError(.listExists, "a reminder list titled \"\(title)\" already exists", ["title": .string(title)])
-        }
+        // Every attempt re-checks the title: after -3002 and reset() the list may exist already.
         let (cal, _) = try write { () -> EKCalendar in
+            if store.calendars(for: .reminder).contains(where: { $0.title == title }) {
+                throw HelperError(.listExists, "a reminder list titled \"\(title)\" already exists", ["title": .string(title)])
+            }
             let c = EKCalendar(for: .reminder, eventStore: store)
             c.title = title
             guard let src = store.defaultCalendarForNewReminders()?.source
@@ -236,21 +237,30 @@ final class EventKitBackend: Backend {
         return info(cal)
     }
 
+    /// The reminder with this url in the list, read fresh (inside a write attempt).
+    private func existing(url: String, in cal: EKCalendar) throws -> EKReminder? {
+        try fetch([cal]).first { $0.url?.absoluteString == url }
+    }
+
     func create(list: String, linkUrl: String, set: WritableSet, writeGuard: (ListInfo) throws -> Void) throws -> WriteResult {
-        let cal = try calendar(list)
-        try writeGuard(info(cal))
-        if let it = try find(.url(linkUrl), lists: [list]).first {
-            return WriteResult(item: it, written: ["linkUrl": .string(linkUrl), "title": .string(it.title)], existing: true)
-        }
-        let (item, retries) = try write { () -> ItemState in
+        // List, guard and the search for an existing record belong to every attempt: during the
+        // pause after -3002 the list may be renamed out of scope or the record may appear.
+        let ((item, existed), retries) = try write { () -> (ItemState, Bool) in
+            let cal = try calendar(list)
+            try writeGuard(info(cal))
+            if let r = try existing(url: linkUrl, in: cal) { return (state(r), true) }
             let r = EKReminder(eventStore: store)
-            r.calendar = try calendar(list)
+            r.calendar = cal
             let blank = ItemState(id: "", listId: list, title: "")
             var target = try FieldApplier.apply(set, to: blank, now: Date(), zone: zone).item
             target.linkUrl = linkUrl
             try writeBack(target, old: blank, to: r)
             try store.save(r, commit: true)
-            return state(r)
+            return (state(r), false)
+        }
+        if existed {
+            return WriteResult(item: item, written: ["linkUrl": .string(linkUrl), "title": .string(item.title)], existing: true,
+                               retries: retries)
         }
         var written = FieldApplier.written(set, item)
         if case .object(var o) = written { o["linkUrl"] = .string(linkUrl); written = .object(o) }
@@ -286,20 +296,19 @@ final class EventKitBackend: Backend {
     }
 
     func createMarker(list: String, markerUrl: String, writeGuard: (ListInfo) throws -> Void) throws -> WriteResult {
-        let cal = try calendar(list)
-        try writeGuard(info(cal))
-        if let it = try find(.url(markerUrl), lists: [list]).first {
-            return WriteResult(item: it, written: ["linkUrl": .string(markerUrl)], existing: true)
-        }
-        let (item, retries) = try write { () -> ItemState in
+        let ((item, existed), retries) = try write { () -> (ItemState, Bool) in
+            let cal = try calendar(list)
+            try writeGuard(info(cal))
+            if let r = try existing(url: markerUrl, in: cal) { return (state(r), true) }
             let r = EKReminder(eventStore: store)
-            r.calendar = try calendar(list)
+            r.calendar = cal
             r.title = Marker.title
             r.url = URL(string: markerUrl)
             r.isCompleted = true
             try store.save(r, commit: true)
-            return state(r)
+            return (state(r), false)
         }
+        if existed { return WriteResult(item: item, written: ["linkUrl": .string(markerUrl)], existing: true, retries: retries) }
         return WriteResult(item: item, written: ["linkUrl": .string(markerUrl), "title": .string(Marker.title)], retries: retries)
     }
 

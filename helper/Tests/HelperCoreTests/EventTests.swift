@@ -125,3 +125,54 @@ func registerGateTests() {
         try expectEqual(Rig(hello: false).errorCode(["op": "hello", "writes": "yes"]), "invalid")
     }
 }
+
+func registerRetryRecheckTests() {
+    /// Verification mode: writes only to "LFCP Verify · …" lists, checked by title on every write.
+    func verificationRig() -> Rig {
+        let rig = Rig(hello: false)
+        rig.backend.requiresWriteGate = true
+        _ = rig.ok(["op": "hello", "allowListTitlePrefixes": ["LFCP Verify · "], "writes": "verification"])
+        return rig
+    }
+
+    test("retry: create rechecks the list after the pause (renamed out of verification scope -> forbidden_list)") {
+        let rig = verificationRig()
+        let l = rig.bridgeList("LFCP Verify · X")
+        _ = rig.ok(["op": "debug.failNext", "target": "create", "transient": 1,
+                    "meanwhile": ["renameList": ["list": .string(l), "title": "Groceries"]]])
+        let r = rig.send(["op": "items.create", "list": .string(l), "linkUrl": "lfcp://task/RT1", "opKey": "c",
+                          "set": ["title": "a"]])
+        try expectEqual(r["error"]?["code"], "forbidden_list")
+        try expectEqual(rig.ok(["op": "items.snapshot", "list": .string(l)])["count"], 0)
+    }
+
+    test("retry: create finds a record that appeared during the pause (existing, no duplicate)") {
+        let rig = Rig()
+        let l = rig.bridgeList()
+        _ = rig.ok(["op": "debug.failNext", "target": "create", "transient": 1,
+                    "meanwhile": ["userCreate": ["list": .string(l), "title": "made elsewhere", "url": "lfcp://task/RT2"]]])
+        let r = rig.ok(["op": "items.create", "list": .string(l), "linkUrl": "lfcp://task/RT2", "opKey": "c",
+                        "set": ["title": "a"]])
+        try expectEqual(r["existing"], .bool(true))
+        try expectEqual(rig.ok(["op": "items.find", "url": "lfcp://task/RT2"])["count"], 1)
+    }
+
+    test("retry: createMarker rechecks the list after the pause") {
+        let rig = verificationRig()
+        let l = rig.bridgeList("LFCP Verify · X")
+        _ = rig.ok(["op": "debug.failNext", "target": "marker", "transient": 1,
+                    "meanwhile": ["renameList": ["list": .string(l), "title": "Personal"]]])
+        let r = rig.send(["op": "markers.create", "list": .string(l), "markerUrl": "lfcp://bridge/x?r=R", "opKey": "m"])
+        try expectEqual(r["error"]?["code"], "forbidden_list")
+    }
+
+    test("retry: createList rechecks the title after the pause (taken meanwhile -> list_exists)") {
+        let rig = Rig()
+        _ = rig.ok(["op": "debug.failNext", "target": "createList", "transient": 1,
+                    "meanwhile": ["createList": ["title": "LFCP · Race"]]])
+        let r = rig.send(["op": "lists.create", "title": "LFCP · Race", "opKey": "k"])
+        try expectEqual(r["error"]?["code"], "list_exists")
+        let same = rig.ok(["op": "lists.list"])["lists"]!.arrayValue!.filter { $0["title"] == "LFCP · Race" }
+        try expectEqual(same.count, 1)
+    }
+}

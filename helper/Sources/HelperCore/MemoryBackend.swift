@@ -16,6 +16,8 @@ public final class MemoryBackend: Backend {
     private var listOrder: [String] = []
     private var itemsById: [String: ItemState] = [:]
     private var lastStampMs: Int64 = 0
+    /// Runs once when the next injected failure fires: "the person did something during the pause".
+    private var meanwhile: [String: JSON]?
     private var transientFailures: [String: Int] = [:]   // "create"|"update"|"restoreUrl"|"marker"|"any" -> count
     private let retry: RetryPolicy
     private let zone: TimeZone
@@ -65,10 +67,29 @@ public final class MemoryBackend: Backend {
         for key in [op, "any"] {
             if let n = transientFailures[key], n > 0 {
                 transientFailures[key] = n - 1
+                if let m = meanwhile {
+                    meanwhile = nil
+                    try runMeanwhile(m)
+                }
                 throw NSError(domain: "com.apple.reminderkit", code: -3002,
                               userInfo: [NSLocalizedDescriptionKey: "simulated database conflict"])
             }
         }
+    }
+
+    /// Edits made between a failed attempt and its retry (test hook, see debug.failNext).
+    private func runMeanwhile(_ m: [String: JSON]) throws {
+        if let r = m["renameList"]?.objectValue, let id = r["list"]?.stringValue, let title = r["title"]?.stringValue,
+           let l = listsById[id] {
+            listsById[id] = ListInfo(id: l.id, title: title, sourceTitle: l.sourceTitle, sourceType: l.sourceType,
+                                     allowsContentModifications: l.allowsContentModifications, isDefault: l.isDefault)
+        }
+        if let c = m["userCreate"]?.objectValue, let list = c["list"]?.stringValue, let title = c["title"]?.stringValue {
+            var it = ItemState(id: nextId("R"), externalId: nextId("X"), listId: list, title: title)
+            it.linkUrl = c["url"]?.stringValue
+            _ = store(it)
+        }
+        if let title = m["createList"]?.objectValue?["title"]?.stringValue { addList(title: title) }
     }
 
     private func resolve(_ ref: ItemRef) throws -> ItemState {
@@ -109,10 +130,14 @@ public final class MemoryBackend: Backend {
     }
 
     public func createList(title: String) throws -> ListInfo {
-        if try lists().contains(where: { $0.title == title }) {
-            throw HelperError(.listExists, "a reminder list titled \"\(title)\" already exists", ["title": .string(title)])
+        // The title check is part of every attempt: the list may appear during a retry pause.
+        let (l, _) = try retry.run(isTransient: isReminderKitConflict, reset: {}) { () -> ListInfo in
+            if try lists().contains(where: { $0.title == title }) {
+                throw HelperError(.listExists, "a reminder list titled \"\(title)\" already exists", ["title": .string(title)])
+            }
+            try maybeFail("createList")
+            return addList(title: title)
         }
-        let l = addList(title: title)
         notify()
         return l
     }
@@ -140,16 +165,19 @@ public final class MemoryBackend: Backend {
 
     public func create(list: String, linkUrl: String, set: WritableSet,
                        writeGuard: (ListInfo) throws -> Void) throws -> WriteResult {
-        let l = try self.list(id: list)
-        try writeGuard(l)
-        if let it = try find(.url(linkUrl), lists: [list]).first {
-            return WriteResult(item: it, written: ["linkUrl": .string(linkUrl), "title": .string(it.title)], existing: true)
-        }
-        let (item, retries) = try retry.run(isTransient: isReminderKitConflict, reset: {}) { () -> ItemState in
+        // List, guard and the search for an existing record are part of every attempt: during a
+        // retry pause the list may be renamed out of scope or the record may appear.
+        let ((item, existing), retries) = try retry.run(isTransient: isReminderKitConflict, reset: {}) { () -> (ItemState, Bool) in
+            try writeGuard(try self.list(id: list))
+            if let it = try find(.url(linkUrl), lists: [list]).first { return (it, true) }
             try maybeFail("create")
             var blank = ItemState(id: nextId("R"), externalId: nextId("X"), listId: list, title: "")
             blank.linkUrl = linkUrl
-            return store(try FieldApplier.apply(set, to: blank, now: Date(), zone: zone).item)
+            return (store(try FieldApplier.apply(set, to: blank, now: Date(), zone: zone).item), false)
+        }
+        if existing {
+            return WriteResult(item: item, written: ["linkUrl": .string(linkUrl), "title": .string(item.title)], existing: true,
+                               retries: retries)
         }
         notify()
         var written = FieldApplier.written(set, item)
@@ -192,19 +220,17 @@ public final class MemoryBackend: Backend {
 
     public func createMarker(list: String, markerUrl: String,
                              writeGuard: (ListInfo) throws -> Void) throws -> WriteResult {
-        let l = try self.list(id: list)
-        try writeGuard(l)
-        if let it = try find(.url(markerUrl), lists: [list]).first {
-            return WriteResult(item: it, written: ["linkUrl": .string(markerUrl)], existing: true)
-        }
-        let (item, retries) = try retry.run(isTransient: isReminderKitConflict, reset: {}) { () -> ItemState in
+        let ((item, existing), retries) = try retry.run(isTransient: isReminderKitConflict, reset: {}) { () -> (ItemState, Bool) in
+            try writeGuard(try self.list(id: list))
+            if let it = try find(.url(markerUrl), lists: [list]).first { return (it, true) }
             try maybeFail("marker")
             var it = ItemState(id: nextId("R"), externalId: nextId("X"), listId: list, title: Marker.title)
             it.linkUrl = markerUrl
             it.completed = true
             it.completionDate = Date()
-            return store(it)
+            return (store(it), false)
         }
+        if existing { return WriteResult(item: item, written: ["linkUrl": .string(markerUrl)], existing: true, retries: retries) }
         notify()
         return WriteResult(item: item, written: ["linkUrl": .string(markerUrl), "title": .string(Marker.title)], retries: retries)
     }
@@ -241,6 +267,7 @@ public final class MemoryBackend: Backend {
             let op = body["target"]?.stringValue ?? "any"   // "op" is the request's own name
             let n = body["transient"]?.intValue ?? 1
             transientFailures[op] = n
+            meanwhile = body["meanwhile"]?.objectValue
             return ["target": .string(op), "transient": .int(n)]
 
         case "addList":
