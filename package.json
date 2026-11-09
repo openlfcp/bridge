@@ -31,7 +31,6 @@
       "@openlfcp/storage": "0.5.2",
       "@openlfcp/storage-node": "0.5.2",
       "@openlfcp/wire": "0.5.2"
-    },
-    "onlyBuiltDependencies": []
+    }
   }
 }

@@ -23,6 +23,10 @@
     "@openlfcp/core": "0.5.2",
     "@openlfcp/shared-objects": "0.5.2",
     "@openlfcp/storage": "0.5.2",
-    "@openlfcp/storage-node": "0.5.2"
+    "@openlfcp/storage-node": "0.5.2",
+    "better-sqlite3": "13.0.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "9.6.0"
   }
 }
