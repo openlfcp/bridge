@@ -18,6 +18,7 @@ public enum ErrorCode: String {
     case notFound = "not_found"
     case listNotFound = "list_not_found"
     case listExists = "list_exists"               // lists.create: the title is taken (never adopt by title)
+    case writesDisabled = "writes_disabled"       // EventKit writes not enabled by hello (D-010 r4 §7.6)
     case ambiguous                   // a ref matches several reminders
     case forbiddenList = "forbidden_list"
     case conflictChanged = "conflict_changed"     // expect.rev does not match
@@ -140,7 +141,7 @@ public enum FindQuery: Equatable {
 /// A parsed request. Unknown top-level keys are ignored (forward compatibility); unknown
 /// keys inside `set` are rejected (a field the host believes written must not be dropped).
 public enum Operation: Equatable {
-    case hello(allowListIds: [String], allowListTitlePrefixes: [String])
+    case hello(allowListIds: [String], allowListTitlePrefixes: [String], writes: WriteMode)
     case ping
     case shutdown
     case accessStatus
@@ -156,6 +157,19 @@ public enum Operation: Equatable {
     case markersCreate(list: String, markerUrl: String, opKey: String)
     case markersRetire(ItemRef, markerUrl: String, opKey: String, expect: String)
     case debug(name: String, body: [String: JSON])   // memory backend only
+}
+
+/// Write gate for backends that need it (EventKit, D-010 r4 §7.6). The host decides; the helper
+/// enforces it as a second line of defence.
+public enum WriteMode: String {
+    /// No writes (default until hello says otherwise).
+    case off
+    /// Verification run: writes only to lists titled "LFCP Verify · …".
+    case verification
+    /// writesVerified is set on the host: writes to the allowed lists.
+    case verified
+
+    public static let verificationListPrefix = "LFCP Verify · "
 }
 
 /// URL prefixes the bridge owns (D-010 r4 §3).
@@ -216,7 +230,14 @@ public struct Request {
         case "hello":
             let ids = (o["allowListIds"]?.arrayValue ?? []).compactMap(\.stringValue)
             let prefixes = (o["allowListTitlePrefixes"]?.arrayValue ?? []).compactMap(\.stringValue).filter { !$0.isEmpty }
-            return .hello(allowListIds: ids, allowListTitlePrefixes: prefixes)
+            var writes = WriteMode.off
+            if let w = o["writes"] {
+                guard let s = w.stringValue, let m = WriteMode(rawValue: s) else {
+                    throw invalid("writes must be \"off\", \"verification\" or \"verified\"")
+                }
+                writes = m
+            }
+            return .hello(allowListIds: ids, allowListTitlePrefixes: prefixes, writes: writes)
         case "ping": return .ping
         case "shutdown": return .shutdown
         case "access.status": return .accessStatus

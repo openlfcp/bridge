@@ -90,3 +90,38 @@ func registerRetryTests() {
         try expect(isReminderKitConflict(nested), "underlying -3002 not recognised")
     }
 }
+
+func registerGateTests() {
+    func gatedRig(_ writes: String?) -> Rig {
+        let rig = Rig(hello: false)
+        rig.backend.requiresWriteGate = true
+        var hello: [String: JSON] = ["op": "hello", "allowListTitlePrefixes": ["LFCP · ", "LFCP Verify · "]]
+        if let w = writes { hello["writes"] = .string(w) }
+        _ = rig.ok(hello)
+        return rig
+    }
+
+    test("gate: a gated backend refuses every write until hello enables writes") {
+        let rig = gatedRig(nil)
+        try expectEqual(rig.ok(["op": "hello", "allowListTitlePrefixes": ["LFCP · "]])["writes"], "off")
+        try expectEqual(rig.errorCode(["op": "lists.create", "title": "LFCP · Inbox", "opKey": "k"]), "writes_disabled")
+        // reads still work
+        try expectEqual(rig.ok(["op": "lists.list"])["complete"], .bool(true))
+    }
+
+    test("gate: verification writes only to \"LFCP Verify · …\" lists") {
+        let rig = gatedRig("verification")
+        try expectEqual(rig.errorCode(["op": "lists.create", "title": "LFCP · Inbox", "opKey": "k1"]), "forbidden_list")
+        let l = rig.bridgeList("LFCP Verify · Test")
+        let item = rig.create(l, ["title": "a"])
+        try expectEqual(item["title"], "a")
+    }
+
+    test("gate: verified writes to allowed lists; ungated backends report it") {
+        let rig = gatedRig("verified")
+        let l = rig.bridgeList("LFCP · Inbox")
+        try expectEqual(rig.create(l, ["title": "a"])["title"], "a")
+        try expectEqual(Rig().ok(["op": "hello"])["writes"], "ungated")
+        try expectEqual(Rig(hello: false).errorCode(["op": "hello", "writes": "yes"]), "invalid")
+    }
+}

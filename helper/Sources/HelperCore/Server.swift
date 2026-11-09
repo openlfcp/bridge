@@ -13,6 +13,7 @@ public final class Server {
     // Write allowlist (second line of defense, D-010 §8.1). Empty until `hello`.
     private var allowListIds: Set<String> = []
     private var allowTitlePrefixes: [String] = []
+    private var writeMode: WriteMode = .off
 
     private var changePending = false
     private var changeSeq = 0
@@ -103,7 +104,23 @@ public final class Server {
         allowListIds.contains(list.id) || allowTitlePrefixes.contains { list.title.hasPrefix($0) }
     }
 
+    /// Before any write: the gate (EventKit) and, in verification, the dedicated test lists only.
+    private func requireWrites(title: String? = nil) throws {
+        guard backend.requiresWriteGate else { return }
+        switch writeMode {
+        case .off:
+            throw HelperError(.writesDisabled, "writes are disabled until the host enables them (hello writes)")
+        case .verification:
+            if let t = title, !t.hasPrefix(WriteMode.verificationListPrefix) {
+                throw HelperError(.forbiddenList, "verification writes only go to \"\(WriteMode.verificationListPrefix)…\" lists")
+            }
+        case .verified:
+            break
+        }
+    }
+
     private func writeGuard(_ list: ListInfo) throws {
+        try requireWrites(title: list.title)
         guard isAllowed(list) else {
             throw HelperError(.forbiddenList, "list \"\(list.title)\" is not allowed for writes (see hello)", ["list": .string(list.id)])
         }
@@ -114,12 +131,14 @@ public final class Server {
 
     private func perform(_ op: Operation) throws -> [String: JSON] {
         switch op {
-        case .hello(let ids, let prefixes):
+        case .hello(let ids, let prefixes, let writes):
             allowListIds = Set(ids)
             allowTitlePrefixes = prefixes
+            writeMode = writes
             return ["protocol": .int(HelperInfo.protocolVersion), "helperVersion": .string(HelperInfo.version),
                     "backend": .string(backend.name), "cas": .string(backend.cas),
                     "authorization": .string(backend.authorization.rawValue),
+                    "writes": .string(backend.requiresWriteGate ? writeMode.rawValue : "ungated"),
                     "allow": ["listIds": .array(allowListIds.sorted().map(JSON.string)),
                               "titlePrefixes": .array(prefixes.map(JSON.string))]]
         case .ping:
@@ -140,6 +159,7 @@ public final class Server {
             guard allowTitlePrefixes.contains(where: { title.hasPrefix($0) }) else {
                 throw HelperError(.forbiddenList, "title \"\(title)\" does not match an allowed prefix (see hello)")
             }
+            try requireWrites(title: title)
             let list = try backend.createList(title: title)
             allowListIds.insert(list.id)
             return ["opKey": .string(opKey), "list": list.json]

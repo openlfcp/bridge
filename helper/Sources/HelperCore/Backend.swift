@@ -21,6 +21,8 @@ public protocol Backend: AnyObject {
     var name: String { get }
     /// "strong" when the expect check and the write are one atomic step; "best-effort" otherwise (EventKit).
     var cas: String { get }
+    /// True when writes need hello `writes` ≠ off (EventKit); false for the memory backend.
+    var requiresWriteGate: Bool { get }
     var authorization: Authorization { get }
     /// Set by the server; called (on any thread) whenever the store may have changed,
     /// including after the backend's own writes (EventKit posts EKEventStoreChanged for them too).

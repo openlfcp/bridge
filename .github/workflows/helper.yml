@@ -7,14 +7,23 @@ on:
     paths: ["helper/**", ".github/workflows/helper.yml"]
 
 jobs:
-  helper-core:
+  helper:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Build arm64 + x86_64 with swiftc and run HelperCore tests
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: HelperCore tests (swiftc, arm64 + x86_64; runs the native slice)
         working-directory: helper
         run: scripts/build.sh
-      - name: SwiftPM build and tests (additional check)
+      - name: Build the app (arm64 + x86_64, ad-hoc signature)
+        working-directory: helper
+        run: scripts/build-app.sh
+      - name: Smoke test the app without Reminders access
+        working-directory: helper
+        run: node scripts/smoke.mjs
+      - name: SwiftPM build and tests (additional check; tests are an executable, not `swift test`)
         working-directory: helper
         run: |
           swift build -c release

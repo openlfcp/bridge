@@ -7,6 +7,8 @@ import Foundation
 public final class MemoryBackend: Backend {
     public let name = "memory"
     public let cas = "strong"
+    /// Tests may turn the gate on to exercise it.
+    public var requiresWriteGate = false
     public var onChange: (() -> Void)?
     public private(set) var authorization: Authorization
 

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>org.openlfcp.bridge.reminders</string>
+	<key>CFBundleName</key>
+	<string>LFCP Reminders Helper</string>
+	<key>CFBundleDisplayName</key>
+	<string>LFCP Reminders Helper</string>
+	<key>CFBundleExecutable</key>
+	<string>lfcp-reminders-helper</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>12.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>The LFCP bridge keeps the reminders of your shared LFCP sections in sync. It reads and writes only the lists it created ("LFCP · …").</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>The LFCP bridge keeps the reminders of your shared LFCP sections in sync. It reads and writes only the lists it created ("LFCP · …").</string>
+</dict>
+</plist>

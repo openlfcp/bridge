@@ -12,7 +12,10 @@ let package = Package(
     targets: [
         // Pure protocol core: JSON, protocol v2, field rules, memory backend. No EventKit.
         .target(name: "HelperCore", path: "Sources/HelperCore"),
-        // XCTest is not available with Command Line Tools only, so the tests are an executable.
+        // The helper executable (the .app bundle itself is assembled by scripts/build-app.sh).
+        .executableTarget(name: "lfcp-reminders-helper", dependencies: ["HelperCore"], path: "Sources/HelperApp"),
+        // XCTest is not available with Command Line Tools only, so the tests are an executable:
+        // `swift run helper-core-tests`, not `swift test` (which finds no test targets).
         .executableTarget(name: "helper-core-tests", dependencies: ["HelperCore"], path: "Tests/HelperCoreTests"),
     ]
 )

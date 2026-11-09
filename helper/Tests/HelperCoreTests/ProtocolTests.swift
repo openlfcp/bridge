@@ -111,6 +111,7 @@ func registerProtocolTests() {
             let inner = MemoryBackend(retry: RetryPolicy(delays: [], sleep: { _ in }))
             var name: String { "eventkit" }
             var cas: String { "best-effort" }
+            var requiresWriteGate: Bool { false }
             var authorization: Authorization { inner.authorization }
             var onChange: (() -> Void)? { get { inner.onChange } set { inner.onChange = newValue } }
             func requestAccess(timeout: TimeInterval) throws -> (granted: Bool, api: String) { try inner.requestAccess(timeout: timeout) }
