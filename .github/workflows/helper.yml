@@ -20,6 +20,9 @@ jobs:
       - name: Build the app (arm64 + x86_64, ad-hoc signature)
         working-directory: helper
         run: scripts/build-app.sh
+      - name: sign-dev.sh (stubbed security; a throwaway keychain, never the login keychain)
+        working-directory: helper
+        run: scripts/test-sign-dev.sh --real
       - name: Smoke test the app without Reminders access
         working-directory: helper
         run: node scripts/smoke.mjs
