@@ -1,0 +1,17 @@
+{
+  "name": "@openlfcp/bridge-transport-eventkit",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The EventKit transport of lfcp-bridge: the Node side of the Swift helper (protocol v2).",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  }
+}

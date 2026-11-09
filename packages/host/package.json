@@ -1,0 +1,28 @@
+{
+  "name": "@openlfcp/bridge",
+  "version": "0.0.0",
+  "private": true,
+  "description": "lfcp-bridge: the CLI, the long-running process, the bridge database, the guards and the LFCP side.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "lfcp-bridge": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@openlfcp/bridge-reminders": "workspace:*",
+    "@openlfcp/client": "0.5.2",
+    "@openlfcp/core": "0.5.2",
+    "@openlfcp/shared-objects": "0.5.2",
+    "@openlfcp/storage": "0.5.2",
+    "@openlfcp/storage-node": "0.5.2"
+  }
+}

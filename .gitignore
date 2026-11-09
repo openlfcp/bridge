@@ -6,3 +6,6 @@ helper/.build/
 helper/build/
 # macOS
 .DS_Store
+# TypeScript incremental build
+*.tsbuildinfo
+.tsbuildinfo

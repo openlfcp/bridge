@@ -1,0 +1,37 @@
+{
+  "name": "openlfcp-bridge",
+  "version": "0.0.0",
+  "private": true,
+  "description": "lfcp-bridge: LFCP shared sections <-> Apple apps, as one more device of the person (workspace root).",
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@10.33.4",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "lint": "biome check . && node scripts/check-boundaries.mjs && node scripts/check-boundaries.mjs --self-test",
+    "format": "biome check --write ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15",
+    "@types/node": "24.19.1",
+    "typescript": "5.9.3",
+    "vitest": "5.0.3"
+  },
+  "pnpm": {
+    "overrides": {
+      "@openlfcp/client": "0.5.2",
+      "@openlfcp/core": "0.5.2",
+      "@openlfcp/crypto": "0.5.2",
+      "@openlfcp/shared-objects": "0.5.2",
+      "@openlfcp/storage": "0.5.2",
+      "@openlfcp/storage-node": "0.5.2",
+      "@openlfcp/wire": "0.5.2"
+    },
+    "onlyBuiltDependencies": []
+  }
+}

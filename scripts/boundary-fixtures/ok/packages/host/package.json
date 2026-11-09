@@ -1,0 +1,1 @@
+{ "name": "@openlfcp/bridge", "dependencies": { "@openlfcp/bridge-reminders": "workspace:*", "@openlfcp/bridge-transport-eventkit": "workspace:*", "@openlfcp/client": "0.5.2" } }

@@ -1,0 +1,8 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/reminders" },
+    { "path": "packages/transport-eventkit" },
+    { "path": "packages/host" }
+  ]
+}
