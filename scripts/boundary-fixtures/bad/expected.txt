@@ -1,7 +1,10 @@
 packages/extra/package.json:1 unknown-package: extra is not in ALLOWED
 packages/host/src/index.ts:1 relative: ../../reminders/src/index.js leaves packages/host
 packages/reminders/package.json:1 graph: reminders may not depend on @openlfcp/bridge
+packages/reminders/src/multiline.ts:4 graph: reminders may not import @openlfcp/bridge
+packages/reminders/src/multiline.ts:6 graph: reminders may not import @openlfcp/bridge
 packages/reminders/test/a.test.ts:1 graph: reminders may not import @openlfcp/bridge
 packages/transport-eventkit/src/index.ts:1 subpath: transport-eventkit may import @openlfcp/bridge-reminders only as @openlfcp/bridge-reminders/transport or @openlfcp/bridge-reminders/capabilities
 packages/transport-eventkit/src/index.ts:2 subpath: transport-eventkit may import @openlfcp/bridge-reminders only as @openlfcp/bridge-reminders/transport or @openlfcp/bridge-reminders/capabilities
 packages/transport-eventkit/src/index.ts:3 graph: transport-eventkit may not import @openlfcp/bridge
+packages/transport-eventkit/src/multiline.ts:3 subpath: transport-eventkit may import @openlfcp/bridge-reminders only as @openlfcp/bridge-reminders/transport or @openlfcp/bridge-reminders/capabilities

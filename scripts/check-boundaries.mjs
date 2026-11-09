@@ -16,6 +16,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 /** The workspace packages (by directory) and the workspace packages each may use. */
 export const ALLOWED = {
@@ -31,8 +32,19 @@ export const ALLOWED = {
 export const TRANSPORT_SUBPATHS = ["transport", "capabilities"];
 
 const SOURCE = /\.(ts|mts|cts|js|mjs|cjs)$/;
-const SPECIFIER =
-  /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*|\bexport\s*\*\s*from\s*)["']([^"']+)["']/g;
+
+/**
+ * Every module specifier of a file with its line: static imports and
+ * re-exports, `import()` and `require()` with a literal, over the whole text
+ * (a specifier on another line than `import` or `from` counts too).
+ */
+function specifiers(text) {
+  const info = ts.preProcessFile(text, true, true);
+  return info.importedFiles.map((f) => ({
+    spec: f.fileName,
+    line: text.slice(0, f.pos).split("\n").length,
+  }));
+}
 
 function filesOf(dir) {
   if (!existsSync(dir)) return [];
@@ -79,35 +91,31 @@ export function check(root) {
     }
     const base = join(root, "packages", dir);
     for (const file of [...filesOf(join(base, "src")), ...filesOf(join(base, "test"))]) {
-      const lines = readFileSync(file, "utf8").split("\n");
-      lines.forEach((line, i) => {
-        for (const m of line.matchAll(SPECIFIER)) {
-          const spec = m[1];
-          const at = `${rel(file)}:${i + 1}`;
-          if (spec.startsWith(".")) {
-            const target = resolve(dirname(file), spec);
-            if (!(target === base || target.startsWith(base + sep)))
-              problems.push(`${at} relative: ${spec} leaves packages/${dir}`);
-            continue;
-          }
-          const name = spec.startsWith("@")
-            ? spec.split("/").slice(0, 2).join("/")
-            : spec.split("/")[0];
-          const target = dirOfName.get(name);
-          if (target === undefined || target === dir) continue;
-          if (!allowed.has(target)) {
-            problems.push(`${at} graph: ${dir} may not import ${name}`);
-            continue;
-          }
-          if (dir.startsWith("transport-") && target === "reminders") {
-            const sub = spec.slice(name.length + 1);
-            if (!TRANSPORT_SUBPATHS.includes(sub))
-              problems.push(
-                `${at} subpath: ${dir} may import ${name} only as ${TRANSPORT_SUBPATHS.map((s) => `${name}/${s}`).join(" or ")}`,
-              );
-          }
+      for (const { spec, line } of specifiers(readFileSync(file, "utf8"))) {
+        const at = `${rel(file)}:${line}`;
+        if (spec.startsWith(".")) {
+          const target = resolve(dirname(file), spec);
+          if (!(target === base || target.startsWith(base + sep)))
+            problems.push(`${at} relative: ${spec} leaves packages/${dir}`);
+          continue;
         }
-      });
+        const name = spec.startsWith("@")
+          ? spec.split("/").slice(0, 2).join("/")
+          : spec.split("/")[0];
+        const target = dirOfName.get(name);
+        if (target === undefined || target === dir) continue;
+        if (!allowed.has(target)) {
+          problems.push(`${at} graph: ${dir} may not import ${name}`);
+          continue;
+        }
+        if (dir.startsWith("transport-") && target === "reminders") {
+          const sub = spec.slice(name.length + 1);
+          if (!TRANSPORT_SUBPATHS.includes(sub))
+            problems.push(
+              `${at} subpath: ${dir} may import ${name} only as ${TRANSPORT_SUBPATHS.map((s) => `${name}/${s}`).join(" or ")}`,
+            );
+        }
+      }
     }
   }
   return problems;
