@@ -93,6 +93,13 @@ export interface BridgeProcessOptions {
   readonly debounceMs?: number;
   readonly maxDelayMs?: number;
   readonly fullEveryMs?: number;
+  /**
+   * How often the control state (STOP, holds, acceptances) is looked at (default 2 s): a change
+   * by `stop` / `resume` / `resume --accept` from another process wakes a full pass.
+   */
+  readonly controlEveryMs?: number;
+  /** Holds lifted by a person since the last look (helper_unavailable: the supervisor resumes). */
+  readonly onHoldsLifted?: (reasons: ReadonlySet<string>) => void;
   readonly timers?: {
     setTimeout(fn: () => void, ms: number): unknown;
     clearTimeout(h: unknown): void;
@@ -150,8 +157,16 @@ export class BridgeProcess {
   readonly #running = new Map<string, Promise<PassOutcome>>();
   readonly #again = new Set<string>();
   readonly #scheduled = new Map<string, { handle: unknown; first: number }>();
-  #unsubscribe: (() => void)[] = [];
+  /** The pass triggers: off first at stop. */
+  #triggers: (() => void)[] = [];
+  /** Delivery and access: on from before the SDK starts until after it stopped (§5.2, §5.9). */
+  #lifecycle: (() => void)[] = [];
   #interval: unknown;
+  #control: unknown;
+  #controlSeen = "";
+  #holdsSeen = new Set<string>();
+  /** start() has made its full pass: triggers before it are covered by that pass. */
+  #ready = false;
   #runId: string | undefined;
   #stopping = false;
 
@@ -209,30 +224,61 @@ export class BridgeProcess {
       const R = resourceId(fromHex(b.resource_id));
       if (host !== undefined && !host.isOpen(R)) await host.open(R);
     }
+    // Subscribed before any exchange starts (§5.2): a batch status of a stored operation can come
+    // at once, and SectionHost does not replay it (review PR 9b #25). Triggers until the full
+    // pass below are covered by it.
+    this.#subscribe();
     for (const i of this.#installations.values()) i.host.start();
     await this.#ownership.checkAll();
     await this.#executor.recoverAll();
     await this.#writeMode();
-    this.#subscribe();
+    this.#ready = true;
     await this.passAll();
     this.#interval = this.#timers.setInterval(
       () => void this.passAll(),
       this.#o.fullEveryMs ?? 15 * 60_000,
     );
+    this.#controlSeen = this.#controlState();
+    this.#holdsSeen = this.#holdKeys();
+    this.#control = this.#timers.setInterval(
+      () => this.#lookAtControl(),
+      this.#o.controlEveryMs ?? 2000,
+    );
   }
 
-  /** Stops it: no new pass, the ones in flight finish, the sections stop, the run is closed. */
+  /**
+   * Stops it: no new pass; the ones in flight finish; the sections stop, delivery still
+   * listening until they have (review PR 9b #25); the run is closed. A pass or a section that
+   * failed makes the run's outcome "failed: …" and stop() rejects with them (review PR 9b #26).
+   */
   async stop(reason = "exit"): Promise<void> {
     this.#stopping = true;
-    for (const u of this.#unsubscribe) u();
-    this.#unsubscribe = [];
+    for (const u of this.#triggers) u();
+    this.#triggers = [];
     if (this.#interval !== undefined) this.#timers.clearInterval(this.#interval);
-    for (const s of this.#scheduled.values()) this.#timers.clearTimeout(s.handle);
+    if (this.#control !== undefined) this.#timers.clearInterval(this.#control);
+    for (const sc of this.#scheduled.values()) this.#timers.clearTimeout(sc.handle);
     this.#scheduled.clear();
     this.#again.clear();
-    await Promise.allSettled([...this.#running.values()]);
-    for (const i of this.#installations.values()) await i.host.stop().catch(() => {});
-    if (this.#runId !== undefined) this.#runs.end(this.#runId, reason);
+    const errors: unknown[] = [];
+    for (const r of await Promise.allSettled([...this.#running.values()]))
+      if (r.status === "rejected") errors.push(r.reason);
+    for (const i of this.#installations.values())
+      try {
+        await i.host.stop();
+      } catch (e) {
+        errors.push(e);
+      }
+    for (const u of this.#lifecycle) u();
+    this.#lifecycle = [];
+    if (this.#runId !== undefined)
+      this.#runs.end(
+        this.#runId,
+        errors.length === 0
+          ? reason
+          : `failed: ${errors.map((e) => (e instanceof Error ? e.message : String(e))).join("; ")}`,
+      );
+    if (errors.length > 0) throw new AggregateError(errors, "the run process did not stop cleanly");
   }
 
   /** A full pass of every binding (start, rebuild, the timer, wake). */
@@ -261,7 +307,7 @@ export class BridgeProcess {
 
   /** A trigger: the binding's pass after debounceMs of quiet, at most maxDelayMs after the first. */
   schedule(bindingId: string): void {
-    if (this.#stopping) return;
+    if (this.#stopping || !this.#ready) return;
     const now = this.#now();
     const s = this.#scheduled.get(bindingId);
     const first = s?.first ?? now;
@@ -293,6 +339,11 @@ export class BridgeProcess {
     if (b === undefined) return { kind: "skipped", reason: "no_binding" };
     const inst = this.#installations.get(b.installation_id);
     if (inst === undefined) return { kind: "skipped", reason: "installation_not_open" };
+    // §6.5: ownership on every pass, before any transition or effect (review PR 9b #23); an
+    // incomplete search leaves the binding unchecked, so the executor writes nothing.
+    await this.#ownership.check(b.id, b.resource_id);
+    // An answer lost while running (B19): recover it now, not at the next start (review PR 9b #27).
+    if (this.#o.transport.status().state === "ok") await this.#executor.recoverAll();
     const apply = b.state === "active" && this.#writable(b.id);
     const pass = new Pass({
       db: this.#o.db,
@@ -382,17 +433,13 @@ export class BridgeProcess {
     };
     for (const inst of this.#installations.values()) {
       const h = inst.host;
-      this.#unsubscribe.push(
-        // Own commits change nothing to plan: their bases come with finalize.
-        h.onNodesChanged((r, e) => {
-          if (e.origin !== "local") for (const b of ofResource(r)) this.schedule(b.id);
-        }),
-        h.onRebuilt((e) => {
-          for (const b of ofResource(e.resource)) void this.pass(b.id);
-        }),
-        // LIVE again: conclusions from LFCP absence are possible now.
-        h.onLiveChange((c) => {
-          if (c.live) for (const b of ofResource(c.resource)) this.schedule(b.id);
+      this.#lifecycle.push(
+        h.onBatch((r, status) => {
+          deliver(this.#o.db, status, {
+            current: currentLfcp(() => h.replica(r)),
+            now: this.#now,
+            ...(inst.onBlocked === undefined ? {} : { onBlocked: inst.onBlocked }),
+          });
         }),
         ...(inst.access.onChange === undefined
           ? []
@@ -402,17 +449,23 @@ export class BridgeProcess {
                 for (const b of ofResource(c.resource)) this.schedule(b.id);
               }),
             ]),
-        h.onBatch((r, status) => {
-          deliver(this.#o.db, status, {
-            current: currentLfcp(() => h.replica(r)),
-            now: this.#now,
-            ...(inst.onBlocked === undefined ? {} : { onBlocked: inst.onBlocked }),
-          });
+      );
+      this.#triggers.push(
+        // Own commits change nothing to plan: their bases come with finalize.
+        h.onNodesChanged((r, e) => {
+          if (e.origin !== "local") for (const b of ofResource(r)) this.schedule(b.id);
+        }),
+        h.onRebuilt((e) => {
+          if (this.#ready) for (const b of ofResource(e.resource)) void this.pass(b.id);
+        }),
+        // LIVE again: conclusions from LFCP absence are possible now.
+        h.onLiveChange((c) => {
+          if (c.live) for (const b of ofResource(c.resource)) this.schedule(b.id);
         }),
       );
     }
     const t = this.#o.transport;
-    this.#unsubscribe.push(
+    this.#triggers.push(
       // EventKit's hint is coarse: every binding.
       t.onChange(() => {
         for (const b of this.#bindings()) this.schedule(b.id);
@@ -422,6 +475,50 @@ export class BridgeProcess {
         else if (e === "access_changed") for (const b of this.#bindings()) this.schedule(b.id);
       }),
     );
+  }
+
+  /** STOP, the holds and the acceptances, as one string: a change is a person's command. */
+  #controlState(): string {
+    const holds = this.#o.db
+      .prepare("SELECT binding_id, reason FROM binding_holds ORDER BY binding_id, reason")
+      .all() as { binding_id: string; reason: string }[];
+    const accepted = this.#o.db
+      .prepare("SELECT key FROM meta WHERE key LIKE 'hold_accepted%' ORDER BY key")
+      .all() as { key: string }[];
+    // A command's sequence: a stop and a resume between two looks is still seen.
+    const seq = this.#o.db.prepare("SELECT value FROM meta WHERE key = 'control_seq'").get() as
+      | { value: string }
+      | undefined;
+    return JSON.stringify([this.#o.stopped(), holds, accepted, seq?.value ?? "0"]);
+  }
+
+  #holdKeys(): Set<string> {
+    return new Set(
+      (
+        this.#o.db.prepare("SELECT binding_id, reason FROM binding_holds").all() as {
+          binding_id: string;
+          reason: string;
+        }[]
+      ).map((h) => `${h.binding_id}\u0000${h.reason}`),
+    );
+  }
+
+  /**
+   * `stop` / `resume` / `resume --accept` run as other processes (review PR 9b #28): when the
+   * control state changed, the lifted holds go to onHoldsLifted (helper_unavailable → the
+   * supervisor resumes) and every binding gets a full pass — its gates and ownership checked again.
+   */
+  #lookAtControl(): void {
+    if (this.#stopping) return;
+    const now = this.#controlState();
+    if (now === this.#controlSeen) return;
+    this.#controlSeen = now;
+    const holds = this.#holdKeys();
+    const lifted = new Set<string>();
+    for (const k of this.#holdsSeen) if (!holds.has(k)) lifted.add(k.split("\u0000")[1] as string);
+    this.#holdsSeen = holds;
+    if (lifted.size > 0) this.#o.onHoldsLifted?.(lifted);
+    void this.passAll();
   }
 
   /** wake (§2.2, §5.3, §6.5): ownership unchecked until checked again; the network back; a full pass. */
@@ -452,4 +549,14 @@ export function seedInstanceId(db: BridgeDatabase, instanceId: string, journal?:
   db.prepare(
     "INSERT INTO meta (key, value) VALUES ('bridge_instance_id', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
   ).run(instanceId);
+}
+
+/**
+ * A person's command for a running process (stop, resume, resume --accept): the run process
+ * notices it at its next look at the control state, however short the command was.
+ */
+export function bumpControl(db: BridgeDatabase): void {
+  db.prepare(
+    "INSERT INTO meta (key, value) VALUES ('control_seq', '1') ON CONFLICT (key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)",
+  ).run();
 }
