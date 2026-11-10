@@ -71,7 +71,10 @@ export interface CatchUpState {
 
 /** The machine around the migration (the run process; tests pass fakes). */
 export interface MigrationPorts {
-  /** A new pairing for `sections` (old ∪ new); undefined when the person refused it. */
+  /**
+   * A new pairing whose scope is the old installation's sections ∪ `sections` (the ones added);
+   * undefined when the person refused it.
+   */
   pair(req: {
     readonly from: string;
     readonly sections: readonly string[];
