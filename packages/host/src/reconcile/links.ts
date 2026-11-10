@@ -308,6 +308,17 @@ export class LinkApplier {
           ).run(JSON.stringify([...ids]), at, bindingId, t.taskId);
           return "ignored";
         });
+      case "user_replaced":
+        return tx(() => {
+          const r = db
+            .prepare(
+              "UPDATE links SET url_state = 'user_replaced', rem_url = ?, updated_at = ? WHERE binding_id = ? AND task_id = ? AND state = 'linked'",
+            )
+            .run(t.url ?? null, at, bindingId, t.taskId);
+          if (r.changes !== 1) return "skipped";
+          journal("info", "link.user_replaced");
+          return "user_replaced";
+        });
       case "status_lock":
       case "status_unlock":
         return tx(() => {
