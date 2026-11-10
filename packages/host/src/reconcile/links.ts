@@ -139,6 +139,9 @@ export class LinkApplier {
       unlinks,
     });
     const stopped: HoldReason[] = admitted.ok ? [] : [...admitted.holds];
+    // An accepted anomaly: this pass's unlinks are journaled as accepted, its imports become the
+    // new baseline — the next pass is not stopped by the very work a person accepted.
+    const accepted = admitted.ok ? (admitted.accepted ?? []) : [];
     if (
       o.guards?.includes("guard_count_drop") &&
       !holds.takeAccepted(bindingId, "guard_count_drop")
@@ -155,7 +158,13 @@ export class LinkApplier {
     // 3. Apply: the link transitions, then the intents.
     const out: LinkOutcome[] = [];
     for (const t of plan.transitions) {
-      const result = this.#one(bindingId, b, t, located.get(t.taskId));
+      const result = this.#one(
+        bindingId,
+        b,
+        t,
+        located.get(t.taskId),
+        accepted.includes("guard_mass_unlink"),
+      );
       out.push({ taskId: t.taskId, transition: t.kind, result });
     }
     const prepared =
@@ -166,6 +175,10 @@ export class LinkApplier {
             { intents: plan.intents, unlinks: 0 },
             { admitted: true },
           ) ?? []);
+    if (accepted.includes("guard_mass_import"))
+      for (const i of prepared)
+        if (i.kind === "create_task")
+          holds.markAccepted(bindingId, "guard_mass_import", i.createdAt);
     return { kind: "applied", outcomes: out, prepared };
   }
 
@@ -182,6 +195,7 @@ export class LinkApplier {
     b: { resource_id: string; target_ref: string | null },
     t: Transition,
     where: Located | undefined,
+    accepted = false,
   ): string {
     const db = this.#o.db;
     const at = new Date(this.#now()).toISOString();
@@ -194,7 +208,11 @@ export class LinkApplier {
         )
         .run(state, reason, at, bindingId, t.taskId, ...from).changes === 1;
     const journal = (level: "info" | "warn", key: string, params: Record<string, unknown> = {}) =>
-      this.#journal.append(level, key, { bindingId, taskId: t.taskId, params });
+      this.#journal.append(level, key, {
+        bindingId,
+        taskId: t.taskId,
+        params: accepted ? { ...params, accepted: true } : params,
+      });
     const dropBases = (fields?: readonly string[]) =>
       fields === undefined
         ? db

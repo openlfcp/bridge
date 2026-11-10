@@ -33,7 +33,7 @@ import {
 } from "@openlfcp/bridge-reminders/adapter";
 import { fromHex, type PrincipalId, resourceId } from "@openlfcp/core";
 import type { BridgeDatabase } from "../db/database.js";
-import type { HoldReason } from "../db/holds.js";
+import { type HoldReason, Holds } from "../db/holds.js";
 import { Limits } from "../executor/limits.js";
 import { sectionEnd } from "../lfcp/fallback/section-end.js";
 import { importTaskFactory } from "./import-task.js";
@@ -308,15 +308,18 @@ export class Pass {
   #previousCounts(bindingId: string): { linkedApple: number; linkedLfcp: number } | undefined {
     const rows = this.#o.db
       .prepare(
-        "SELECT stats_json FROM runs WHERE binding_id = ? AND kind IN ('dry','apply') AND outcome = 'planned' ORDER BY started_at DESC, rowid DESC",
+        "SELECT stats_json, started_at FROM runs WHERE binding_id = ? AND kind IN ('dry','apply') AND outcome = 'planned' ORDER BY started_at DESC, rowid DESC",
       )
-      .iterate(bindingId) as IterableIterator<{ stats_json: string | null }>;
+      .iterate(bindingId) as IterableIterator<{ stats_json: string | null; started_at: string }>;
+    // A drop a person accepted (resume --accept): the passes after it are the new baseline.
+    const accepted = new Holds(this.#o.db, this.#now).acceptedAt(bindingId, "guard_count_drop");
     for (const r of rows) {
       const s = parse(r.stats_json) as
         | { linkedApple?: unknown; linkedLfcp?: unknown; guards?: unknown }
         | undefined;
       if (typeof s?.linkedApple !== "number" || typeof s.linkedLfcp !== "number") continue;
-      if (Array.isArray(s.guards) && s.guards.includes("guard_count_drop")) continue;
+      const flagged = Array.isArray(s.guards) && s.guards.includes("guard_count_drop");
+      if (flagged && !(accepted !== undefined && r.started_at >= accepted)) continue;
       return { linkedApple: s.linkedApple, linkedLfcp: s.linkedLfcp };
     }
     return undefined;

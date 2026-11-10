@@ -148,11 +148,11 @@ describe("dry-run (§5.5, PR 8: dry-run only)", () => {
   });
 
   it("a count drop against the last pass is shown (guard_count_drop), none set", async () => {
-    const s = await setup([]);
+    const s = await setup(["T0", "T1", "T2", "T3", "T4", "T5"]);
     const person = new FakePerson(store);
     const now = new Date().toISOString();
     const made = Array.from({ length: 6 }, (_, k) => {
-      const task = `T${k}`;
+      const task = (s.tasks[k] as { id: string }).id;
       const it = person.create(list.id as ListRef, `R${k}`, {
         url: taskLink(task, toHex(s.R), bridgeInstanceId(db)),
       });

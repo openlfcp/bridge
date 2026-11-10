@@ -201,6 +201,24 @@ describe("holds, resume, stop", () => {
     expect(reminders()).toHaveLength(4);
   });
 
+  it("an accepted anomaly is the new baseline: the passes after it are not held again by it", async () => {
+    b = await bridge({ filter: "mine" });
+    const tasks = [];
+    for (let k = 0; k < 4; k++) tasks.push(await b.task(`T${k}`));
+    const proc = processOf();
+    await proc.start();
+    for (const t of tasks) await b.edit(unassign(b.now(t.id), b.root));
+    const held = await proc.pass("b");
+    expect(held).toMatchObject({ kind: "held" });
+    const holds = new Holds(b.db);
+    for (const h of holds.of("b")) holds.accept("b", h.reason);
+    expect(await proc.pass("b")).toMatchObject({ kind: "applied" });
+    // The accepted pass's four unlinks (journaled as accepted) and its count drop are the baseline.
+    expect(await proc.pass("b")).toMatchObject({ kind: "applied" });
+    expect(holds.of("b")).toEqual([]);
+    expect(await proc.pass("b")).toMatchObject({ kind: "applied" });
+  });
+
   it("stop: no pass after it, the process run is closed", async () => {
     b = await bridge();
     const proc = processOf();

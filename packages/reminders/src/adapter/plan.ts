@@ -312,7 +312,7 @@ export interface Plan {
     readonly inFilter: number;
     readonly reminders: number;
     readonly linked: number;
-    /** linked, with its reminder in the snapshot (guard_count_drop, Apple side). */
+    /** linked, staying linked (Task active, in the filter), with its reminder in the snapshot (guard_count_drop, Apple side). */
     readonly linkedApple: number;
     /** linked, with its Task active and in the filter (guard_count_drop, LFCP side). */
     readonly linkedLfcp: number;
@@ -544,7 +544,6 @@ export function plan(view: PassView): Plan {
     }
     switch (link.state) {
       case "linked": {
-        if (lm.kind === "matched") linkedApple++;
         if (!active) {
           if (view.lfcpLive) transitions.push({ taskId: link.taskId, kind: "task_gone" });
           else waiting.push({ taskId: link.taskId, waiting: "lfcp_not_live" });
@@ -555,7 +554,9 @@ export function plan(view: PassView): Plan {
           else waiting.push({ taskId: link.taskId, waiting: "lfcp_not_live" });
           continue;
         }
+        // Counted only for links that stay linked after this pass (guard_count_drop's baseline).
         linkedLfcp++;
+        if (lm.kind === "matched") linkedApple++;
         if (lm.kind === "absent") {
           if (view.snapshot.complete)
             transitions.push({ taskId: link.taskId, kind: "apple_missing" });

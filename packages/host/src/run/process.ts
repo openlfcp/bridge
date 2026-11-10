@@ -23,6 +23,7 @@ import { Holds } from "../db/holds.js";
 import { Journal } from "../db/journal.js";
 import { Executor, type Gates, type Outcome } from "../executor/executor.js";
 import { Runs } from "../executor/safe-mode.js";
+import { type AccessChange, applyAccessHolds } from "../lfcp/access.js";
 import { deliver } from "../lfcp/delivery.js";
 import type { LiveChange } from "../lfcp/live.js";
 import type { GuardedCommit, GuardedCommitResult, RebuiltEvent } from "../lfcp/section-host.js";
@@ -62,6 +63,8 @@ export interface InstallationPorts {
   readonly access: {
     accessCheckedNow(resource: ResourceId): boolean;
     offlineCommitAllowed(resource: ResourceId): boolean;
+    /** Answers as they come (an AccessTracker): the process sets or lifts access_refused (§5.9). */
+    onChange?(listener: (c: AccessChange) => void): () => void;
   };
   /** The person's root as a PrincipalRef, for the filter (G4). */
   readonly me?: string;
@@ -391,6 +394,14 @@ export class BridgeProcess {
         h.onLiveChange((c) => {
           if (c.live) for (const b of ofResource(c.resource)) this.schedule(b.id);
         }),
+        ...(inst.access.onChange === undefined
+          ? []
+          : [
+              inst.access.onChange((c) => {
+                applyAccessHolds(this.#o.db, inst.id, c.resource, c.answer);
+                for (const b of ofResource(c.resource)) this.schedule(b.id);
+              }),
+            ]),
         h.onBatch((r, status) => {
           deliver(this.#o.db, status, {
             current: currentLfcp(() => h.replica(r)),
