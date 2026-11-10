@@ -266,7 +266,12 @@ export class Pass {
     const admission = limits.check(b.id, {
       intents: p.intents,
       unlinks: p.counts.unlinks,
-      imports: p.counts.imports,
+      // Imports not planned as create_task (no section end or Task factory: shown only); the
+      // planned ones are counted from the intents — each once (review PR 11 #22).
+      imports: Math.max(
+        0,
+        p.counts.imports - p.intents.filter((i) => i.kind === "create_task").length,
+      ),
     });
     const guards: HoldReason[] = admission.ok ? [] : [...admission.holds];
     const previous = this.#previousCounts(b.id);

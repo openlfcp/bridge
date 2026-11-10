@@ -189,3 +189,123 @@ describe("guards on imports", () => {
     ]);
   });
 });
+
+describe("review PR 11", () => {
+  it("#20 B19: an unknown restore_url is quarantined; no new opKey until a person decides", async () => {
+    b = await bridge();
+    const r = b.person.create(b.list.id, "A");
+    await b.sync();
+    b.t.faults.loseNextResponse = 1;
+    const lost = await b.sync();
+    expect(lost.outcomes).toEqual([{ kind: "lost" }]);
+    b.person.edit(r.ref, { url: null });
+    await b.e.recoverAll();
+    const q = b.db.prepare("SELECT id, state FROM intents WHERE kind = 'restore_url'").get() as {
+      id: string;
+      state: string;
+    };
+    expect(q.state).toBe("quarantined");
+    expect(b.db.prepare("SELECT field, kind FROM conflicts WHERE intent_id = ?").all(q.id)).toEqual(
+      [{ field: "url", kind: "unknown_outcome" }],
+    );
+    const next = await b.sync();
+    expect(next.prepared.filter((i) => i.kind === "restore_url")).toEqual([]);
+    // Other fields still go.
+    b.person.edit(r.ref, { title: "A2" });
+    expect((await b.sync()).prepared.map((i) => [i.direction, i.fields])).toEqual([
+      ["to_lfcp", ["title"]],
+    ]);
+    // A person resolves it: a new restore_url, a new opKey.
+    b.db
+      .prepare("UPDATE conflicts SET resolved_at = ?, resolution = 'lfcp' WHERE intent_id = ?")
+      .run(new Date().toISOString(), q.id);
+    const after = await b.sync();
+    expect(after.prepared.map((i) => i.kind)).toEqual(["restore_url"]);
+    expect((after.prepared[0] as { id: string }).id).not.toBe(q.id);
+  });
+
+  it("#20 lost before the effect (recover not_started): the same opKey is run again, no quarantine", async () => {
+    b = await bridge();
+    b.person.create(b.list.id, "A");
+    await b.sync();
+    const crashing = b.executor("after_effecting");
+    const r = await b.pass.dryRun("b");
+    if (r.kind !== "planned") throw new Error(r.kind);
+    const applied = await b.links.apply("b", r.plan, { executor: crashing });
+    if (applied.kind !== "applied") throw new Error(applied.kind);
+    const [i] = applied.prepared;
+    await expect(crashing.run((i as Intent).id)).rejects.toThrow(/crash/);
+    const restarted = b.executor();
+    expect(await restarted.recoverAll()).toEqual([{ kind: "finalized" }]);
+    expect(b.reminders()[0]?.linkUrl).toMatch(/^lfcp:\/\/task\//);
+  });
+
+  it("#21 a person's URL put on a linked reminder makes the link user_replaced; cleared later, it stays the person's", async () => {
+    b = await bridge();
+    const r = b.person.create(b.list.id, "A");
+    await b.sync();
+    await b.sync();
+    expect(b.linkOf(r.ref.id)?.url_state).toBe("ours");
+    b.person.edit(r.ref, { url: "https://example.com/personal" });
+    await b.sync();
+    expect(b.linkOf(r.ref.id)).toMatchObject({
+      url_state: "user_replaced",
+      rem_url: "https://example.com/personal",
+    });
+    b.person.edit(r.ref, { url: null });
+    const next = await b.sync();
+    expect(next.plan.intents.filter((i) => i.kind === "restore_url")).toEqual([]);
+    expect(b.linkOf(r.ref.id)?.state).toBe("linked");
+  });
+
+  it("#22 the dry run counts each import once, as apply does: 6/10/11, strict 2/3/4", async () => {
+    const guards = async (n: number, strict = false) => {
+      b = await bridge({ strict });
+      for (let k = 0; k < n; k++) b.person.create(b.list.id, `New ${k}`);
+      const r = await b.pass.dryRun("b");
+      if (r.kind !== "planned") throw new Error(r.kind);
+      const held = r.guards.includes("guard_mass_import");
+      const applied = await b.sync();
+      expect(applied.applied.kind === "held").toBe(held);
+      await b.close();
+      return held;
+    };
+    expect([await guards(6), await guards(10), await guards(11)]).toEqual([false, false, true]);
+    expect([await guards(2, true), await guards(3, true), await guards(4, true)]).toEqual([
+      false,
+      false,
+      true,
+    ]);
+    b = await bridge();
+  });
+
+  it("a failing pending link rolls back its intent too (one transaction)", async () => {
+    b = await bridge();
+    b.person.create(b.list.id, "Atomic");
+    const r = await b.pass.dryRun("b");
+    if (r.kind !== "planned") throw new Error(r.kind);
+    b.db.exec(
+      "CREATE TRIGGER abort_pending AFTER INSERT ON links BEGIN SELECT RAISE(ABORT, 'abort'); END",
+    );
+    expect(() => b.e.prepare("b", { intents: r.plan.intents, unlinks: 0 })).toThrow(/abort/);
+    expect(b.db.prepare("SELECT count(*) AS n FROM intents").get()).toEqual({ n: 0 });
+    expect(b.db.prepare("SELECT count(*) AS n FROM links").get()).toEqual({ n: 0 });
+  });
+
+  it("crash after finalize: still one Task, one link", async () => {
+    b = await bridge();
+    b.person.create(b.list.id, "Finalized");
+    const r = await b.pass.dryRun("b");
+    if (r.kind !== "planned") throw new Error(r.kind);
+    const e = b.executor("after_finalize");
+    const [i] = e.prepare("b", { intents: r.plan.intents, unlinks: 0 }) ?? [];
+    await expect(e.run((i as Intent).id)).rejects.toThrow(/crash/);
+    const restarted = b.executor();
+    await restarted.recoverAll();
+    await restarted.runDue();
+    await b.sync();
+    await b.sync();
+    expect(tasksTitled("Finalized")).toHaveLength(1);
+    expect(b.db.prepare("SELECT count(*) AS n FROM links").get()).toEqual({ n: 1 });
+  });
+});
