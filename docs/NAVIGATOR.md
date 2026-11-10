@@ -35,6 +35,8 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 | `src/lfcp/fallback/device-root.ts` | **FALLBACK for sdk-ts G4**: the person's root (who "me" is for the filter) from the finished pairing request | 8 |
 | `src/reconcile/handler.ts` | the adapter's part of the executor (§5.6, §5.8): finalize by direction (R2-1: to_apple — LFCP base from the basis, Apple base from `written`; create also links; to_lfcp — LFCP base from the stored intents applied, Apple base from the basis), B14 journal, the basis check inside stage; `currentLfcp` for delivery (§5.9) | 10 |
 | `src/reconcile/links.ts` | a pass's application (§6.1–6.4, B4, B11): global finds first (complete only; several candidates → quarantine), then the whole pass — intents, real unlinks, the dry run's count drop — against the limits on the state before any change (r2 §7.2); then the transitions and the intents; task_gone / out_of_filter, a global find before unlinked (moved_out, deleted_in_apple) and before a new projection on a return (R2-9 (3)), relink as a first link, orphans, quarantine, recurring copies, status_locked; nothing deleted anywhere | 12 |
+| `src/reconcile/import-task.ts` | a new reminder's Task (§6.2): its id stable for the reminder (UUIDv7 from a hash of section, binding and the reminder's externalId or id), no assignee | 11 |
+| `src/lfcp/fallback/section-end.ts` | **FALLBACK for sdk-ts G9**: the section's end (after the last node at depth 0) for an import | 11 |
 
 ## Adapter (`packages/reminders/src/adapter/`, PR 8)
 

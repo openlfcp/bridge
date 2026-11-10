@@ -32,6 +32,7 @@ import {
   projectLfcp,
   projectWritten,
   sameProjection,
+  taskLink,
 } from "@openlfcp/bridge-reminders/adapter";
 import type { SectionReplica } from "@openlfcp/shared-objects/sections";
 import type { BridgeDatabase } from "../db/database.js";
@@ -98,8 +99,65 @@ export function bridgeHandler(o: HandlerOptions): IntentHandler {
       );
 
   return {
+    prepared(i, db) {
+      if (i.kind !== "create_task") return;
+      // §6.2: the pending link is durable with the intent — the next pass matches the reminder to
+      // it (externalId, id) and does not import it again.
+      const r = (i.basis as PlannedBasis).reminder;
+      if (r === undefined) return;
+      const at = new Date(now()).toISOString();
+      db.prepare(
+        `INSERT INTO links (binding_id, task_id, rem_url, rem_external_id, rem_id_cache, rem_title_snapshot,
+           origin, state, url_state, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'apple', 'pending_lfcp_create', ?, ?, ?)
+         ON CONFLICT (binding_id, task_id) DO NOTHING`,
+      ).run(
+        i.bindingId,
+        i.taskId,
+        r.userUrl ?? null,
+        r.externalId ?? null,
+        r.id,
+        r.title,
+        r.userUrl === undefined ? "ours" : "user_replaced",
+        at,
+        at,
+      );
+    },
+
     finalize(i, result, db) {
       const basis = i.basis as PlannedBasis;
+      const at = new Date(now()).toISOString();
+      if (i.kind === "create_task") {
+        // An import (§6.2): the Task is the planned values; all four bases; the link is linked. Its
+        // URL is ours (restore_url puts it on the reminder next) or the person's (kept, B4-like).
+        const v = basis.lfcp as LfcpValues;
+        const pL = projectLfcp(v);
+        for (const f of FIELDS)
+          upsert(db, i, f, {
+            lfcp: pL[f],
+            shadow: shadowOf(f, v),
+            apple: basis.pA?.[f],
+            native: basis.native,
+          });
+        const resource = (i.payload as { resource: string }).resource;
+        const instance = (
+          db.prepare("SELECT value FROM meta WHERE key = 'bridge_instance_id'").get() as
+            | { value: string }
+            | undefined
+        )?.value;
+        db.prepare(
+          `UPDATE links SET state = 'linked', rem_url = coalesce(rem_url, ?), updated_at = ?
+            WHERE binding_id = ? AND task_id = ? AND state = 'pending_lfcp_create'`,
+        ).run(taskLink(i.taskId, resource, instance ?? ""), at, i.bindingId, i.taskId);
+        return;
+      }
+      if (i.kind === "restore_url") {
+        // Our link is back on the reminder (§5.4): nothing of the fields changed.
+        db.prepare(
+          "UPDATE links SET rem_url = ?, url_state = 'ours', updated_at = ? WHERE binding_id = ? AND task_id = ?",
+        ).run((i.payload as { linkUrl: string }).linkUrl, at, i.bindingId, i.taskId);
+        return;
+      }
       if (i.direction === "to_lfcp") {
         const p = i.payload as { intents: readonly LfcpTaskIntent[] };
         const after = applyLfcpIntents(basis.lfcp as LfcpValues, p.intents);
@@ -127,7 +185,6 @@ export function bridgeHandler(o: HandlerOptions): IntentHandler {
         });
       if (create) {
         const p = i.payload as { linkUrl: string; set: { title?: string } };
-        const at = new Date(now()).toISOString();
         db.prepare(
           `INSERT INTO links (binding_id, task_id, rem_url, rem_external_id, rem_id_cache, rem_title_snapshot,
              origin, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'lfcp', 'linked', ?, ?)
@@ -155,6 +212,9 @@ export function bridgeHandler(o: HandlerOptions): IntentHandler {
     },
 
     lfcpBasis(replica, i) {
+      // An import: the Task must not be there yet (its id is stable for the reminder).
+      if (i.kind === "create_task")
+        return replica.task(i.taskId) === undefined || "the imported Task exists already";
       const v = lfcpValues(replica, i.taskId);
       if (v === undefined) return "the Task cannot be read";
       const pL = projectLfcp(v);
