@@ -12,6 +12,39 @@ import { EXIT, Holds, Journal, main, openBridgeDatabase } from "../src/index.js"
 import type { MigrationPorts } from "../src/migration.js";
 import type { Runtime } from "../src/runtime.js";
 
+/**
+ * The helper's write gate (Server.swift requireWrites): every command opens a new transport whose
+ * helper starts with writes "off"; list and marker writes need "bootstrap" (or wider).
+ */
+function gated(t: FakeTransport): FakeTransport & {
+  setWriteMode(mode: "off" | "bootstrap" | "verification" | "verified"): Promise<void>;
+} {
+  let mode = "off";
+  const apply = t.apply.bind(t);
+  const createList = t.createList.bind(t);
+  const g = t as FakeTransport & {
+    setWriteMode(m: "off" | "bootstrap" | "verification" | "verified"): Promise<void>;
+  };
+  g.setWriteMode = async (m) => {
+    mode = m;
+  };
+  g.apply = async (op) =>
+    mode === "off"
+      ? {
+          ok: false,
+          opKey: op.opKey,
+          code: "writes_disabled",
+          retryable: false,
+          message: "writes are disabled until the host enables them",
+        }
+      : apply(op);
+  g.createList = async (req) => {
+    if (mode === "off") throw new Error("writes_disabled");
+    return createList(req);
+  };
+  return g;
+}
+
 async function machine(ports?: MigrationPorts) {
   const home = mkdtempSync(join(tmpdir(), "lfcp-cli-"));
   const paths = {
@@ -33,7 +66,7 @@ async function machine(ports?: MigrationPorts) {
     journal: new Journal(db),
     holds: new Holds(db),
     async openTransport() {
-      transport = new FakeTransport(store);
+      transport = gated(new FakeTransport(store));
       await transport.open({
         installationKey: "i",
         state: kv,
