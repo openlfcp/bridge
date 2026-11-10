@@ -232,6 +232,8 @@ export interface Decision {
   readonly appleValueLost?: boolean;
   /** The status table's row (status only). */
   readonly row?: StatusRowId;
+  /** The exact LFCP value (status, priority): what a "bases" or "shadow" decision records. */
+  readonly shadow?: string;
 }
 
 export type TransitionKind =
@@ -382,6 +384,7 @@ export function plan(view: PassView): Plan {
         decision,
         lfcp: pL[field],
         apple: pA[field],
+        ...(field === "status" || field === "priority" ? { shadow: shadow[field] } : {}),
         ...extra,
       });
     const writeApple = (field: Field, w: AppleWrite, extra: Partial<Decision> = {}) => {
