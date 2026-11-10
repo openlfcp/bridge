@@ -17,6 +17,14 @@
       "types": "./dist/adapter/index.d.ts",
       "import": "./dist/adapter/index.js"
     },
+    "./transport": {
+      "types": "./dist/transport.d.ts",
+      "import": "./dist/transport.js"
+    },
+    "./capabilities": {
+      "types": "./dist/capabilities.d.ts",
+      "import": "./dist/capabilities.js"
+    },
     "./fake": {
       "types": "./dist/fake/index.d.ts",
       "import": "./dist/fake/index.js"

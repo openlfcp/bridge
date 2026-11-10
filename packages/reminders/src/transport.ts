@@ -18,6 +18,9 @@
 import type { CapabilityDeclaration } from "./capabilities.js";
 import type { LocalDate, TimeOfDay } from "./values.js";
 
+// Transports import only this module and capabilities.ts (scripts/check-boundaries.mjs).
+export type { LocalDate, TimeOfDay } from "./values.js";
+
 export type ListRef = string & { readonly __listRef: unique symbol };
 
 /** A reminder reference: `id` is a cache in EventKit; `externalId` is the second key. */
@@ -132,7 +135,9 @@ export type ApplyErrorCode =
   | "transport_error"
   | "invalid"
   | "partial"
-  | "ambiguous";
+  | "ambiguous"
+  /** The transport's own write gate is closed (EventKit until writesVerified, D-010 r4 §7.6). */
+  | "writes_disabled";
 
 export type AppleOpResult =
   | {
@@ -177,8 +182,16 @@ export type RecoverResult =
   /** The whole operation is confirmed by the transport (never inferred from item fields). */
   | { readonly state: "done"; readonly result: AppleOpSuccess | ListCreated }
   | { readonly state: "not_started" }
-  /** The effect may or may not have happened; the host decides (D-010 r4 §5.7, §6.5). */
-  | { readonly state: "unknown"; readonly stage?: string };
+  /**
+   * The effect may or may not have happened; the host decides (D-010 r4 §5.7, §6.5). `opKind` names
+   * the operation: the host may compare fields only for a single-step "update" (review r3 P2-1);
+   * "create", "create_list" and multi-step operations stay unknown until the transport resolves them.
+   */
+  | {
+      readonly state: "unknown";
+      readonly stage?: string;
+      readonly opKind?: AppleOp["kind"] | "create_list";
+    };
 
 export type FindQuery =
   | { readonly url: string }

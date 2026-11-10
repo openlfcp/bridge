@@ -8,3 +8,5 @@ packages/transport-eventkit/src/index.ts:1 subpath: transport-eventkit may impor
 packages/transport-eventkit/src/index.ts:2 subpath: transport-eventkit may import @openlfcp/bridge-reminders only as @openlfcp/bridge-reminders/transport or @openlfcp/bridge-reminders/capabilities
 packages/transport-eventkit/src/index.ts:3 graph: transport-eventkit may not import @openlfcp/bridge
 packages/transport-eventkit/src/multiline.ts:3 subpath: transport-eventkit may import @openlfcp/bridge-reminders only as @openlfcp/bridge-reminders/transport or @openlfcp/bridge-reminders/capabilities
+packages/transport-eventkit/src/support.ts:1 subpath: transport-eventkit may import @openlfcp/bridge-reminders only as @openlfcp/bridge-reminders/transport or @openlfcp/bridge-reminders/capabilities
+packages/transport-eventkit/test/fake.test.ts:1 subpath: transport-eventkit may import @openlfcp/bridge-reminders only as @openlfcp/bridge-reminders/transport or @openlfcp/bridge-reminders/capabilities or @openlfcp/bridge-reminders/test-support

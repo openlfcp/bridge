@@ -4,3 +4,28 @@
  * contract and capability declaration, never the host.
  */
 export const PACKAGE = "@openlfcp/bridge-transport-eventkit";
+
+export {
+  EXECUTABLE,
+  type HelperLink,
+  HelperLostError,
+  HelperProcess,
+  type HelperProcessOptions,
+} from "./link.js";
+export {
+  EventKitTransport,
+  EventKitTransportError,
+  type EventKitTransportOptions,
+  statusOf,
+  type WriteMode,
+} from "./transport.js";
+export {
+  mapItem,
+  mapList,
+  mapWriteResponse,
+  mapWritten,
+  PROTOCOL,
+  type WireEvent,
+  type WireReady,
+  type WireResponse,
+} from "./wire.js";

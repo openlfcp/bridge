@@ -31,6 +31,9 @@ export const ALLOWED = {
 /** What a transport package may import of the adapter. */
 export const TRANSPORT_SUBPATHS = ["transport", "capabilities"];
 
+/** What a transport's tests may import of the adapter besides that: the shared contract suite (D-010 §10.2). */
+export const TRANSPORT_TEST_SUBPATHS = ["test-support"];
+
 const SOURCE = /\.(ts|mts|cts|js|mjs|cjs)$/;
 
 /**
@@ -90,7 +93,9 @@ export function check(root) {
         problems.push(`${rel(pjPath)}:1 graph: ${dir} may not depend on ${name}`);
     }
     const base = join(root, "packages", dir);
+    const testDir = join(base, "test") + sep;
     for (const file of [...filesOf(join(base, "src")), ...filesOf(join(base, "test"))]) {
+      const isTest = file.startsWith(testDir);
       for (const { spec, line } of specifiers(readFileSync(file, "utf8"))) {
         const at = `${rel(file)}:${line}`;
         if (spec.startsWith(".")) {
@@ -110,9 +115,12 @@ export function check(root) {
         }
         if (dir.startsWith("transport-") && target === "reminders") {
           const sub = spec.slice(name.length + 1);
-          if (!TRANSPORT_SUBPATHS.includes(sub))
+          const subs = isTest
+            ? [...TRANSPORT_SUBPATHS, ...TRANSPORT_TEST_SUBPATHS]
+            : TRANSPORT_SUBPATHS;
+          if (!subs.includes(sub))
             problems.push(
-              `${at} subpath: ${dir} may import ${name} only as ${TRANSPORT_SUBPATHS.map((s) => `${name}/${s}`).join(" or ")}`,
+              `${at} subpath: ${dir} may import ${name} only as ${subs.map((s) => `${name}/${s}`).join(" or ")}`,
             );
         }
       }

@@ -2,6 +2,8 @@
  * Contract tests every Reminders transport must pass (D-010 r4 §4.2, §10.2): fake (Linux CI),
  * the Swift helper with --backend memory (macOS CI), EventKit (live verification run), and
  * CloudKit later (B9). A transport package calls `transportContract(name, makeRig)`.
+ * Errors are matched by `name`, not `instanceof`: a transport throws the classes of the built
+ * package, this suite imports the sources. Tests whose rig lacks a hook are reported as skipped.
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -145,9 +147,9 @@ export function transportContract(name: string, makeRig: () => Promise<ContractR
         const all = await t.lists();
         expect(all.complete).toBe(true);
         expect(all.lists.map((l) => l.id)).toContain(list.id);
-        await expect(t.createList({ opKey: opKey(), title: list.title })).rejects.toBeInstanceOf(
-          ListExistsError,
-        );
+        await expect(t.createList({ opKey: opKey(), title: list.title })).rejects.toMatchObject({
+          name: ListExistsError.name,
+        });
         const key = opKey();
         const a = await t.createList({ opKey: key, title: `${SCOPE_PREFIX}Again ${seq}` });
         const b = await t.createList({ opKey: key, title: `${SCOPE_PREFIX}Again ${seq}` });
@@ -155,9 +157,9 @@ export function transportContract(name: string, makeRig: () => Promise<ContractR
       });
 
       it("createList outside the write scope → ForbiddenListError", async () => {
-        await expect(t.createList({ opKey: opKey(), title: "Groceries" })).rejects.toBeInstanceOf(
-          ForbiddenListError,
-        );
+        await expect(t.createList({ opKey: opKey(), title: "Groceries" })).rejects.toMatchObject({
+          name: ForbiddenListError.name,
+        });
       });
 
       it("recover(createList) after success → done with the list", async () => {
@@ -462,8 +464,8 @@ export function transportContract(name: string, makeRig: () => Promise<ContractR
         ).toMatchObject({ ok: false, code: "forbidden_list" });
       });
 
-      it("edit between check and save: best-effort keeps the person's other fields; strong refuses", async () => {
-        if (rig.beforeSave === undefined) return;
+      it("edit between check and save: best-effort keeps the person's other fields; strong refuses", async (ctx) => {
+        if (rig.beforeSave === undefined) return ctx.skip("rig has no beforeSave hook");
         const c = await create("a");
         rig.beforeSave(async () => {
           await rig.person.edit(c.ref, { notes: true, title: "person" });
@@ -604,8 +606,8 @@ export function transportContract(name: string, makeRig: () => Promise<ContractR
         expect((await t.recover("never-sent")).state).toBe("not_started");
       });
 
-      it("lost answer: exact recover → done; stages-only recover → unknown (never inferred from fields)", async () => {
-        if (rig.loseNextResponse === undefined) return;
+      it("lost answer: exact recover → done; stages-only recover → unknown (never inferred from fields)", async (ctx) => {
+        if (rig.loseNextResponse === undefined) return ctx.skip("rig has no loseNextResponse hook");
         const c = await create("a");
         rig.loseNextResponse();
         const key = opKey();
