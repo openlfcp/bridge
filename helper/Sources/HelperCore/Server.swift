@@ -14,6 +14,9 @@ public final class Server {
     private var allowListIds: Set<String> = []
     private var allowTitlePrefixes: [String] = []
     private var writeMode: WriteMode = .off
+    /// What the request being handled writes: reminders, or lists and markers (bootstrap).
+    private var writeKind: WriteKind = .reminders
+    private enum WriteKind { case reminders, bootstrap }
 
     private var changePending = false
     private var changeSeq = 0
@@ -110,6 +113,10 @@ public final class Server {
         switch writeMode {
         case .off:
             throw HelperError(.writesDisabled, "writes are disabled until the host enables them (hello writes)")
+        case .bootstrap:
+            if writeKind != .bootstrap {
+                throw HelperError(.writesDisabled, "bootstrap mode writes only lists and ownership markers")
+            }
         case .verification:
             if let t = title, !t.hasPrefix(WriteMode.verificationListPrefix) {
                 throw HelperError(.forbiddenList, "verification writes only go to \"\(WriteMode.verificationListPrefix)…\" lists")
@@ -130,6 +137,10 @@ public final class Server {
     }
 
     private func perform(_ op: Operation) throws -> [String: JSON] {
+        switch op {
+        case .listsCreate, .markersCreate, .markersRetire: writeKind = .bootstrap
+        default: writeKind = .reminders
+        }
         switch op {
         case .hello(let ids, let prefixes, let writes):
             allowListIds = Set(ids)

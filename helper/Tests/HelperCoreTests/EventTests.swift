@@ -176,3 +176,26 @@ func registerRetryRecheckTests() {
         try expectEqual(same.count, 1)
     }
 }
+
+func registerBootstrapGateTests() {
+    test("gate: bootstrap mode allows only lists.create and markers (D-010 §6.5, review r3 P2-4)") {
+        let rig = Rig(hello: false)
+        rig.backend.requiresWriteGate = true
+        _ = rig.ok(["op": "hello", "allowListTitlePrefixes": ["LFCP · "], "writes": "bootstrap"])
+        let l = rig.ok(["op": "lists.create", "title": "LFCP · Work", "opKey": "k1"])["list"]!["id"]!
+        let m = rig.ok(["op": "markers.create", "list": l, "markerUrl": "lfcp://bridge/i?r=R", "opKey": "k2"])
+        try expectEqual(m["item"]?["completed"], .bool(true))
+        try expectEqual(rig.errorCode(["op": "items.create", "list": l, "linkUrl": "lfcp://task/T", "opKey": "k3",
+                                       "set": ["title": "a"]]), "writes_disabled")
+        // A reminder the person put there cannot be written either.
+        let mine = rig.ok(["op": "debug.userCreate", "list": l, "title": "milk"])["debug"]!["item"]!
+        try expectEqual(rig.update(mine, ["title": "eggs"])["error"]?["code"], "writes_disabled")
+        try expectEqual(rig.errorCode(["op": "items.restoreUrl", "ref": mine["ref"]!, "linkUrl": "lfcp://task/T",
+                                       "opKey": "k4", "expect": ["rev": mine["rev"]!]]), "writes_disabled")
+        // Retiring its own marker is allowed (unbind during bootstrap).
+        let marker = m["item"]!
+        try expectEqual(rig.ok(["op": "markers.retire", "ref": marker["ref"]!, "markerUrl": "lfcp://bridge/i?r=R",
+                                "opKey": "k5", "expect": ["rev": marker["rev"]!]])["retired"], .bool(true))
+        try expectEqual(rig.ok(["op": "hello", "writes": "bootstrap"])["writes"], "bootstrap")
+    }
+}
