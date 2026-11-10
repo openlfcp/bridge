@@ -176,12 +176,10 @@ export class Bootstrap {
                 "UPDATE bindings SET bootstrap_step = 'done', state = 'pending_dry_run' WHERE id = ?",
               )
               .run(b.id);
-            this.#d.journal.append(
-              "info",
-              "bootstrap.done",
-              `Bound to the Reminders list "${b.target_title}".`,
-              { bindingId: b.id },
-            );
+            this.#d.journal.append("info", "bootstrap.done", {
+              bindingId: b.id,
+              params: { text: `Bound to the Reminders list "${b.target_title}".` },
+            });
             break;
           }
           default: {
@@ -203,12 +201,10 @@ export class Bootstrap {
         this.#d.db.prepare("DELETE FROM bootstrap_ops WHERE binding_id = ?").run(bindingId);
         this.#d.db.prepare("UPDATE bindings SET state = 'removed' WHERE id = ?").run(bindingId);
       }
-      this.#d.journal.append(
-        "warn",
-        `bootstrap.refused.${e.reason}`,
-        `Binding refused: ${e.message}.`,
-        { bindingId },
-      );
+      this.#d.journal.append("warn", `bootstrap.refused.${e.reason}`, {
+        bindingId,
+        params: { text: `Binding refused: ${e.message}.` },
+      });
       return {
         state: "refused",
         reason: e.reason,
@@ -237,12 +233,10 @@ export class Bootstrap {
           detail: `rename the list "${b.target_title}" first`,
         };
       this.#nextAttempt(bindingId, "list", op.client_id);
-      this.#d.journal.append(
-        "info",
-        "bootstrap.list.resolved",
-        "A person decided no list was created; creating it again.",
-        { bindingId },
-      );
+      this.#d.journal.append("info", "bootstrap.list.resolved", {
+        bindingId,
+        params: { text: "A person decided no list was created; creating it again." },
+      });
       return this.resume(bindingId);
     }
     const list = lists.lists.find((l) => l.id === choice);
@@ -282,12 +276,10 @@ export class Bootstrap {
       }
     }
     this.#d.db.prepare("UPDATE bindings SET state = 'removed' WHERE id = ?").run(bindingId);
-    this.#d.journal.append(
-      "info",
-      "binding.removed",
-      "Binding removed; the list and its reminders stay.",
-      { bindingId, data: { retired } },
-    );
+    this.#d.journal.append("info", "binding.removed", {
+      bindingId,
+      params: { text: "Binding removed; the list and its reminders stay.", ...{ retired } },
+    });
     return { retired };
   }
 
@@ -450,12 +442,12 @@ export class Bootstrap {
       return "done";
     }
     this.#setOp(b.id, "marker", "unknown_outcome");
-    this.#d.journal.append(
-      "warn",
-      "bootstrap.marker.unknown",
-      "Whether the ownership marker was written is unknown. Check Reminders, then run bind --retry-marker.",
-      { bindingId: b.id },
-    );
+    this.#d.journal.append("warn", "bootstrap.marker.unknown", {
+      bindingId: b.id,
+      params: {
+        text: "Whether the ownership marker was written is unknown. Check Reminders, then run bind --retry-marker.",
+      },
+    });
     return "unknown";
   }
 
@@ -532,12 +524,12 @@ export class Bootstrap {
 
   #markUnknown(b: BindingRow, step: "list"): Promise<BindOutcome> {
     this.#setOp(b.id, step, "unknown_outcome");
-    this.#d.journal.append(
-      "warn",
-      "bootstrap.list.unknown",
-      `Whether the list "${b.target_title}" was created is unknown. Choose it by id (bind --resolve-list <id>) or answer none.`,
-      { bindingId: b.id },
-    );
+    this.#d.journal.append("warn", "bootstrap.list.unknown", {
+      bindingId: b.id,
+      params: {
+        text: `Whether the list "${b.target_title}" was created is unknown. Choose it by id (bind --resolve-list <id>) or answer none.`,
+      },
+    });
     return this.#unknownList(b);
   }
 
