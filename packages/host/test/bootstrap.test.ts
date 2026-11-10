@@ -360,6 +360,28 @@ describe("permits() of PR 7 (review r3 P2-4, the strict reading)", () => {
 });
 
 describe("unbind", () => {
+  it("a refused marker_retire is a partial unbind with its reason (review PR 9 r2 P2-1)", async () => {
+    const { db, store, transport, boot } = await rig();
+    const id = ((await boot.bind(bindReq)) as { bindingId: string }).bindingId;
+    const modes: string[] = [];
+    (transport as unknown as { setWriteMode: (m: string) => Promise<void> }).setWriteMode = async (
+      m,
+    ) => {
+      modes.push(m);
+    };
+    transport.apply = async (op) => ({
+      ok: false,
+      opKey: op.opKey,
+      code: "writes_disabled",
+      retryable: false,
+      message: "closed",
+    });
+    expect(await boot.unbind(id)).toEqual({ retired: false, failed: "writes_disabled" });
+    expect(modes).toEqual(["bootstrap"]);
+    expect(binding(db, id).state).toBe("removed");
+    expect([...store.items.values()].some((i) => i.linkUrl === markerUrl(ME, R))).toBe(true);
+  });
+
   it("retires only this bridge's marker; the list stays", async () => {
     const { db, store, boot } = await rig();
     const r = await boot.bind(bindReq);

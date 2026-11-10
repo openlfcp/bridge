@@ -227,9 +227,10 @@ async function run(
       env.out(
         `binding ${id} removed${r.retired ? "; its marker retired" : ""}; the list and its reminders stay`,
       );
-      if (r.denied !== undefined)
+      const why = [...(r.denied ?? []), ...(r.failed === undefined ? [] : [r.failed])];
+      if (why.length > 0)
         env.out(
-          `its ownership marker was left in Reminders (${r.denied.join(", ")}); delete "LFCP bridge · не удалять" there if you want`,
+          `its ownership marker was left in Reminders (${why.join(", ")}); delete "LFCP bridge · не удалять" there if you want`,
         );
       return EXIT.OK;
     }
