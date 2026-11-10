@@ -38,8 +38,17 @@ STUB
 }
 stub security '
 case "$1" in
-  find-identity) [ -f "'"$T"'/have-identity" ] && echo "  1) 0123456789ABCDEF0123456789ABCDEF01234567 \"'"$ID"'\"" ;;
-  list-keychains) [ "${3:-}" = "-s" ] || printf "    \"%s\"\n" "/Users/x/Library/Keychains/login.keychain-db" ;;
+  find-identity)
+    [ -f "'"$T"'/have-identity" ] && echo "  1) 0123456789ABCDEF0123456789ABCDEF01234567 \"'"$ID"'\""
+    ;;
+  list-keychains)
+    if [ "${4:-}" = "-s" ]; then
+      # the restore (the call without the release keychain) fails when asked to
+      if [ -f "'"$T"'/restore-fails" ] && ! printf "%s\n" "$@" | grep -qx "'"$KC"'"; then exit 1; fi
+    else
+      [ -f "'"$T"'/list-fails" ] && exit 1
+      [ -f "'"$T"'/list-empty" ] || printf "    \"%s\"\n" "/Users/x/Library/Keychains/login.keychain-db"
+    fi ;;
 esac'
 stub codesign '
 if [ "$1" = "-d" ] && [ "$2" = "--verbose=2" ]; then
@@ -117,5 +126,20 @@ touch "$T/no-runtime"
 run --identity "$ID"; rc=$?
 [ "$rc" = 2 ] && grep -q 'hardened runtime' "$T/stderr" && ok "a signature without the hardened runtime is refused" || bad "no runtime ($rc)"
 rm "$T/no-runtime"
+
+# ---------- review PR 14 P2-1: the keychain search list ----------
+touch "$T/list-fails"
+run --identity "$ID" --keychain "$KC" --add-to-search-list; rc=$?
+[ "$rc" != 0 ] && ! grep -qx '  \[-s\]' "$LOG" && ! called codesign && ok "search list unreadable: nothing changed, nothing signed" || bad "search list unreadable ($rc)"
+rm "$T/list-fails"
+touch "$T/list-empty"
+run --identity "$ID" --keychain "$KC" --add-to-search-list; rc=$?
+[ "$rc" != 0 ] && ! grep -qx '  \[-s\]' "$LOG" && ok "search list read as empty: refused, nothing changed" || bad "search list empty ($rc)"
+rm "$T/list-empty"
+touch "$T/restore-fails"
+run --identity "$ID" --keychain "$KC" --add-to-search-list; rc=$?
+[ "$rc" != 0 ] && grep -q 'could not restore the keychain search list' "$T/stderr" && grep -q 'login.keychain-db' "$T/stderr" &&
+  ok "a failed restore of the search list fails the run and prints the list to restore" || bad "restore failure ($rc)"
+rm "$T/restore-fails"
 
 if [ "$fails" = 0 ]; then echo "test-sign-release: all passed"; else echo "test-sign-release: $fails failed"; exit 1; fi

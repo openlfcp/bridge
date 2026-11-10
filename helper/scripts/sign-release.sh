@@ -88,21 +88,34 @@ if ! security "${find_args[@]}" | grep -F -- "$identity" >/dev/null; then
 fi
 
 if [ "$add_to_list" = 1 ]; then
+  # Read and check the list before changing anything (review PR 14 P2-1): a failed or empty read
+  # would otherwise be "restored" as an empty list, dropping every keychain the user had.
+  listing="$(security list-keychains -d user)" || die "cannot read the keychain search list; nothing changed"
   search_list=()
   while IFS= read -r line; do
     line="${line#"${line%%[![:space:]]*}"}"
     line="${line%\"}"
     line="${line#\"}"
     [ -n "$line" ] && search_list+=("$line")
-  done < <(security list-keychains -d user)
+  done <<<"$listing"
+  [ "${#search_list[@]}" -gt 0 ] || die "the keychain search list reads as empty; nothing changed"
   in_list=0
-  for k in ${search_list[@]+"${search_list[@]}"}; do
+  for k in "${search_list[@]}"; do
     [ "$k" = "$keychain" ] && in_list=1
   done
   if [ "$in_list" = 0 ]; then
-    restore_search_list() { security list-keychains -d user -s ${search_list[@]+"${search_list[@]}"}; }
+    restore_search_list() {
+      if ! security list-keychains -d user -s "${search_list[@]}"; then
+        echo "sign-release: could not restore the keychain search list; set it back with:" >&2
+        printf '  security list-keychains -d user -s' >&2
+        printf ' %q' "${search_list[@]}" >&2
+        echo >&2
+        exit 5
+      fi
+    }
     trap restore_search_list EXIT
-    security list-keychains -d user -s ${search_list[@]+"${search_list[@]}"} "$keychain"
+    security list-keychains -d user -s "${search_list[@]}" "$keychain" ||
+      die "cannot add $keychain to the keychain search list"
   fi
 fi
 
