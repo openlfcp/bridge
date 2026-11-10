@@ -132,6 +132,53 @@ describe("HelperSupervisor", () => {
       other.kill();
     }
   });
+
+  it("a ping in flight when stop() runs never starts a helper after stop (review PR 9 P2-3)", async () => {
+    const r = rig();
+    await r.s.start();
+    let fail: (e: Error) => void = () => {};
+    (r.helpers[0] as FakeHelper).ping = () => new Promise<void>((_, reject) => (fail = reject));
+    const round = r.s.pingNow();
+    await new Promise((res) => setImmediate(res));
+    await r.s.stop();
+    fail(new Error("closed"));
+    await round;
+    expect(r.s.state).toBe("stopped");
+    expect(r.helpers).toHaveLength(1);
+    expect(existsSync(r.pidFile)).toBe(false);
+  });
+
+  it("a helper whose start was in flight when stop() ran is closed before stop resolves", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "lfcp-sup-"));
+    const pidFile = join(dir, "helper.pid");
+    const helpers: FakeHelper[] = [];
+    let release: () => void = () => {};
+    const s = new HelperSupervisor({
+      start: async () => {
+        if (helpers.length === 1) await new Promise<void>((res) => (release = res));
+        const h = new FakeHelper();
+        helpers.push(h);
+        return h;
+      },
+      pidFile,
+      setInterval: () => ({}),
+      clearInterval: () => {},
+      isOurs: () => false,
+    });
+    await s.start();
+    (helpers[0] as FakeHelper).answering = false;
+    const round = s.pingNow(); // restart: the second start waits
+    await new Promise((res) => setImmediate(res));
+    const stopped = s.stop();
+    release();
+    await stopped;
+    await round;
+    expect(s.state).toBe("stopped");
+    expect(helpers).toHaveLength(2);
+    expect(helpers[1]?.closed).toBe(true);
+    expect(existsSync(pidFile)).toBe(false);
+  });
+
   it("an orphan that ignores SIGTERM is killed before the replacement starts (review PR 9 P2-4)", async () => {
     const orphan = spawn(
       process.execPath,
