@@ -12,9 +12,19 @@
 // (pnpm build first). A down migration drops what the later versions added (their tables and
 // rows): that is what the backup is for.
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  linkSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -54,10 +64,57 @@ function open(file) {
   return openBridgeDatabase(file, { migrate: false });
 }
 
+/**
+ * Why `target` cannot be a backup of `file`, or undefined. A backup is a new, separate file: never
+ * the database itself (however it is reached: a symlink or a hard link to it exists already),
+ * never its -wal / -shm / -journal (SQLite would take it for its own), never an existing file
+ * (an older backup is a point to go back to).
+ */
+function unsafeTarget(file, target) {
+  const abs = resolve(target);
+  try {
+    lstatSync(abs);
+    return `${abs} exists; a backup never replaces a file`;
+  } catch (e) {
+    if (e.code !== "ENOENT") return `${abs}: ${e.message}`;
+  }
+  let dir;
+  try {
+    dir = realpathSync(dirname(abs));
+  } catch {
+    return `no directory ${dirname(abs)}`;
+  }
+  const real = join(dir, basename(abs));
+  const db = realpathSync(file);
+  for (const own of [db, `${db}-wal`, `${db}-shm`, `${db}-journal`])
+    if (real === own) return `${abs} is the database's own file`;
+  return undefined;
+}
+
+/** A consistent copy of `db` at a new path; checked to open at the same version. */
 async function backup(db, file, to) {
-  const target =
-    to ?? `${file}.v${schemaVersion(db)}-${new Date().toISOString().replaceAll(":", "-")}.bak`;
-  await db.backup(target);
+  const version = schemaVersion(db);
+  const target = resolve(
+    to ?? `${file}.v${version}-${new Date().toISOString().replaceAll(":", "-")}.bak`,
+  );
+  const why = unsafeTarget(file, target);
+  if (why !== undefined) throw new Error(`refusing the backup: ${why}`);
+  // Written next to it under a temporary name, then linked into place: link never overwrites, so
+  // a file that appeared meanwhile stays, and a failed backup leaves no file under the name.
+  const tmp = `${target}.${process.pid}.tmp`;
+  try {
+    await db.backup(tmp);
+    const copy = openBridgeDatabase(tmp, { migrate: false });
+    try {
+      if (schemaVersion(copy) !== version)
+        throw new Error("the copy is not at the database's version");
+    } finally {
+      copy.close();
+    }
+    linkSync(tmp, target);
+  } finally {
+    for (const f of [tmp, `${tmp}-wal`, `${tmp}-shm`]) rmSync(f, { force: true });
+  }
   return target;
 }
 
@@ -137,6 +194,43 @@ async function selfTest() {
     if (!refused) throw new Error("migrate ran without STOP");
     const { stop } = await import(hostDist);
     stop(dir, "self-test");
+    // A backup that is not a separate new file is refused, before anything changes (review P1-1).
+    const version = () => {
+      const d = open(file);
+      try {
+        return schemaVersion(d);
+      } finally {
+        d.close();
+      }
+    };
+    const existing = join(dir, "existing.bak");
+    writeFileSync(existing, "irreplaceable old backup");
+    symlinkSync(file, join(dir, "link.sqlite"));
+    linkSync(file, join(dir, "hard.sqlite"));
+    for (const [name, target] of [
+      ["the database itself", file],
+      ["a symlink to it", join(dir, "link.sqlite")],
+      ["a hard link to it", join(dir, "hard.sqlite")],
+      ["its WAL", `${file}-wal`],
+      ["an existing file", existing],
+    ]) {
+      for (const argv of [
+        ["migrate", "--to", "1", "--backup", target],
+        ["backup", "--to", target],
+      ]) {
+        let failed = false;
+        try {
+          await run(argv, env, say);
+        } catch {
+          failed = true;
+        }
+        if (!failed) throw new Error(`${argv[0]} accepted ${name} as its backup`);
+        if (version() !== SCHEMA_VERSION)
+          throw new Error(`${argv[0]} to ${name} changed the schema`);
+      }
+    }
+    if (readFileSync(existing, "utf8") !== "irreplaceable old backup")
+      throw new Error("an existing backup was overwritten");
     await run(["migrate", "--to", "1", "--backup", join(dir, "before.bak")], env, say);
     const back = open(join(dir, "before.bak"));
     const backVersion = schemaVersion(back);
@@ -151,7 +245,9 @@ async function selfTest() {
     const upVersion = schemaVersion(up);
     up.close();
     if (upVersion !== SCHEMA_VERSION) throw new Error(`up left version ${upVersion}`);
-    console.log(`bridge-db self-test: ok (1 <-> ${SCHEMA_VERSION}, backup, STOP required)`);
+    console.log(
+      `bridge-db self-test: ok (1 <-> ${SCHEMA_VERSION}, backup, STOP required, unsafe backup targets refused)`,
+    );
     return 0;
   } finally {
     rmSync(dir, { recursive: true, force: true });
