@@ -293,11 +293,29 @@ export class Bootstrap {
 
   // ---------- steps ----------
 
-  /** Before every effect: STOP, the transport (TCC), and the write mode of the bootstrap. */
+  /**
+   * Before every effect (the bootstrap column of PR 7's permission table, review r3 P2-4): STOP, an
+   * active installation, the transport (TCC), no foreign marker for the section, then the write mode.
+   */
   async #gate(b: BindingRow): Promise<void> {
     if (this.#d.stopped()) throw new Refused("stop", "STOP is set");
+    const inst = this.#d.db
+      .prepare(
+        "SELECT i.status FROM installations i JOIN bindings b ON b.installation_id = i.id WHERE b.id = ?",
+      )
+      .get(b.id) as { status: string } | undefined;
+    if (inst?.status !== "active")
+      throw new Refused("transport", `installation ${inst?.status ?? "missing"}`);
     const s = this.#d.transport.status();
     if (s.state !== "ok") throw new Refused("transport", s.reason);
+    const v = await inspectMarkers(this.#d.transport, this.#d.instanceId, b.resource_id, false);
+    if (v.state === "incomplete")
+      throw new Refused("incomplete", "the marker search is incomplete");
+    if (v.state === "foreign")
+      throw new Refused(
+        "foreign_bridge",
+        `another bridge (${v.instances.join(", ")}) has this section`,
+      );
     await this.#d.transport.setWriteMode?.(b.verification === 1 ? "verification" : "bootstrap");
   }
 
