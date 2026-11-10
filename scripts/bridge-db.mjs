@@ -58,6 +58,23 @@ function homeOf(env) {
   );
 }
 
+/** The pid in run.lock when that process still runs (the lock of `lfcp-bridge run`), or undefined. */
+function runLockHolder(home) {
+  let pid;
+  try {
+    pid = Number(readFileSync(join(home, "run.lock"), "utf8").trim());
+  } catch {
+    return undefined;
+  }
+  if (!Number.isInteger(pid) || pid <= 0) return undefined;
+  try {
+    process.kill(pid, 0);
+    return pid;
+  } catch (e) {
+    return e.code === "EPERM" ? pid : undefined;
+  }
+}
+
 /** Opens without migrating: the version found stays as it is. */
 function open(file) {
   if (!existsSync(file)) throw new Error(`no database at ${file}`);
@@ -155,6 +172,12 @@ export async function run(argv, env = process.env, out = console.log) {
         throw new Error(
           "STOP is not set: run `lfcp-bridge stop` (and `lfcp-bridge service uninstall`) first",
         );
+      // STOP is not a lock: a running `lfcp-bridge run` (PR 9b) still holds the database.
+      const held = runLockHolder(dirname(file));
+      if (held !== undefined)
+        throw new Error(
+          `lfcp-bridge run (pid ${held}) holds the database: stop it (lfcp-bridge service uninstall, or Ctrl-C) first`,
+        );
       const db = open(file);
       try {
         const from = schemaVersion(db);
@@ -194,6 +217,16 @@ async function selfTest() {
     if (!refused) throw new Error("migrate ran without STOP");
     const { stop } = await import(hostDist);
     stop(dir, "self-test");
+    // A live run holds the database even under STOP.
+    writeFileSync(join(dir, "run.lock"), `${process.pid}\n`);
+    let locked = false;
+    try {
+      await run(["migrate", "--to", "1"], env, say);
+    } catch (e) {
+      locked = /holds the database/.test(e.message);
+    }
+    if (!locked) throw new Error("migrate ran while a run held run.lock");
+    rmSync(join(dir, "run.lock"));
     // A backup that is not a separate new file is refused, before anything changes (review P1-1).
     const version = () => {
       const d = open(file);
