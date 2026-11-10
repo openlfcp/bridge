@@ -186,7 +186,8 @@ export interface PlannedAppleIntent {
   readonly installationId: string;
   readonly direction: "to_apple";
   readonly kind: "create" | "update" | "restore_url";
-  readonly fields: readonly Field[];
+  /** restore_url writes the URL: its field is "url" (a quarantine of it holds the next one, B19). */
+  readonly fields: readonly (Field | "url")[];
   readonly basis: PlannedBasis;
   readonly payload:
     | {
@@ -252,7 +253,9 @@ export type TransitionKind =
   /** The person put a recurrence on the reminder: status, completion date and due become read-only (§6.4). */
   | "status_lock"
   /** The recurrence is gone: the group is agreed again as on a first link (§6.4). */
-  | "status_unlock";
+  | "status_unlock"
+  /** The person's URL on a linked reminder: url_state user_replaced, durable (R2-9 (2)). */
+  | "user_replaced";
 
 export interface Transition {
   readonly taskId: string;
@@ -260,6 +263,8 @@ export interface Transition {
   readonly reason?: string;
   readonly item?: { readonly id: string; readonly externalId?: string };
   readonly ignore?: readonly string[];
+  /** user_replaced: the person's URL. */
+  readonly url?: string;
 }
 
 export type Waiting =
@@ -559,7 +564,11 @@ export function plan(view: PassView): Plan {
           transitions.push({ taskId: link.taskId, kind: "ignore_copies", ignore: lm.ignore });
         // restore_url (§5.4, §6.2): our link back on a reminder whose URL is empty. It is this pass's
         // to_apple intent for the Task (one open per direction): field writes to Apple wait.
-        const restoring = lm.restoreUrl && !view.openIntent(link.taskId, "to_apple");
+        // An unknown restore_url (B19) holds the field "url" until a person decides (review PR 11 #20).
+        const restoring =
+          lm.restoreUrl &&
+          !view.openIntent(link.taskId, "to_apple") &&
+          !view.heldFields(link.taskId).includes("url");
         if (restoring)
           intents.push({
             bindingId: b.id,
@@ -567,7 +576,7 @@ export function plan(view: PassView): Plan {
             installationId: b.installationId,
             direction: "to_apple",
             kind: "restore_url",
-            fields: [],
+            fields: ["url"],
             basis: { rev: lm.item.rev, pL: {}, shadow: shadowOf(task as LfcpTask) },
             payload: {
               kind: "restore_url",
@@ -577,8 +586,16 @@ export function plan(view: PassView): Plan {
             },
             warnings: [],
           });
-        if (lm.userReplaced && link.urlState !== "user_replaced")
+        // The person put a URL of theirs on it: from now on the field is theirs — never restored,
+        // even once they clear it (R2-9 (2); review PR 11 #21).
+        if (lm.userReplaced && link.urlState !== "user_replaced") {
           items.push(note("user_replaced", lm.item, { taskId: link.taskId }));
+          transitions.push({
+            taskId: link.taskId,
+            kind: "user_replaced",
+            ...(lm.item.linkUrl === undefined ? {} : { url: lm.item.linkUrl }),
+          });
+        }
         // §6.4: a recurrence the person set locks status and due (read-only both ways); its
         // removal unlocks them, re-agreed as on a first link. Effective in this pass already.
         if (lm.item.hasRecurrence !== link.statusLocked)
