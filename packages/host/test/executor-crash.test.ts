@@ -804,3 +804,38 @@ describe("review PR 7", () => {
     );
   });
 });
+
+describe("the run process's write gate (PR 9b)", () => {
+  it("with permit, a non-fake transport may be given and permit decides each effect", async () => {
+    const it0 = item();
+    const t = await transport();
+    Object.defineProperty(t, "id", { value: "eventkit" });
+    const allowed = new Set<string>();
+    const e = new Executor({
+      db,
+      transport: t,
+      lfcp: noLfcp,
+      gates: gates(),
+      handler,
+      effects: { enabled: true, permit: (i) => allowed.has(i.id) },
+    });
+    const [i] = e.prepare("b", { intents: [update(it0, "Gated")], unlinks: 0 }) ?? [];
+    expect(await e.run((i as Intent).id)).toEqual({ kind: "effects_off" });
+    expect(store.items.get(it0.ref.id)?.title).toBe("Buy milk");
+    allowed.add((i as Intent).id);
+    expect(await e.run((i as Intent).id)).toEqual({ kind: "finalized" });
+    expect(store.items.get(it0.ref.id)?.title).toBe("Gated");
+    // Without permit, a non-fake transport is still refused.
+    expect(
+      () =>
+        new Executor({
+          db,
+          transport: t,
+          lfcp: noLfcp,
+          gates: gates(),
+          handler,
+          effects: { enabled: true },
+        }),
+    ).toThrow(/effects are off/);
+  });
+});

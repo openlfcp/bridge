@@ -33,11 +33,12 @@
 // kind, at prepare and again before any call; the effect §7.1 checks is the
 // one of the operation actually sent (review PR 7 #5).
 //
-// Effects are off in this PR (D-010 §11 PR 7): the executor gets as far as
-// the transport and writes nothing. `effects.enabled` writes to Apple only
-// through the fake transport, and to LFCP only through a port marked
-// `offlineTestPort` (tests, the crash suite); any other LFCP port stays
-// effects-off (review PR 7 #4). PR 9 opens it for verification bindings.
+// Effects: without `effects.enabled` the executor gets as far as the transport
+// and writes nothing. With it and no `permit`, it writes to Apple only through
+// the fake transport and to LFCP only through a port marked `offlineTestPort`
+// (tests, the crash suite; review PR 7 #4). The run process (PR 9b) passes
+// `permit`: the write gate of §7.6 / B16 — a verification binding, or
+// writesVerified for this helper build and macOS.
 
 import { randomUUID } from "node:crypto";
 import type {
@@ -127,7 +128,15 @@ export interface ExecutorOptions {
   readonly gates: Gates;
   readonly handler: IntentHandler;
   /** Off in this PR; on only with the fake transport. */
-  readonly effects?: { readonly enabled: boolean };
+  /**
+   * Effects. Without `permit`, only the fake transport and an offlineTestPort write (tests,
+   * the crash suite). With it (the run process, PR 9b), an effect runs when `permit` says so:
+   * the write gate of §7.6 / B16 — a verification binding, or writesVerified.
+   */
+  readonly effects?: {
+    readonly enabled: boolean;
+    readonly permit?: (intent: Intent) => boolean;
+  };
   readonly now?: () => number;
   /** The crash suite's hook: throws to stop at a boundary. */
   readonly crash?: (point: CrashPoint, intent: Intent) => void;
@@ -171,7 +180,11 @@ export class Executor {
   readonly #running = new Set<string>();
 
   constructor(options: ExecutorOptions) {
-    if (options.effects?.enabled === true && options.transport.id !== "fake")
+    if (
+      options.effects?.enabled === true &&
+      options.effects.permit === undefined &&
+      options.transport.id !== "fake"
+    )
       throw new Error(
         "effects are off in this build: they may run only on the fake transport (D-010 PR 7)",
       );
@@ -487,6 +500,7 @@ export class Executor {
   /** Effects of this intent's direction are on: Apple via the fake transport, LFCP via the offline test port. */
   #effectsOn(i: Intent): boolean {
     if (this.#o.effects?.enabled !== true) return false;
+    if (this.#o.effects.permit !== undefined) return this.#o.effects.permit(i);
     return i.direction === "to_apple"
       ? this.#o.transport.id === "fake"
       : OFFLINE_TEST_PORTS.has(this.#o.lfcp);
