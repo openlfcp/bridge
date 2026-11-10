@@ -14,10 +14,11 @@
  *   FIFO, O_RDWR never blocks and never fails with ENXIO, so the helper's opens never wait either.
  *   We hold the write side of stdout/stderr ourselves, so EOF never comes from there: the helper's
  *   end is the launcher's exit (open -W), or the child's;
+ * - a stdout line that is not JSON or answers no pending request goes to onUnmatched;
  * - close() asks the helper to stop, then stops the helper itself (its pid from ready, checked to be
  *   our executable) — with `open`, the launcher is not the helper;
  * - a request timeout rejects only that request (HelperLostError: its outcome is unknown); the
- *   connection stays up and a late answer is dropped. Restarting a silent helper is the host's
+ *   connection stays up and a late answer is reported (onUnmatched), not delivered. Restarting a silent helper is the host's
  *   supervision (PR 9).
  */
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
@@ -65,6 +66,8 @@ export interface HelperProcessOptions {
   readonly closeGraceMs?: number;
   /** stderr lines of the helper (EventKit logs noise there). */
   readonly onStderr?: (line: string) => void;
+  /** stdout lines that are not JSON or answer no pending request (a late answer, no id). */
+  readonly onUnmatched?: (line: string) => void;
 }
 
 /**
@@ -262,6 +265,7 @@ export class HelperProcess implements HelperLink {
     try {
       msg = JSON.parse(line) as Record<string, unknown>;
     } catch {
+      this.#opts.onUnmatched?.(line);
       return;
     }
     if (typeof msg.event === "string") {
@@ -270,7 +274,11 @@ export class HelperProcess implements HelperLink {
       return;
     }
     const p = this.#pending.get(msg.id as number);
-    if (p === undefined) return; // an answer after its timeout: dropped
+    if (p === undefined) {
+      // an answer after its timeout, or a line without an id: not delivered, but not lost
+      this.#opts.onUnmatched?.(line);
+      return;
+    }
     this.#pending.delete(msg.id as number);
     clearTimeout(p.timer);
     p.resolve(msg as WireResponse);

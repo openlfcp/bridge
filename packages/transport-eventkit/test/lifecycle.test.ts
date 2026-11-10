@@ -206,6 +206,26 @@ describe("FIFOs and the threadpool (R-001 live run, macOS 26.5.2)", () => {
       await b.close();
     }
   }, 20_000);
+
+  it("a stdout line that answers no request is reported, not dropped silently", async () => {
+    process.env.FAKE_HELPER_MODE = "no-id";
+    const unmatched: string[] = [];
+    try {
+      const h = await HelperProcess.start({
+        appPath: "/fake.app",
+        launcher: FAKE_OPEN,
+        helperName: "node",
+        onUnmatched: (l) => unmatched.push(l),
+      });
+      await expect(h.request("ping", {}, { timeoutMs: 500 })).rejects.toBeInstanceOf(
+        HelperLostError,
+      );
+      expect(unmatched).toEqual([expect.stringContaining('"no id"')]);
+      await h.close();
+    } finally {
+      delete process.env.FAKE_HELPER_MODE;
+    }
+  }, 20_000);
 });
 
 describe("close and request timeouts (P2-4, timeout policy)", () => {
