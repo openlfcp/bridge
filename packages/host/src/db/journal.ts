@@ -1,22 +1,29 @@
-// The journal of the bridge (D-010 §2.1 `log`, §7): what happened, for a
-// person and for diagnostics, in bridge.sqlite. Entries are appended, never
-// changed; `kind` is a stable machine name, `message` the text for people.
-// No secrets and no Task contents beyond what the person sees anyway.
+// The journal of the bridge (D-010 §2.1 `log`, r2 §2.4): what happened, for
+// a person, in bridge.sqlite. Entries are appended, never changed. An entry
+// is a message key and its parameters (r2 §3 `journal(id, ts, level,
+// binding_id, task_id, key, params_json)`); the text a person reads comes
+// from the key (JOURNAL_TEXT), so it can be worded again or translated
+// without touching what was recorded. No secrets, no Task contents beyond
+// what the person sees anyway.
 
 import type { BridgeDatabase } from "./database.js";
 
 export type JournalLevel = "debug" | "info" | "warn" | "error";
 
+export type JournalParams = Readonly<Record<string, unknown>>;
+
 export interface JournalEntry {
   readonly id: number;
   /** RFC 3339 UTC. */
-  readonly at: string;
+  readonly ts: string;
   readonly level: JournalLevel;
-  readonly kind: string;
+  /** The message key: a stable machine name. */
+  readonly key: string;
   readonly bindingId?: string;
-  readonly runId?: string;
-  readonly message: string;
-  readonly data?: unknown;
+  readonly taskId?: string;
+  readonly params?: JournalParams;
+  /** The text for a person, from the key (JOURNAL_TEXT). */
+  readonly text: string;
 }
 
 export interface JournalFilter {
@@ -28,47 +35,78 @@ export interface JournalFilter {
   readonly limit?: number;
 }
 
+/** The texts of the message keys; a key without one shows as itself. */
+export const JOURNAL_TEXT: Readonly<Record<string, (p: JournalParams) => string>> = {
+  "effect.off": () => "An effect would run here (effects are off in this build)",
+  "effect.lost": () => "The answer of a write to Reminders was lost",
+  "effect.in_flight": () => "A write to Reminders is already under way; not repeated",
+  "effect.refused": (p) => `Reminders refused a write: ${String(p.code ?? "")}`,
+  "intent.unknown_outcome": () =>
+    "Whether a write to Reminders happened is not known: decide in `lfcp-bridge quarantine`",
+  "intent.invalid": (p) =>
+    `An intent did not match its binding and was refused: ${String(p.detail ?? "")}`,
+  "intent.field_quarantined": (p) =>
+    `Not written: ${String(p.fields ?? "")} waits for a decision in \`lfcp-bridge quarantine\``,
+  "guard.limit": (p) =>
+    `Stopped: more changes than a person makes (${String(p.holds ?? "")}). Usually the filter got narrower or the list became unavailable — not that you deleted these tasks`,
+  "safe_mode.on": () => "Safe Mode: the bridge crashed twice at start",
+  "safe_mode.off": () => "Safe Mode turned off",
+  "delivery.rejected": () => "LFCP refused a change made from Reminders",
+  "delivery.partial": () => "LFCP accepted only part of a change made from Reminders",
+};
+
 const RANK: Readonly<Record<JournalLevel, number>> = { debug: 0, info: 1, warn: 2, error: 3 };
 
 interface Row {
   id: number;
-  at: string;
+  ts: string;
   level: JournalLevel;
-  kind: string;
   binding_id: string | null;
-  run_id: string | null;
-  message: string;
-  data_json: string | null;
+  task_id: string | null;
+  key: string;
+  params_json: string | null;
+}
+
+/** The text of an entry: its key's, or (an entry of schema version 2) the text it was written with. */
+function textOf(key: string, params: JournalParams | undefined): string {
+  const t = JOURNAL_TEXT[key];
+  if (t !== undefined) return t(params ?? {});
+  return typeof params?.text === "string" ? params.text : key;
 }
 
 export class Journal {
   constructor(
     private readonly db: BridgeDatabase,
     private readonly now: () => number = Date.now,
+    /** The process run, recorded in each entry's parameters. */
     private readonly runId?: string,
   ) {}
 
   /** Appends one entry; returns its id. */
   append(
     level: JournalLevel,
-    kind: string,
-    message: string,
-    extra: { readonly bindingId?: string; readonly data?: unknown } = {},
+    key: string,
+    extra: {
+      readonly bindingId?: string;
+      readonly taskId?: string;
+      readonly params?: JournalParams;
+    } = {},
   ): number {
     if (!(level in RANK)) throw new RangeError(`unknown journal level ${level}`);
+    const params =
+      this.runId === undefined ? extra.params : { ...(extra.params ?? {}), run: this.runId };
     const r = this.db
       .prepare(
-        `INSERT INTO journal (at, level, kind, binding_id, run_id, message, data_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO journal (ts, level, binding_id, task_id, key, params_json)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       )
       .run(
         new Date(this.now()).toISOString(),
         level,
-        kind,
         extra.bindingId ?? null,
-        this.runId ?? null,
-        message,
-        extra.data === undefined ? null : JSON.stringify(extra.data),
+        extra.taskId ?? null,
+        key,
+        params === undefined ? null : JSON.stringify(params),
       );
     return Number(r.lastInsertRowid);
   }
@@ -101,17 +139,19 @@ export class Journal {
       )
       .all(...args, filter.limit ?? 100) as Row[];
     if (!forward) rows.reverse();
-    return rows.map((r) =>
-      Object.freeze({
+    return rows.map((r) => {
+      const params =
+        r.params_json === null ? undefined : (JSON.parse(r.params_json) as JournalParams);
+      return Object.freeze({
         id: r.id,
-        at: r.at,
+        ts: r.ts,
         level: r.level,
-        kind: r.kind,
+        key: r.key,
         ...(r.binding_id === null ? {} : { bindingId: r.binding_id }),
-        ...(r.run_id === null ? {} : { runId: r.run_id }),
-        message: r.message,
-        ...(r.data_json === null ? {} : { data: JSON.parse(r.data_json) as unknown }),
-      }),
-    );
+        ...(r.task_id === null ? {} : { taskId: r.task_id }),
+        ...(params === undefined ? {} : { params }),
+        text: textOf(r.key, params),
+      });
+    });
   }
 }

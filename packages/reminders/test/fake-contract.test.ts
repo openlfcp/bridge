@@ -32,6 +32,13 @@ function fakeRig(opts: FakeTransportOptions): () => Promise<ContractRig> {
           void edit();
         };
       },
+      stallNextWrite: () => {
+        let release = () => {};
+        transport.faults.stallNextWrite = new Promise<void>((r) => {
+          release = r;
+        });
+        return () => release();
+      },
       restart: async () => {
         transport = new FakeTransport(store, opts);
         return transport;

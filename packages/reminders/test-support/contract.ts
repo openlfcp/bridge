@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   type Alarm,
   type AppleItem,
+  type AppleOp,
   type AppleOpResult,
   type AppleOpSuccess,
   type DurableKV,
@@ -54,6 +55,8 @@ export interface ContractRig {
   beforeSave?(edit: () => Promise<void> | void): void;
   /** A new transport instance on the same account and DurableKV (process restart). Optional. */
   restart?(): Promise<RemindersTransport>;
+  /** Arms: the next write waits before its effect until the returned release is called. Optional. */
+  stallNextWrite?(): () => void;
 }
 
 export const SCOPE_PREFIX = "LFCP · ";
@@ -633,6 +636,59 @@ export function transportContract(name: string, makeRig: () => Promise<ContractR
         } else {
           expect(rec.state).toBe("unknown");
         }
+      });
+
+      it("after a lost answer, the same opKey is sent again only if recover is not unknown", async () => {
+        if (rig.loseNextResponse === undefined) return;
+        const c = await create("a");
+        rig.loseNextResponse();
+        const key = opKey();
+        const op: AppleOp = {
+          opKey: key,
+          kind: "update",
+          ref: c.ref,
+          set: { title: "b" },
+          expect: { rev: c.rev },
+        };
+        await expect(t.apply(op)).rejects.toThrow();
+        const after = (await t.find({ id: c.ref.id }, "all")).items[0];
+        const rec = await t.recover(key);
+        if (rec.state === "unknown") {
+          // Frozen: refused without sending, the outcome stays unknown.
+          await expect(t.apply(op)).rejects.toMatchObject({
+            name: "OutcomeUnknownError",
+            opKey: key,
+            opKind: "update",
+          });
+          expect((await t.find({ id: c.ref.id }, "all")).items[0]?.rev).toBe(after?.rev);
+          expect((await t.recover(key)).state).toBe("unknown");
+        } else {
+          expect(rec.state).toBe("done");
+          expect(ok(await t.apply(op)).existing).toBe(true);
+        }
+      });
+
+      it("a call while another with the same opKey is in flight is refused, nothing sent twice", async () => {
+        if (rig.stallNextWrite === undefined) return;
+        const release = rig.stallNextWrite();
+        const op: AppleOp = {
+          opKey: opKey(),
+          kind: "create",
+          list: list.id,
+          linkUrl: "lfcp://task/INFLIGHT",
+          set: { title: "once" },
+        };
+        const first = t.apply(op);
+        await expect(t.apply(op)).rejects.toMatchObject({
+          name: "OperationInFlightError",
+          opKey: op.opKey,
+        });
+        release();
+        const r = ok(await first);
+        const found = await t.find({ url: "lfcp://task/INFLIGHT" }, [list.id]);
+        expect(found.items.map((i) => i.ref.id)).toEqual([r.ref.id]);
+        // Once it answered, the same opKey is an idempotent repeat again.
+        expect(ok(await t.apply(op)).existing).toBe(true);
       });
     });
   });

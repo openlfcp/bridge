@@ -200,8 +200,9 @@ describe("deliver (§5.9)", () => {
     expect(row("I2").state).toBe("finalized");
     const [entry] = new Journal(db).list({ bindingId: "b" });
     expect(entry).toMatchObject({
-      kind: "delivery.partial",
-      data: { intent: "I1", conflicts: [], recordedOnly: ["title"] },
+      key: "delivery.partial",
+      taskId: "T",
+      params: { intent: "I1", conflicts: [], recordedOnly: ["title"] },
     });
     // The same with nothing accepted: the same rule.
     intent("I5", ["title"]);

@@ -76,7 +76,16 @@ function seedV1(d: BridgeDatabase) {
     "INSERT INTO bindings (id, installation_id, resource_id, adapter, transport, state, created_at) VALUES ('b1', 'i1', 'R1', 'apple-reminders', 'eventkit', 'bootstrapping', ?)",
   ).run(now);
   new Holds(d).set("b1", "ownership_lost", { why: "no marker" });
-  new Journal(d).append("info", "binding.created", "Inbox bound", { bindingId: "b1" });
+  // The journal as the schema version has it (version 3 changes its columns).
+  if (schemaVersion(d) < 3)
+    d.prepare(
+      "INSERT INTO journal (at, level, kind, binding_id, message) VALUES (?, 'info', 'binding.created', 'b1', 'Inbox bound')",
+    ).run(now);
+  else
+    new Journal(d).append("info", "binding.created", {
+      bindingId: "b1",
+      params: { text: "Inbox bound" },
+    });
   d.prepare("INSERT INTO meta (key, value) VALUES ('bridge_instance', 'abc')").run();
 }
 
@@ -104,7 +113,9 @@ describe("bridge.sqlite migrations", () => {
       expect(schema(d)).toEqual(fresh);
       if (from >= 1) {
         expect(new Holds(d).of("b1").map((h) => h.reason)).toEqual(["ownership_lost"]);
-        expect(new Journal(d).list().map((e) => e.kind)).toEqual(["binding.created"]);
+        expect(new Journal(d).list().map((e) => [e.key, e.text])).toEqual([
+          ["binding.created", "Inbox bound"],
+        ]);
       }
     }
   });
@@ -113,12 +124,12 @@ describe("bridge.sqlite migrations", () => {
     const d = db();
     const latest = schema(d);
     seedV1(d);
-    expect(migrateTo(d, 1)).toEqual([1]);
+    expect(migrateTo(d, 1)).toEqual([2, 1]);
     expect(tables(d)).toEqual(V1_TABLES);
     expect(new Holds(d).of("b1")).toHaveLength(1);
     expect(migrateTo(d, 0)).toEqual([0]);
     expect(tables(d)).toEqual([]);
-    expect(migrateTo(d, SCHEMA_VERSION)).toEqual([1, 2]);
+    expect(migrateTo(d, SCHEMA_VERSION)).toEqual([1, 2, 3]);
     expect(schema(d)).toEqual(latest);
   });
 
@@ -242,32 +253,35 @@ describe("the journal", () => {
     const d = db();
     seedV1(d);
     const j = new Journal(d, () => Date.parse("2026-11-10T11:00:00Z"), "run-1");
-    const a = j.append("debug", "pass.start", "pass started");
-    j.append("warn", "alarm.old_day", "a reminder kept its alarm on the old day", {
+    const a = j.append("debug", "pass.start");
+    j.append("warn", "alarm.old_day", {
       bindingId: "b1",
-      data: { task: "T1" },
+      taskId: "T1",
+      params: { date: "2026-11-12" },
     });
-    j.append("error", "transport.down", "the helper stopped");
-    expect(j.list().map((e) => e.kind)).toEqual([
+    j.append("error", "transport.down");
+    expect(j.list().map((e) => e.key)).toEqual([
       "binding.created",
       "pass.start",
       "alarm.old_day",
       "transport.down",
     ]);
-    expect(j.list({ bindingId: "b1" }).map((e) => e.kind)).toEqual([
+    expect(j.list({ bindingId: "b1" }).map((e) => e.key)).toEqual([
       "binding.created",
       "alarm.old_day",
     ]);
     expect(j.list({ minLevel: "warn" }).map((e) => e.level)).toEqual(["warn", "error"]);
-    expect(j.list({ afterId: a }).map((e) => e.kind)).toEqual(["alarm.old_day", "transport.down"]);
-    expect(j.list({ limit: 2 }).map((e) => e.kind)).toEqual(["alarm.old_day", "transport.down"]);
+    expect(j.list({ afterId: a }).map((e) => e.key)).toEqual(["alarm.old_day", "transport.down"]);
+    expect(j.list({ limit: 2 }).map((e) => e.key)).toEqual(["alarm.old_day", "transport.down"]);
     expect(j.list({ minLevel: "warn" })[0]).toMatchObject({
-      at: "2026-11-10T11:00:00.000Z",
-      runId: "run-1",
+      ts: "2026-11-10T11:00:00.000Z",
       bindingId: "b1",
-      data: { task: "T1" },
+      taskId: "T1",
+      params: { date: "2026-11-12", run: "run-1" },
+      // No text for the key: the key itself.
+      text: "alarm.old_day",
     });
-    expect(() => j.append("loud" as never, "x", "y")).toThrow(RangeError);
+    expect(() => j.append("loud" as never, "x")).toThrow(RangeError);
   });
 });
 
@@ -352,7 +366,7 @@ describe("review PR 2: r4 states, holds, version check, journal pages, STOP dura
   it("afterId pages forward from the cursor: nothing is skipped past the limit", () => {
     const d = db();
     const j = new Journal(d);
-    for (let i = 0; i < 105; i++) j.append("info", "tick", `#${i}`);
+    for (let i = 0; i < 105; i++) j.append("info", "tick", { params: { n: i } });
     expect(j.list({ afterId: 0 }).map((e) => e.id)).toEqual(
       Array.from({ length: 100 }, (_, i) => i + 1),
     );
@@ -381,5 +395,52 @@ describe("review PR 2: r4 states, holds, version check, journal pages, STOP dura
     ]);
     expect(resume(dir, sync)).toBe(false);
     expect(seen).toHaveLength(2);
+  });
+});
+
+// Version 3: runs and journal as D-010 r2 §3 defines them.
+describe("migration 3: runs and journal of r2", () => {
+  it("keeps the data of version 2 both ways; texts come from the message key", () => {
+    const d = db({ migrate: false });
+    migrateTo(d, 2);
+    seedV1(d);
+    d.prepare(
+      "INSERT INTO journal (at, level, kind, binding_id, run_id, message, data_json) VALUES (?, 'warn', 'safe_mode.on', NULL, 'r0', 'old text', '{\"runs\":2}')",
+    ).run(now);
+    d.prepare(
+      "INSERT INTO runs (id, pid, started_at, ended_at, end_reason) VALUES ('r0', 42, ?, ?, 'crashed')",
+    ).run(now, now);
+    migrateTo(d, 3);
+    expect(d.prepare("SELECT id, kind, outcome, stats_json FROM runs").all()).toEqual([
+      { id: "r0", kind: "process", outcome: "crashed", stats_json: '{"pid":42}' },
+    ]);
+    const entries = new Journal(d).list();
+    expect(entries.map((e) => [e.key, e.text, e.params])).toEqual([
+      ["binding.created", "Inbox bound", { text: "Inbox bound", data: null, run: null }],
+      // A key with a text: the text of the key, the old one kept in params.
+      [
+        "safe_mode.on",
+        "Safe Mode: the bridge crashed twice at start",
+        { text: "old text", data: { runs: 2 }, run: "r0" },
+      ],
+    ]);
+    // A pass run of version 3: a dry run with its plan.
+    d.prepare(
+      "INSERT INTO runs (id, kind, binding_id, started_at, plan_json) VALUES ('p1', 'dry', 'b1', ?, '[]')",
+    ).run(now);
+    expect(() =>
+      d.prepare("INSERT INTO runs (id, kind, started_at) VALUES ('p2', 'sideways', ?)").run(now),
+    ).toThrow(/CHECK/);
+    // Back to 2: the process runs and the journal as they were; pass runs have no place there.
+    migrateTo(d, 2);
+    expect(d.prepare("SELECT id, pid, end_reason FROM runs").all()).toEqual([
+      { id: "r0", pid: 42, end_reason: "crashed" },
+    ]);
+    expect(
+      d.prepare("SELECT kind, message, run_id, data_json FROM journal ORDER BY id").all(),
+    ).toEqual([
+      { kind: "binding.created", message: "Inbox bound", run_id: null, data_json: null },
+      { kind: "safe_mode.on", message: "old text", run_id: "r0", data_json: '{"runs":2}' },
+    ]);
   });
 });

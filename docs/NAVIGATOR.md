@@ -27,7 +27,10 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 | `src/lfcp/liveness.ts`, `reconnect.ts` | a PING after 15 s of silence, dead after 5 s more → drop and reconnect; backoff 1 s → 15 s ±20 %, restartable; `SectionHost.wake()` (drop, reconnect, new generation) and `networkBack()` | 3b |
 | `src/lfcp/access.ts` | `access_checked_now` (an answer in the current generation: allowed or read-only), `offline_commit_allowed` (the last answer kept in `meta`); a refusal → `revocationStatus` (the §8.6 write barrier) → refused / revoked for good; hold `access_refused` | 3b |
 | `src/lfcp/delivery.ts` | §5.9: batch status → intent; no-op receipt delivered at once; rejected and partial by the field's generation (`bases.intent_id`), conflicts `lfcp_rejected` / `lfcp_partial`; blocked → hold `access_refused` | 3b |
-| `src/executor/` | intents, recovery, guards, limits, Safe Mode | 7 |
+| `src/executor/permissions.ts` | **the one table** of what an effect needs, for normal / verification / bootstrap / unbind (§7.1, r3 P2-4): `permits(context)` | 7 |
+| `src/executor/intents.ts` | intents in `bridge.sqlite` (§5.6): ULID ids, `brg1:<id>`, one open intent per Task and direction, the state steps | 7 |
+| `src/executor/executor.ts` | prepare (after the limits) → §7.1 → `effecting` → one call → result → finalize; recovery §5.7 (`unknown_outcome` quarantine, which also holds the Task's fields in both directions until resolved; every unknown outcome is quarantined, nothing inferred from the item — B19; an opKey with an unknown outcome is never sent again — `OutcomeUnknownError` → quarantine, a new opKey only after a person; `OperationInFlightError` and a second runner in this process → `in_flight`, not repeated); an intent is checked against its binding and its payload against its kind before any call; **effects off** (Apple only through the fake transport, LFCP only through `offlineTestPort`) | 7 |
+| `src/executor/limits.ts`, `safe-mode.ts`, `transport-state.ts` | sliding-window limits with prepared intents counted (§7.2); runs and Safe Mode (§7.3); the transport's DurableKV in `transport_state` | 7 |
 
 ## The SDK
 

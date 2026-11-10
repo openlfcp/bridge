@@ -24,6 +24,8 @@ import {
   ListExistsError,
   type ListInfo,
   type ListRef,
+  OperationInFlightError,
+  OutcomeUnknownError,
   type RecoverResult,
   type RemindersTransport,
   TransportReadError,
@@ -259,6 +261,8 @@ export class FakeFaults {
   incompleteReads = false;
   /** Runs after the expect check and before the save (the person edits in that window). */
   beforeSave: ((ref: ItemRef) => void) | undefined;
+  /** The next write waits for this before its effect: meanwhile its opKey is in flight. */
+  stallNextWrite: Promise<void> | undefined;
 }
 
 export class ResponseLostError extends Error {
@@ -282,6 +286,7 @@ export class FakeTransport implements RemindersTransport {
     detail: "not open",
   };
   #kv: DurableKV | undefined;
+  readonly #inFlight = new Set<string>();
   #scope: WriteScope = { listTitlePrefixes: [], listIds: [] };
   #changeCbs = new Set<(h: ChangeHint) => void>();
   #systemCbs = new Set<(e: "wake" | "sleep" | "access_changed") => void>();
@@ -409,8 +414,37 @@ export class FakeTransport implements RemindersTransport {
     if (this.capabilities.recover === "stages") this.#kv?.put(`op:${opKey}`, value);
   }
 
+  /**
+   * Refuses, without sending, a call while another with its opKey is in flight, and (stages
+   * recover) one whose earlier attempt is still "sent": its outcome is unknown.
+   */
+  #claim(opKey: string, kind: string): void {
+    if (this.#inFlight.has(opKey)) throw new OperationInFlightError(opKey);
+    if (this.capabilities.recover === "stages") {
+      const s = this.#kv?.get(`op:${opKey}`) as { stage?: string; kind?: string } | undefined;
+      if (s?.stage === "sent") throw new OutcomeUnknownError(opKey, s.kind ?? kind);
+    }
+    this.#inFlight.add(opKey);
+  }
+
+  async #stall(): Promise<void> {
+    const stall = this.faults.stallNextWrite;
+    if (stall === undefined) return;
+    this.faults.stallNextWrite = undefined;
+    await stall;
+  }
+
   async createList(op: { opKey: string; title: string }): Promise<ListInfo> {
     this.#requireOk();
+    this.#claim(op.opKey, "create_list");
+    try {
+      return await this.#createList(op);
+    } finally {
+      this.#inFlight.delete(op.opKey);
+    }
+  }
+
+  async #createList(op: { opKey: string; title: string }): Promise<ListInfo> {
     const done = this.store.applied.get(op.opKey);
     if (done !== undefined && "list" in done) return done.list;
     if (!this.#scope.listTitlePrefixes.some((p) => op.title.startsWith(p))) {
@@ -418,7 +452,8 @@ export class FakeTransport implements RemindersTransport {
     }
     if ([...this.store.lists.values()].some((l) => l.title === op.title))
       throw new ListExistsError(op.title);
-    this.#stage(op.opKey, { stage: "sent" });
+    await this.#stall();
+    this.#stage(op.opKey, { stage: "sent", kind: "create_list" });
     const list = this.store.addList(op.title);
     this.#scope = { ...this.#scope, listIds: [...this.#scope.listIds, list.id] };
     const result: ListCreated = { ok: true, opKey: op.opKey, list };
@@ -429,6 +464,15 @@ export class FakeTransport implements RemindersTransport {
   }
 
   async apply(op: AppleOp): Promise<AppleOpResult> {
+    this.#claim(op.opKey, op.kind);
+    try {
+      return await this.#apply(op);
+    } finally {
+      this.#inFlight.delete(op.opKey);
+    }
+  }
+
+  async #apply(op: AppleOp): Promise<AppleOpResult> {
     if (this.#status.state !== "ok") {
       return this.#fail(op.opKey, "transport_error", false, `transport is ${this.#status.state}`);
     }
@@ -440,7 +484,8 @@ export class FakeTransport implements RemindersTransport {
     const prior = this.store.applied.get(op.opKey);
     if (prior !== undefined && !("list" in prior)) return { ...prior, existing: true };
 
-    this.#stage(op.opKey, { stage: "sent" });
+    await this.#stall();
+    this.#stage(op.opKey, { stage: "sent", kind: op.kind });
     const result = this.#effect(op);
     if (result.ok) {
       this.store.applied.set(op.opKey, result);

@@ -6,6 +6,11 @@
  * - Completeness: `snapshot` and `find` are either complete or say `complete: false`.
  * - Every write carries `opKey` (the bridge's intent id); auxiliary record ids derive from it.
  *   `recover(opKey)` answers "done" only when the whole operation is confirmed.
+ * - A write is repeated with the same `opKey` only while `recover(opKey)` would answer
+ *   "not_started" (a "done" one returns its stored result). After a lost answer whose outcome is
+ *   unknown the write is refused with OutcomeUnknownError, without sending: the host settles it
+ *   (§5.7, quarantine) and only then writes again under a new opKey. A call while another one
+ *   with the same opKey is in flight is refused with OperationInFlightError, also without sending.
  * - `written` holds the stored values of exactly the written fields; the bridge's bases come from it.
  * - Personal data (notes, time of day, zone, alarms, recurrence, a URL the person set) is never written.
  *   The bridge never deletes reminders (B11); only its own markers can be retired.
@@ -233,6 +238,28 @@ export class TransportReadError extends Error {
   ) {
     super(message);
     this.name = "TransportReadError";
+  }
+}
+
+/**
+ * The opKey was sent before and its outcome is unknown (recover answers "unknown"): nothing is
+ * sent again. Resolve it (§5.7) and write again, if still wanted, under a new opKey.
+ */
+export class OutcomeUnknownError extends Error {
+  constructor(
+    readonly opKey: string,
+    readonly opKind: string,
+  ) {
+    super(`outcome of ${opKind} ${opKey} is unknown; resolve it (recover) and use a new opKey`);
+    this.name = "OutcomeUnknownError";
+  }
+}
+
+/** Another call with the same opKey is in flight: nothing is sent. */
+export class OperationInFlightError extends Error {
+  constructor(readonly opKey: string) {
+    super(`${opKey} is already in flight`);
+    this.name = "OperationInFlightError";
   }
 }
 

@@ -214,24 +214,18 @@ function rejected(
       iso(),
     );
   }
-  journal.append(
-    "warn",
-    partial ? "delivery.partial" : "delivery.rejected",
-    partial
-      ? "LFCP accepted only part of a change made from Reminders"
-      : "LFCP refused a change made from Reminders",
-    {
-      bindingId: intent.binding_id,
-      data: {
-        intent: intent.id,
-        task: intent.task_id,
-        code: status.rejection?.code ?? null,
-        accepted,
-        again,
-        conflicts: conflicted,
-        recordedOnly,
-      },
+  journal.append("warn", partial ? "delivery.partial" : "delivery.rejected", {
+    bindingId: intent.binding_id,
+    taskId: intent.task_id,
+    params: {
+      intent: intent.id,
+      task: intent.task_id,
+      code: status.rejection?.code ?? null,
+      accepted,
+      again,
+      conflicts: conflicted,
+      recordedOnly,
     },
-  );
+  });
   return partial ? "partial" : "refused";
 }

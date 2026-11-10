@@ -24,6 +24,25 @@ export interface Migration {
   readonly down: readonly string[];
 }
 
+const V1_RUNS = `CREATE TABLE runs (
+      id TEXT PRIMARY KEY,
+      pid INTEGER NOT NULL,
+      started_at TEXT NOT NULL,
+      ended_at TEXT,
+      end_reason TEXT
+    ) STRICT`;
+
+const V1_JOURNAL = `CREATE TABLE journal (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      at TEXT NOT NULL,
+      level TEXT NOT NULL CHECK (level IN ('debug','info','warn','error')),
+      kind TEXT NOT NULL,
+      binding_id TEXT,
+      run_id TEXT,
+      message TEXT NOT NULL,
+      data_json TEXT
+    ) STRICT`;
+
 const V1: Migration = {
   version: 1,
   name: "process, bindings, holds, journal",
@@ -68,23 +87,8 @@ const V1: Migration = {
       detail_json TEXT,
       PRIMARY KEY (binding_id, reason)
     ) STRICT, WITHOUT ROWID`,
-    `CREATE TABLE runs (
-      id TEXT PRIMARY KEY,
-      pid INTEGER NOT NULL,
-      started_at TEXT NOT NULL,
-      ended_at TEXT,
-      end_reason TEXT
-    ) STRICT`,
-    `CREATE TABLE journal (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      at TEXT NOT NULL,
-      level TEXT NOT NULL CHECK (level IN ('debug','info','warn','error')),
-      kind TEXT NOT NULL,
-      binding_id TEXT,
-      run_id TEXT,
-      message TEXT NOT NULL,
-      data_json TEXT
-    ) STRICT`,
+    V1_RUNS,
+    V1_JOURNAL,
     `CREATE INDEX journal_by_binding ON journal(binding_id, id)`,
     `CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT, WITHOUT ROWID`,
   ],
@@ -225,8 +229,72 @@ const V2: Migration = {
   ],
 };
 
+// Version 3: runs and journal as D-010 r2 §3 defines them (r4 keeps "as in
+// r2"). runs are the process's starts (kind 'process', Safe Mode §2.3) and
+// the passes (kind 'dry' / 'apply', with their plan: `approve` refers to a
+// dry run by id). The journal is for people: its text comes from the
+// message key, with parameters (r2 §2.4). The data of version 2 is kept:
+// a process run's pid goes to stats_json; a journal entry's text, data and
+// run go to params_json.
+const V3: Migration = {
+  version: 3,
+  name: "runs and journal of r2",
+  up: [
+    "ALTER TABLE runs RENAME TO runs_v2",
+    `CREATE TABLE runs (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind IN ('process','dry','apply')),
+      binding_id TEXT,
+      started_at TEXT NOT NULL,
+      ended_at TEXT,
+      outcome TEXT,
+      stats_json TEXT,
+      plan_json TEXT
+    ) STRICT`,
+    `INSERT INTO runs (id, kind, binding_id, started_at, ended_at, outcome, stats_json)
+       SELECT id, 'process', NULL, started_at, ended_at, end_reason, json_object('pid', pid) FROM runs_v2`,
+    "DROP TABLE runs_v2",
+    "CREATE INDEX runs_by_binding ON runs(binding_id, started_at)",
+    "DROP INDEX journal_by_binding",
+    "ALTER TABLE journal RENAME TO journal_v2",
+    `CREATE TABLE journal (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts TEXT NOT NULL,
+      level TEXT NOT NULL CHECK (level IN ('debug','info','warn','error')),
+      binding_id TEXT,
+      task_id TEXT,
+      key TEXT NOT NULL,
+      params_json TEXT
+    ) STRICT`,
+    `INSERT INTO journal (id, ts, level, binding_id, task_id, key, params_json)
+       SELECT id, at, level, binding_id, NULL, kind,
+         json_object('text', message, 'data', CASE WHEN data_json IS NULL THEN NULL ELSE json(data_json) END, 'run', run_id)
+       FROM journal_v2`,
+    "DROP TABLE journal_v2",
+    "CREATE INDEX journal_by_binding ON journal(binding_id, id)",
+  ],
+  down: [
+    "DROP INDEX runs_by_binding",
+    "ALTER TABLE runs RENAME TO runs_v3",
+    V1_RUNS,
+    `INSERT INTO runs (id, pid, started_at, ended_at, end_reason)
+       SELECT id, coalesce(json_extract(stats_json, '$.pid'), 0), started_at, ended_at, outcome
+       FROM runs_v3 WHERE kind = 'process'`,
+    "DROP TABLE runs_v3",
+    "DROP INDEX journal_by_binding",
+    "ALTER TABLE journal RENAME TO journal_v3",
+    V1_JOURNAL,
+    `INSERT INTO journal (id, at, level, kind, binding_id, run_id, message, data_json)
+       SELECT id, ts, level, key, binding_id, json_extract(params_json, '$.run'),
+         coalesce(json_extract(params_json, '$.text'), key), json_extract(params_json, '$.data')
+       FROM journal_v3`,
+    "DROP TABLE journal_v3",
+    "CREATE INDEX journal_by_binding ON journal(binding_id, id)",
+  ],
+};
+
 /** Every migration, in order. */
-export const MIGRATIONS: readonly Migration[] = Object.freeze([V1, V2]);
+export const MIGRATIONS: readonly Migration[] = Object.freeze([V1, V2, V3]);
 
 /** The schema version this build writes. */
 export const SCHEMA_VERSION = MIGRATIONS.length;
