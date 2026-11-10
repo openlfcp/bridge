@@ -129,6 +129,23 @@ describe("lfcp-bridge (PR 9 commands)", () => {
     expect((await m.call("log")).out).toContain("bootstrap.done");
   });
 
+  it("doctor changes nothing: a lost marker is reported, no hold and no journal entry is written", async () => {
+    const m = await machine();
+    await m.call("bind", "Work");
+    const marker = [...m.store.items.values()].find((i) => i.linkUrl?.startsWith("lfcp://bridge/"));
+    m.person.delete({ id: marker?.id as string });
+    const state = () =>
+      JSON.stringify([
+        m.db.prepare("SELECT * FROM binding_holds ORDER BY binding_id, reason").all(),
+        m.db.prepare("SELECT * FROM journal ORDER BY id").all(),
+        m.db.prepare("SELECT * FROM bindings ORDER BY id").all(),
+      ]);
+    const before = state();
+    const d = await m.call("doctor");
+    expect(d.out).toContain("this bridge's marker is gone");
+    expect(state()).toBe(before);
+  });
+
   it("still answers 'not available' for commands after PR 9's part 1", async () => {
     const m = await machine();
     expect(await m.call("run")).toMatchObject({
