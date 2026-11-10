@@ -164,6 +164,8 @@ public enum Operation: Equatable {
 public enum WriteMode: String {
     /// No writes (default until hello says otherwise).
     case off
+    /// Bootstrap of a binding (§6.5): only lists.create and the ownership markers, no reminder writes.
+    case bootstrap
     /// Verification run: writes only to lists titled "LFCP Verify · …".
     case verification
     /// writesVerified is set on the host: writes to the allowed lists.
@@ -233,7 +235,7 @@ public struct Request {
             var writes = WriteMode.off
             if let w = o["writes"] {
                 guard let s = w.stringValue, let m = WriteMode(rawValue: s) else {
-                    throw invalid("writes must be \"off\", \"verification\" or \"verified\"")
+                    throw invalid("writes must be \"off\", \"bootstrap\", \"verification\" or \"verified\"")
                 }
                 writes = m
             }
