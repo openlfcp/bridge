@@ -47,7 +47,8 @@ import {
 } from "./link.js";
 import { mapItem, mapList, mapWriteResponse, type WireEvent, type WireResponse } from "./wire.js";
 
-export type WriteMode = "off" | "verification" | "verified";
+/** The helper's own write gate (hello `writes`): "bootstrap" allows lists and ownership markers only. */
+export type WriteMode = "off" | "bootstrap" | "verification" | "verified";
 
 export interface EventKitTransportOptions extends Omit<HelperProcessOptions, "onStderr"> {
   /** The helper's own write gate (hello `writes`): set from writesVerified / verification by the host. */
@@ -92,10 +93,12 @@ export class EventKitTransport implements RemindersTransport {
   readonly #changeCbs = new Set<(h: ChangeHint) => void>();
   readonly #systemCbs = new Set<(e: "wake" | "sleep" | "access_changed") => void>();
   #unsubs: (() => void)[] = [];
+  #writes: WriteMode;
   readonly #inFlight = new Set<string>();
 
   constructor(opts: EventKitTransportOptions) {
     this.#opts = opts;
+    this.#writes = opts.writes ?? "off";
     this.capabilities = Object.freeze({
       ...EVENTKIT_CAPABILITIES,
       // The memory backend (CI, contract tests) is strong; EventKit is best-effort.
@@ -145,6 +148,16 @@ export class EventKitTransport implements RemindersTransport {
     return this.#status;
   }
 
+  /** Changes the helper's write gate (bootstrap → verified, …); resolves once the helper confirmed it. */
+  async setWriteMode(mode: WriteMode): Promise<void> {
+    this.#writes = mode;
+    if (this.#link !== undefined) await this.#hello();
+  }
+
+  get writeMode(): WriteMode {
+    return this.#writes;
+  }
+
   setWriteScope(scope: WriteScope): void {
     this.#scope = scope;
     void this.#hello().catch(() => {});
@@ -171,7 +184,7 @@ export class EventKitTransport implements RemindersTransport {
     await this.#req("hello", {
       allowListIds: [...this.#scope.listIds],
       allowListTitlePrefixes: [...this.#scope.listTitlePrefixes],
-      writes: this.#opts.writes ?? "off",
+      writes: this.#writes,
     });
   }
 
