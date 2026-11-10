@@ -17,3 +17,4 @@ export * from "./db/index.js";
 export * from "./executor/index.js";
 export { EXIT, type ExitCode } from "./exit.js";
 export * from "./lfcp/index.js";
+export * from "./reconcile/index.js";

@@ -65,6 +65,8 @@ export interface PlannedWork {
   readonly intents: readonly NewIntent[];
   /** Planned transitions to unlinked, out_of_filter or task_gone. */
   readonly unlinks: number;
+  /** New Tasks from Apple the pass would make, beyond its intents (a dry-run's count, §6.2). */
+  readonly imports?: number;
 }
 
 export type Admission =
@@ -100,6 +102,13 @@ export class Limits {
    * are set (and journaled) and nothing of the pass is to be prepared.
    */
   admit(bindingId: string, planned: PlannedWork): Admission {
+    const a = this.check(bindingId, planned);
+    if (!a.ok) this.#hold(bindingId, a.holds, a.counts);
+    return a;
+  }
+
+  /** What admit would answer, setting nothing: a dry-run shows the guards that would stop it. */
+  check(bindingId: string, planned: PlannedWork): Admission {
     const c = this.config;
     const since = new Date(this.now() - c.windowMs).toISOString();
     const strict = this.strict(bindingId);
@@ -128,7 +137,7 @@ export class Limits {
     const counts = {
       links,
       unlinks: unlinked + planned.unlinks,
-      imports: imported + planned.intents.filter(isImport).length,
+      imports: imported + planned.intents.filter(isImport).length + (planned.imports ?? 0),
       statusChanges: planned.intents.filter((i) => isStatus(i.fields)).length,
       backlog: open + planned.intents.length,
       strict: strict ? 1 : 0,
@@ -141,7 +150,6 @@ export class Limits {
       holds.push("guard_mass_status");
     if (counts.backlog > c.backlog) holds.push("guard_backlog");
     if (holds.length === 0) return { ok: true };
-    this.#hold(bindingId, holds, counts);
     return { ok: false, holds, counts };
   }
 
@@ -151,10 +159,16 @@ export class Limits {
    * countDropMin sets the hold. True when it did.
    */
   countDrop(bindingId: string, side: "apple" | "lfcp", previous: number, current: number): boolean {
-    if (previous < this.config.countDropMin) return false;
-    if (current >= previous * (1 - this.config.countDropShare)) return false;
+    if (!this.wouldDrop(previous, current)) return false;
     this.#hold(bindingId, ["guard_count_drop"], { [side]: current, [`${side}Before`]: previous });
     return true;
+  }
+
+  /** Whether a fall from `previous` to `current` is a count drop (no hold set). */
+  wouldDrop(previous: number, current: number): boolean {
+    return (
+      previous >= this.config.countDropMin && current < previous * (1 - this.config.countDropShare)
+    );
   }
 
   #hold(bindingId: string, holds: readonly HoldReason[], counts: Readonly<Record<string, number>>) {

@@ -31,6 +31,20 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 | `src/executor/intents.ts` | intents in `bridge.sqlite` (§5.6): ULID ids, `brg1:<id>`, one open intent per Task and direction, the state steps | 7 |
 | `src/executor/executor.ts` | prepare (after the limits) → §7.1 → `effecting` → one call → result → finalize; recovery §5.7 (`unknown_outcome` quarantine, which also holds the Task's fields in both directions until resolved; every unknown outcome is quarantined, nothing inferred from the item — B19; an opKey with an unknown outcome is never sent again — `OutcomeUnknownError` → quarantine, a new opKey only after a person; `OperationInFlightError` and a second runner in this process → `in_flight`, not repeated); an intent is checked against its binding and its payload against its kind before any call; **effects off** (Apple only through the fake transport, LFCP only through `offlineTestPort`) | 7 |
 | `src/executor/limits.ts`, `safe-mode.ts`, `transport-state.ts` | sliding-window limits with prepared intents counted (§7.2); runs and Safe Mode (§7.3); the transport's DurableKV in `transport_state` | 7 |
+| `src/reconcile/pass.ts`, `section-view.ts` | a pass of one binding (§5.5): the section's Tasks from the replica, the list's snapshot, links / bases / open intents / conflicts → the adapter's plan; guards §7.2 checked without setting them; **dry-run only**: the plan is stored in `runs` (kind `dry`), `apply` answers `dry_run_only` | 8 |
+| `src/lfcp/fallback/device-root.ts` | **FALLBACK for sdk-ts G4**: the person's root (who "me" is for the filter) from the finished pairing request | 8 |
+
+## Adapter (`packages/reminders/src/adapter/`, PR 8)
+
+Pure: no I/O, no host; the host gives it a view and gets a plan.
+
+| Path | What |
+|---|---|
+| `projection.ts` | projections of title, due, priority, status (§4.4), equivalence, the Apple write of one field with §4.5 (dates alone; clearing with a time or alarm → `due_cleared_in_lfcp`; an alarm left on the old day → warning) |
+| `filter.ts` | `default` (QB10), `mine`, `all` (§6.1); what may get a new projection |
+| `link.ts` | `lfcp://task/<T>?s=<R>&b=<instance8>` and the marker URL |
+| `matching.ts` | §5.4: markers out, pass 1 (links: matched / tombstone / absent / ambiguous, recurring copies), pass 2 (orphans, foreign bridge, imports, `import_ambiguous`) |
+| `plan.ts` | §5.5: per field dL / dA against the bases → write to Apple, record bases or shadow, or deferred (Apple → LFCP and the status table: PR 10); link transitions and imports shown (PR 11, 12); new projections |
 
 ## The SDK
 

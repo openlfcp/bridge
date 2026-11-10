@@ -18,6 +18,7 @@ export {
   UnguardedCommitError,
 } from "./commit-guard.js";
 export { type CurrentLfcp, type Delivery, type DeliveryOptions, deliver } from "./delivery.js";
+export { deviceRoot } from "./fallback/device-root.js";
 export {
   type NodeInstallation,
   openNodeInstallation,
