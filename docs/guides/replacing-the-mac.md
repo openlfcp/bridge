@@ -32,5 +32,11 @@ the list exists. It does not guess by the title. It prints the lists with that t
     lfcp-bridge bind --binding <id> --resolve-list <list id>   # this is the list the bridge created
     lfcp-bridge bind --binding <id> --resolve-list none        # none of them: create it again
 
-For `none`, rename the lists with that title first. For an unknown ownership marker, check Reminders,
-then run `lfcp-bridge bind --binding <id> --retry-marker`.
+For `none`, rename the lists with that title first. An unknown ownership marker is handled the same
+way, even when the marker is visible: the bridge prints the markers with its url in the list and
+waits.
+
+    lfcp-bridge bind --binding <id> --resolve-marker <reminder id>   # this is the marker the bridge wrote
+    lfcp-bridge bind --binding <id> --resolve-marker none            # it wrote none: write it again
+
+For `none`, delete the markers it printed first.

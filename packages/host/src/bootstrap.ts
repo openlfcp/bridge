@@ -9,13 +9,15 @@
 //   unknown → bootstrap_ops.list = unknown_outcome. A person picks the list by id
 //   (`bind --resolve-list <id>`) or `none` (rename the lists with that title first, then a new
 //   attempt). A title match never assigns a list (B17).
-// - marker answer lost → recover the same way; unknown → the marker record itself (its exact url
-//   in the bound list) is the proof of the effect; without it, unknown_outcome and
-//   `bind --retry-marker`.
+// - marker answer lost → recover the same way; unknown → bootstrap_ops.marker = unknown_outcome,
+//   even when a marker with the exact url is visible (B19: only recover=done is accepted). The
+//   visible markers are shown as evidence; a person picks one by id (`bind --resolve-marker <id>`)
+//   or `none` (delete such markers first, then a new attempt with a new opKey).
 // There is no --adopt-list (B17): the bootstrap only binds a list it created.
 
 import { randomUUID } from "node:crypto";
 import {
+  type AppleItem,
   type AppleOpResult,
   ForbiddenListError,
   ListExistsError,
@@ -49,6 +51,7 @@ export type BindRefusal =
   | "list_exists"
   | "forbidden_list"
   | "already_bound"
+  | "marker_exists"
   | "not_unknown"
   /** permits() of PR 7 refused the effect; detail lists its denials. */
   | "denied";
@@ -72,6 +75,8 @@ export type BindOutcome =
       readonly step: "list" | "marker";
       /** Lists with the title the bootstrap tried to create (to choose from by id). */
       readonly candidates?: readonly ListInfo[];
+      /** Markers with this binding's exact url in the bound list: evidence, never a result. */
+      readonly markers?: readonly AppleItem[];
     };
 
 /** The transport, plus the helper write mode when it has one (EventKit). */
@@ -259,13 +264,43 @@ export class Bootstrap {
     return this.resume(bindingId);
   }
 
-  /** A person decides an unknown marker outcome: create it again (a new attempt). */
-  async retryMarker(bindingId: string): Promise<BindOutcome> {
+  /**
+   * A person decides an unknown marker outcome: the id of the marker reminder this bootstrap wrote,
+   * or "none" (it wrote none: try again, after deleting any marker with this binding's url).
+   */
+  async resolveMarker(bindingId: string, choice: string): Promise<BindOutcome> {
     const op = this.#op(bindingId, "marker");
     if (op?.state !== "unknown_outcome")
       return { state: "refused", reason: "not_unknown", bindingId };
-    this.#nextAttempt(bindingId, "marker", op.client_id);
+    const b = this.#binding(bindingId);
+    const found = await this.#markerEvidence(b);
+    if (!found.complete)
+      return { state: "refused", reason: "incomplete", bindingId, detail: "markers not readable" };
+    if (choice === "none") {
+      if (found.items.length > 0)
+        return {
+          state: "refused",
+          reason: "marker_exists",
+          bindingId,
+          detail: `delete the marker ${found.items.map((i) => i.ref.id ?? i.ref.externalId).join(", ")} first, or choose it by id`,
+        };
+      this.#nextAttempt(bindingId, "marker", op.client_id);
+      this.#d.journal.append("info", "bootstrap.marker.resolved", {
+        bindingId,
+        params: { text: "A person decided no marker was written; writing it again." },
+      });
+      return this.resume(bindingId);
+    }
+    const marker = found.items.find((i) => i.ref.id === choice || i.ref.externalId === choice);
+    if (marker === undefined)
+      return { state: "refused", reason: "not_unknown", bindingId, detail: `no marker ${choice}` };
+    this.#doneMarker(bindingId, marker.ref);
     return this.resume(bindingId);
+  }
+
+  /** `bind --retry-marker`: the person says no marker was written. */
+  retryMarker(bindingId: string): Promise<BindOutcome> {
+    return this.resolveMarker(bindingId, "none");
   }
 
   /**
@@ -447,14 +482,10 @@ export class Bootstrap {
     const url = markerUrl(this.#d.instanceId, b.resource_id);
     let op = this.#op(b.id, "marker") ?? this.#newOp(b.id, "marker", 1);
     if (op.state === "done") return undefined;
-    if (op.state === "unknown_outcome")
-      return { state: "unknown_outcome", bindingId: b.id, step: "marker" };
+    if (op.state === "unknown_outcome") return this.#unknownMarker(b);
     if (op.state === "effecting") {
-      const settled = await this.#recoverMarker(b, op.client_id, list, url);
-      if (settled !== "retry")
-        return settled === "done"
-          ? undefined
-          : { state: "unknown_outcome", bindingId: b.id, step: "marker" };
+      const settled = await this.#recoverMarker(b, op.client_id);
+      if (settled !== "retry") return settled === "done" ? undefined : this.#unknownMarker(b);
       op = this.#setOp(b.id, "marker", "prepared");
     }
     await this.#gate(b, "marker_create");
@@ -468,14 +499,12 @@ export class Bootstrap {
         markerUrl: url,
       });
     } catch (e) {
-      const settled = await this.#recoverMarker(b, op.client_id, list, url);
+      const settled = await this.#recoverMarker(b, op.client_id);
       if (settled === "retry") {
         this.#setOp(b.id, "marker", "prepared");
         throw e;
       }
-      return settled === "done"
-        ? undefined
-        : { state: "unknown_outcome", bindingId: b.id, step: "marker" };
+      return settled === "done" ? undefined : this.#unknownMarker(b);
     }
     if (!r.ok) {
       this.#setOp(b.id, "marker", "prepared");
@@ -489,30 +518,19 @@ export class Bootstrap {
   }
 
   /** "done" (proven), "retry" (not started), "unknown" (unknown_outcome recorded). */
-  async #recoverMarker(
-    b: BindingRow,
-    opKey: string,
-    list: ListRef,
-    url: string,
-  ): Promise<"done" | "retry" | "unknown"> {
+  async #recoverMarker(b: BindingRow, opKey: string): Promise<"done" | "retry" | "unknown"> {
     const r = await this.#d.transport.recover(opKey);
     if (r.state === "done" && "ref" in r.result) {
       this.#doneMarker(b.id, r.result.ref);
       return "done";
     }
     if (r.state === "not_started") return "retry";
-    // Unknown: the marker record itself is the effect; its exact url in the list proves it.
-    const found = await this.#d.transport.find({ url }, [list]);
-    const only = found.items.length === 1 ? found.items[0] : undefined;
-    if (found.complete && only !== undefined) {
-      this.#doneMarker(b.id, only.ref);
-      return "done";
-    }
+    // Unknown stays unknown (B19): a visible marker is evidence for the person, not a result.
     this.#setOp(b.id, "marker", "unknown_outcome");
     this.#d.journal.append("warn", "bootstrap.marker.unknown", {
       bindingId: b.id,
       params: {
-        text: "Whether the ownership marker was written is unknown. Check Reminders, then run bind --retry-marker.",
+        text: "Whether the ownership marker was written is unknown. Check Reminders, then choose it by id (bind --resolve-marker <id>) or answer none.",
       },
     });
     return "unknown";
@@ -598,6 +616,22 @@ export class Bootstrap {
       },
     });
     return this.#unknownList(b);
+  }
+
+  /** Markers with this binding's exact url in its bound list. */
+  async #markerEvidence(
+    b: BindingRow,
+  ): Promise<{ readonly items: readonly AppleItem[]; readonly complete: boolean }> {
+    if (b.target_ref === null) return { items: [], complete: true };
+    const url = markerUrl(this.#d.instanceId, b.resource_id);
+    return this.#d.transport
+      .find({ url }, [b.target_ref as ListRef])
+      .catch(() => ({ items: [] as AppleItem[], complete: false }));
+  }
+
+  async #unknownMarker(b: BindingRow): Promise<BindOutcome> {
+    const found = await this.#markerEvidence(b);
+    return { state: "unknown_outcome", bindingId: b.id, step: "marker", markers: found.items };
   }
 
   async #unknownList(b: BindingRow): Promise<BindOutcome> {
