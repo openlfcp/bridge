@@ -124,6 +124,23 @@ export class OpenIntentExistsError extends Error {
   }
 }
 
+/**
+ * No intent may be prepared for this binding now (N8 §9 r4, review PR 13 P1-1): its installation
+ * is not active (frozen by a migration, retired, revoked) or it has the hold `migration`.
+ */
+export class PreparationBlockedError extends Error {
+  constructor(readonly reason: "installation_not_active" | "migration" | "binding_moved") {
+    super(
+      reason === "migration"
+        ? "the binding is held for an N8 migration: no new intents"
+        : reason === "binding_moved"
+          ? "the binding no longer belongs to this installation"
+          : "the installation is not active: no new intents",
+    );
+    this.name = "PreparationBlockedError";
+  }
+}
+
 export class Intents {
   constructor(
     private readonly db: BridgeDatabase,
@@ -137,6 +154,23 @@ export class Intents {
   get(id: string): Intent | undefined {
     const r = this.db.prepare("SELECT * FROM intents WHERE id = ?").get(id) as Row | undefined;
     return r === undefined ? undefined : fromRow(r);
+  }
+
+  /**
+   * A person's decision on a refused or quarantined intent (kept, dropped, …), durable. Only
+   * such an intent can be resolved; a second decision replaces the first.
+   */
+  resolve(id: string, resolution: string): void {
+    const i = this.get(id);
+    if (i === undefined) throw new Error(`no intent ${id}`);
+    if (i.state !== "refused" && i.state !== "quarantined")
+      throw new Error(`intent ${id} is ${i.state}: only a refused or quarantined one is resolved`);
+    this.db
+      .prepare(
+        `INSERT INTO intent_resolutions (intent_id, resolution, resolved_at) VALUES (?, ?, ?)
+         ON CONFLICT (intent_id) DO UPDATE SET resolution = excluded.resolution, resolved_at = excluded.resolved_at`,
+      )
+      .run(id, resolution, this.#iso());
   }
 
   /** The open intents (prepared, effecting, applied), oldest first: what a start recovers (§5.7). */
@@ -161,15 +195,37 @@ export class Intents {
     ).map(fromRow);
   }
 
-  /** prepare (§5.6): the durable intent, with its exact payload, before any effect. */
+  #blocked(n: NewIntent): PreparationBlockedError["reason"] {
+    const b = this.db
+      .prepare(
+        "SELECT b.installation_id, i.status FROM bindings b JOIN installations i ON i.id = b.installation_id WHERE b.id = ?",
+      )
+      .get(n.bindingId) as { installation_id: string; status: string } | undefined;
+    if (b === undefined || b.installation_id !== n.installationId) return "binding_moved";
+    const held = this.db
+      .prepare("SELECT 1 FROM binding_holds WHERE binding_id = ? AND reason = 'migration'")
+      .get(n.bindingId);
+    return held !== undefined ? "migration" : "installation_not_active";
+  }
+
+  /**
+   * prepare (§5.6): the durable intent, with its exact payload, before any effect. Refused
+   * (PreparationBlockedError) while the binding's installation is not active or the binding has
+   * the hold `migration`, checked in the same statement as the insert (N8, review PR 13 P1-1).
+   */
   prepare(n: NewIntent): Intent {
     const id = ulid(this.now());
     try {
-      this.db
+      // One statement, under the write lock: the checks and the insert cannot be split by a freeze
+      // committed from another connection in between.
+      const inserted = this.db
         .prepare(
           `INSERT INTO intents (id, binding_id, task_id, installation_id, direction, kind, fields_json,
              basis_json, payload_json, operation_id, state, attempts, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', 0, ?)`,
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', 0, ?
+            WHERE EXISTS (SELECT 1 FROM bindings b JOIN installations i ON i.id = b.installation_id
+                           WHERE b.id = ? AND b.installation_id = ? AND i.status = 'active')
+              AND NOT EXISTS (SELECT 1 FROM binding_holds WHERE binding_id = ? AND reason = 'migration')`,
         )
         .run(
           id,
@@ -183,7 +239,11 @@ export class Intents {
           JSON.stringify(n.payload ?? null),
           `brg1:${id}`,
           this.#iso(),
+          n.bindingId,
+          n.installationId,
+          n.bindingId,
         );
+      if (inserted.changes === 0) throw new PreparationBlockedError(this.#blocked(n));
     } catch (e) {
       if (String(e).includes("UNIQUE")) {
         const open = this.db

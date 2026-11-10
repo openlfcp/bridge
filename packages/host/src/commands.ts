@@ -9,6 +9,7 @@ import { resume, stop, stopState } from "./db/stop.js";
 import { doctor, worst } from "./doctor.js";
 import { EXIT, type ExitCode } from "./exit.js";
 import { installLaunchAgent, uninstallLaunchAgent } from "./launchd.js";
+import { MigrationError, type MigrationRow, Migrations } from "./migration.js";
 import { machineRuntime, type Runtime } from "./runtime.js";
 
 export interface CommandInfo {
@@ -46,8 +47,13 @@ export const COMMANDS: readonly CommandInfo[] = Object.freeze([
   { name: "quarantine", summary: "ambiguous matches and unknown outcomes", pr: "12" },
   { name: "refused", summary: "refused intents", pr: "7" },
   { name: "verify", summary: "the verification run of the owner", pr: "9", ready: true },
-  { name: "sections add", summary: "N8: a section for a new installation", pr: "13" },
-  { name: "migrate", summary: "N8: status, resume, abort", pr: "13" },
+  {
+    name: "sections add",
+    summary: "N8: a section for a new installation",
+    pr: "13",
+    ready: true,
+  },
+  { name: "migrate", summary: "N8: status, resume, abort", pr: "13", ready: true },
   { name: "service", summary: "install or uninstall the LaunchAgent", pr: "9", ready: true },
   { name: "log", summary: "the log", pr: "9", ready: true },
 ] satisfies CommandInfo[]);
@@ -338,6 +344,77 @@ async function run(
       }
       return usage(env, "lfcp-bridge service install|uninstall");
     }
+    case "sections add":
+    case "migrate": {
+      const action = name === "sections add" ? "add" : positional[0];
+      const ports = rt.migrationPorts === undefined ? undefined : await rt.migrationPorts();
+      const migrations = new Migrations({
+        db: rt.db,
+        journal: rt.journal,
+        ports: ports ?? noPorts,
+      });
+      const needsPorts = action === "add" || action === "resume";
+      if (needsPorts && ports === undefined) {
+        env.err(
+          `${name === "sections add" ? "sections add" : "migrate resume"}: needs pairing and the run process (D-010 PR 9 after 8); not available in this build`,
+        );
+        return EXIT.USAGE;
+      }
+      if (action === "add") {
+        const section = positional[1];
+        if (section === undefined)
+          return usage(env, "lfcp-bridge sections add <name> [--from <installation>]");
+        const active = rt.db
+          .prepare("SELECT id FROM installations WHERE status = 'active' ORDER BY created_at")
+          .all() as { id: string }[];
+        const fromOpt = opts.get("from");
+        const from =
+          typeof fromOpt === "string" ? fromOpt : active.length === 1 ? active[0]?.id : undefined;
+        if (from === undefined) {
+          env.err(
+            `sections add: choose the installation with --from (${active.map((a) => a.id).join(", ") || "none active"})`,
+          );
+          return EXIT.USAGE;
+        }
+        const r = await migrations.add(from, [section]);
+        if (r.state === "refused") {
+          env.err(
+            `sections add refused: ${
+              r.detail ??
+              `${r.reasons.map((x) => `${x.reason} ${x.count}`).join(", ")}; wait for the synchronisation, resolve the conflicts, then try again`
+            }`,
+          );
+          return EXIT.NEEDS_PERSON;
+        }
+        return migrationResult(r.migration, env);
+      }
+      if (action === "status") {
+        const all = migrations.list();
+        if (all.length === 0) env.out("no migrations");
+        for (const m of all) env.out(migrationLine(m));
+        return EXIT.OK;
+      }
+      if (action === "resume" || action === "abort") {
+        const id = positional[1] ?? migrations.open()?.id;
+        if (id === undefined || migrations.get(id) === undefined) {
+          env.err(
+            `migrate ${action}: no migration${positional[1] ? ` ${positional[1]}` : " under way"}`,
+          );
+          return EXIT.NOT_FOUND;
+        }
+        try {
+          return migrationResult(
+            action === "abort" ? migrations.abort(id) : await migrations.advance(id),
+            env,
+          );
+        } catch (e) {
+          if (!(e instanceof MigrationError)) throw e;
+          env.err(`migrate ${action}: ${e.message}`);
+          return EXIT.NEEDS_PERSON;
+        }
+      }
+      return usage(env, "lfcp-bridge migrate status|resume|abort [<migration>]");
+    }
     case "log": {
       const binding = opts.get("binding");
       const limit = Number(opts.get("limit") ?? 50);
@@ -352,6 +429,44 @@ async function run(
     }
   }
   return EXIT.USAGE;
+}
+
+const noPorts = {
+  pair: async () => undefined,
+  catchUp: async () => [],
+  closeOld: async () => {},
+  revocationStatus: async () => "unreachable" as const,
+};
+
+function migrationLine(m: MigrationRow): string {
+  return `${m.id}  ${m.phase}  ${m.from} -> ${m.to ?? "?"}${m.blockedReason ? `  blocked: ${m.blockedReason}` : ""}${m.abortedReason ? `  aborted: ${m.abortedReason}` : ""}`;
+}
+
+function migrationResult(m: MigrationRow, env: CliEnvironment): ExitCode {
+  env.out(migrationLine(m));
+  switch (m.phase) {
+    case "aborted":
+      env.err(
+        m.abortedReason?.startsWith("not_quiescent")
+          ? "work appeared during the pairing; the old installation works on. Run sections add again later."
+          : `migration ${m.id} aborted`,
+      );
+      return EXIT.NEEDS_PERSON;
+    case "awaiting_revocation":
+      env.out(
+        `revoke the old device (installation ${m.from}) in the plugin, then lfcp-bridge migrate resume ${m.id}`,
+      );
+      return EXIT.OK;
+    case "catching_up":
+      env.out(
+        m.blockedReason
+          ? `the new installation is not live; check the connection, or lfcp-bridge migrate abort ${m.id}`
+          : `the new installation is catching up; lfcp-bridge migrate resume ${m.id}`,
+      );
+      return m.blockedReason ? EXIT.NEEDS_PERSON : EXIT.OK;
+    default:
+      return EXIT.OK;
+  }
 }
 
 function usage(env: CliEnvironment, line: string): ExitCode {

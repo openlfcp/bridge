@@ -15,6 +15,7 @@ import { Journal } from "./db/journal.js";
 import { type Launchctl, launchctl } from "./launchd.js";
 import { openNodeInstallation } from "./lfcp/fallback/node-installation.js";
 import { pairedSections } from "./lfcp/fallback/paired-sections.js";
+import type { MigrationPorts } from "./migration.js";
 
 export interface ResolvedSection {
   readonly installationId: string;
@@ -35,6 +36,12 @@ export interface Runtime {
   readonly node: string;
   readonly cli: string;
   readonly verifySignature?: (app: string) => boolean;
+  /**
+   * What N8 needs from the machine: pairing, the new installation's connection, the old one's
+   * close and revocationStatus. Undefined until the run process exists (PR 9 after 8): then
+   * `sections add` and `migrate resume` say so; `migrate status` and `abort` work without it.
+   */
+  readonly migrationPorts?: () => Promise<MigrationPorts>;
   close(): Promise<void>;
 }
 
