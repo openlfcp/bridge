@@ -40,15 +40,19 @@ function rig(
   const live: { states: CatchUpState[] } = { states: [] };
   const revocation: { verdict: RevocationVerdict } = { verdict: "active" };
   const pairing: { refuse: boolean } = { refuse: false };
+  /** Set to hold a port's answer until the test releases it. */
+  const hold: { pair?: Promise<void>; catchUp?: Promise<void> } = {};
   const ports: MigrationPorts = {
     async pair(req) {
       calls.push(`pair ${req.from} ${req.sections.join(",")}`);
+      await hold.pair;
       if (pairing.refuse) return undefined;
       paired += 1;
       return { id: `i${paired + 1}`, dir: "/new", principal: "p2", root: "r", label: "Mac" };
     },
     async catchUp(inst, rs) {
       calls.push(`catchUp ${inst} ${[...rs].sort().join(",")}`);
+      await hold.catchUp;
       return live.states;
     },
     async closeOld(inst) {
@@ -87,7 +91,7 @@ function rig(
     { resourceId: "R1", live: true, connectedAt },
     { resourceId: "R2", live: true, connectedAt },
   ];
-  return { db, m, clock, calls, live, revocation, pairing, inst, holds, owner, at, allLive };
+  return { db, m, clock, calls, live, revocation, pairing, hold, inst, holds, owner, at, allLive };
 }
 
 function intent(
@@ -352,5 +356,67 @@ describe("N8: no new intents for a frozen installation (review PR 13 P1-1)", () 
     const r = rig();
     r.db.prepare("UPDATE installations SET status = 'retired' WHERE id = 'i1'").run();
     expect(() => new Intents(r.db).prepare(update("T3"))).toThrow(/not active/);
+  });
+});
+
+const deferred = () => {
+  let release: () => void = () => {};
+  const p = new Promise<void>((r) => (release = r));
+  return { p, release };
+};
+
+describe("N8: a late answer never moves an aborted migration (review PR 13 P1-2)", () => {
+  it("a fresh LIVE that arrives after abort leaves the migration aborted and the bindings home", async () => {
+    const r = rig();
+    const out = await r.m.add("i1", ["Work"]);
+    const id = (out as { migration: { id: string } }).migration.id;
+    const d = deferred();
+    r.hold.catchUp = d.p;
+    r.live.states = r.allLive(r.at(T0 + 1000));
+    const resumed = r.m.advance(id);
+    await new Promise((res) => setImmediate(res));
+    r.m.abort(id);
+    d.release();
+    expect((await resumed).phase).toBe("aborted");
+    expect([r.owner("b1"), r.owner("b2")]).toEqual(["i1", "i1"]);
+    expect([r.inst("i1"), r.inst("i2")]).toEqual(["active", "retired"]);
+    expect([r.holds("b1"), r.holds("b2")]).toEqual([[], []]);
+  });
+
+  it("the same when the abort comes from another connection (another lfcp-bridge process)", async () => {
+    const file = join(mkdtempSync(join(tmpdir(), "lfcp-n8-")), "bridge.sqlite");
+    const r = rig({ file });
+    const other = openBridgeDatabase(file);
+    try {
+      const out = await r.m.add("i1", ["Work"]);
+      const id = (out as { migration: { id: string } }).migration.id;
+      const d = deferred();
+      r.hold.catchUp = d.p;
+      r.live.states = r.allLive(r.at(T0 + 1000));
+      const resumed = r.m.advance(id);
+      await new Promise((res) => setImmediate(res));
+      new Migrations({ db: other, journal: new Journal(other), ports: {} as never }).abort(id);
+      d.release();
+      expect((await resumed).phase).toBe("aborted");
+      expect([r.owner("b1"), r.owner("b2")]).toEqual(["i1", "i1"]);
+    } finally {
+      other.close();
+    }
+  });
+
+  it("a pairing that answers after abort freezes nothing; its installation is recorded retired", async () => {
+    const r = rig();
+    const d = deferred();
+    r.hold.pair = d.p;
+    const adding = r.m.add("i1", ["Work"]);
+    await new Promise((res) => setImmediate(res));
+    const open = r.m.open();
+    expect(open?.phase).toBe("pairing");
+    r.m.abort(open?.id as string);
+    d.release();
+    const out = await adding;
+    expect(out).toMatchObject({ state: "started", migration: { phase: "aborted", to: null } });
+    expect([r.inst("i1"), r.inst("i2")]).toEqual(["active", "retired"]);
+    expect([r.holds("b1"), r.holds("b2")]).toEqual([[], []]);
   });
 });

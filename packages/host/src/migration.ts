@@ -276,15 +276,21 @@ export class Migrations {
 
   /** abort (before switching only): the new installation retired, the old one active again. */
   abort(id: string, reason = "person"): MigrationRow {
-    const m = this.get(id);
-    if (m === undefined) throw new Error(`no migration ${id}`);
-    if (m.phase !== "pairing" && m.phase !== "catching_up")
-      throw new MigrationError(
-        m.phase === "aborted" || m.phase === "done"
-          ? `migration ${id} is ${m.phase}`
-          : `migration ${id} is ${m.phase}: after switching only forward (migrate resume)`,
-      );
-    this.#d.db.transaction(() => this.#abortIn(m, reason)).immediate();
+    // The phase is read under the write lock: a resume in another process that moved it to
+    // switching meanwhile wins, and this abort is refused (review PR 13 P1-2).
+    this.#d.db
+      .transaction(() => {
+        const m = this.get(id);
+        if (m === undefined) throw new Error(`no migration ${id}`);
+        if (m.phase !== "pairing" && m.phase !== "catching_up")
+          throw new MigrationError(
+            m.phase === "aborted" || m.phase === "done"
+              ? `migration ${id} is ${m.phase}`
+              : `migration ${id} is ${m.phase}: after switching only forward (migrate resume)`,
+          );
+        this.#abortIn(m, reason);
+      })
+      .immediate();
     this.#d.journal.append("warn", "migration.aborted", {
       params: { text: `N8 migration ${id} aborted (${reason}).`, migration: id, reason },
     });
@@ -316,19 +322,40 @@ export class Migrations {
     if (to === null) {
       const paired = await this.#d.ports.pair({ from: m.from, sections: m.sections });
       if (paired === undefined) {
-        this.abort(m.id, "pairing_refused");
+        if (this.get(m.id)?.phase === "pairing") this.abort(m.id, "pairing_refused");
         return false;
       }
-      this.#d.db.transaction(() => {
-        this.#d.db
-          .prepare(
-            "INSERT INTO installations (id, dir, principal, root, label, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-          )
-          .run(paired.id, paired.dir, paired.principal, paired.root, paired.label, this.#iso());
-        this.#d.db
-          .prepare("UPDATE migrations SET to_installation = ?, updated_at = ? WHERE id = ?")
-          .run(paired.id, this.#iso(), m.id);
-      })();
+      // A late answer (the migration was aborted meanwhile) moves nothing; the installation it
+      // made is recorded retired, so nothing uses it (review PR 13 P1-2).
+      const current = this.#d.db
+        .transaction((): boolean => {
+          const now = this.#iso();
+          const live = this.get(m.id);
+          const ok = live?.phase === "pairing" && live.to === null;
+          this.#d.db
+            .prepare(
+              `INSERT INTO installations (id, dir, principal, root, label, created_at, status, status_detail, retired_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              paired.id,
+              paired.dir,
+              paired.principal,
+              paired.root,
+              paired.label,
+              now,
+              ok ? "active" : "retired",
+              ok ? null : `N8 ${m.id}: paired after the migration ended`,
+              ok ? null : now,
+            );
+          if (ok)
+            this.#d.db
+              .prepare("UPDATE migrations SET to_installation = ?, updated_at = ? WHERE id = ?")
+              .run(paired.id, now, m.id);
+          return ok;
+        })
+        .immediate();
+      if (!current) return false;
       to = paired.id;
     }
     this.#d.afterPairing?.();
@@ -339,7 +366,9 @@ export class Migrations {
   #freeze(m: MigrationRow): boolean {
     const db = this.#d.db;
     const outcome = db
-      .transaction((): Quiescence => {
+      .transaction((): Quiescence | "stale" => {
+        // Still this migration's turn (an abort may have come meanwhile, review PR 13 P1-2)?
+        if (this.get(m.id)?.phase !== "pairing") return "stale";
         const q = quiescence(db, m.from);
         // The migration itself is the one open migration of `from`: not a reason here.
         const reasons = q.reasons.filter((r) => r.reason !== "open_migration" || r.count > 1);
@@ -368,6 +397,7 @@ export class Migrations {
         return { quiescent: true, reasons: [] };
       })
       .immediate();
+    if (outcome === "stale") return false;
     if (!outcome.quiescent) {
       this.#d.journal.append("warn", "migration.aborted", {
         params: {
@@ -410,18 +440,23 @@ export class Migrations {
           Date.parse(s.connectedAt) > Date.parse(frozenAt),
       );
     if (resources.every(fresh)) {
-      this.#d.db
-        .prepare(
-          "UPDATE migrations SET phase = 'switching', blocked_reason = NULL, updated_at = ? WHERE id = ?",
-        )
-        .run(this.#iso(), m.id);
-      return true;
+      // Only if it is still catching up: an abort while catchUp ran wins (review PR 13 P1-2).
+      return (
+        this.#d.db
+          .prepare(
+            "UPDATE migrations SET phase = 'switching', blocked_reason = NULL, updated_at = ? WHERE id = ? AND phase = 'catching_up'",
+          )
+          .run(this.#iso(), m.id).changes === 1
+      );
     }
     if (this.#now() - Date.parse(frozenAt) > CATCH_UP_LIMIT_MS && m.blockedReason === null) {
       const waiting = resources.filter((r) => !fresh(r));
-      this.#d.db
-        .prepare("UPDATE migrations SET blocked_reason = ?, updated_at = ? WHERE id = ?")
+      const set = this.#d.db
+        .prepare(
+          "UPDATE migrations SET blocked_reason = ?, updated_at = ? WHERE id = ? AND phase = 'catching_up'",
+        )
         .run(`catch_up_over_24h: ${waiting.join(", ")}`, this.#iso(), m.id);
+      if (set.changes === 0) return false;
       this.#d.journal.append("warn", "migration.blocked", {
         params: {
           text: `N8 migration ${m.id}: the new installation is not live after 24 h (${waiting.length} sections). Check the connection, or migrate abort.`,
@@ -435,19 +470,25 @@ export class Migrations {
   /** switching → switched: one transaction, idempotent. */
   #switch(m: MigrationRow): boolean {
     const db = this.#d.db;
-    db.transaction(() => {
-      const now = this.#iso();
-      db.prepare(
-        "UPDATE bindings SET installation_id = ? WHERE installation_id = ? AND state <> 'removed'",
-      ).run(m.to, m.from);
-      db.prepare(
-        "UPDATE installations SET status = 'retired', retired_at = coalesce(retired_at, ?) WHERE id = ? AND status <> 'revoked'",
-      ).run(now, m.from);
-      db.prepare("UPDATE migrations SET phase = 'closing', updated_at = ? WHERE id = ?").run(
-        now,
-        m.id,
-      );
-    }).immediate();
+    const moved = db
+      .transaction((): boolean => {
+        const phase = this.get(m.id)?.phase;
+        if (phase !== "switching" && phase !== "switched") return false;
+        const now = this.#iso();
+        db.prepare(
+          "UPDATE bindings SET installation_id = ? WHERE installation_id = ? AND state <> 'removed'",
+        ).run(m.to, m.from);
+        db.prepare(
+          "UPDATE installations SET status = 'retired', retired_at = coalesce(retired_at, ?) WHERE id = ? AND status <> 'revoked'",
+        ).run(now, m.from);
+        db.prepare("UPDATE migrations SET phase = 'closing', updated_at = ? WHERE id = ?").run(
+          now,
+          m.id,
+        );
+        return true;
+      })
+      .immediate();
+    if (!moved) return false;
     this.#d.journal.append("info", "migration.switched", {
       params: {
         text: `N8 migration ${m.id}: the bindings now use installation ${m.to}.`,
@@ -460,13 +501,20 @@ export class Migrations {
   async #closing(m: MigrationRow): Promise<boolean> {
     await this.#d.ports.closeOld(m.from);
     const bindings = this.#bindingsOf(m.to as string);
-    this.#d.db.transaction(() => {
-      const holds = new Holds(this.#d.db, this.#now);
-      for (const b of bindings) holds.lift(b, "migration");
-      this.#d.db
-        .prepare("UPDATE migrations SET phase = 'awaiting_revocation', updated_at = ? WHERE id = ?")
-        .run(this.#iso(), m.id);
-    })();
+    const moved = this.#d.db
+      .transaction((): boolean => {
+        if (this.get(m.id)?.phase !== "closing") return false;
+        const holds = new Holds(this.#d.db, this.#now);
+        for (const b of bindings) holds.lift(b, "migration");
+        this.#d.db
+          .prepare(
+            "UPDATE migrations SET phase = 'awaiting_revocation', updated_at = ? WHERE id = ?",
+          )
+          .run(this.#iso(), m.id);
+        return true;
+      })
+      .immediate();
+    if (!moved) return false;
     this.#d.ports.reconcile?.(bindings);
     this.#d.journal.append("info", "migration.revoke_old", {
       params: {
@@ -480,15 +528,20 @@ export class Migrations {
   async #awaitingRevocation(m: MigrationRow): Promise<boolean> {
     const verdict = await this.#d.ports.revocationStatus(m.from);
     if (verdict !== "revocation-proven") return false;
-    this.#d.db.transaction(() => {
-      const now = this.#iso();
-      this.#d.db
-        .prepare("UPDATE installations SET status = 'revoked', revoked_at = ? WHERE id = ?")
-        .run(now, m.from);
-      this.#d.db
-        .prepare("UPDATE migrations SET phase = 'done', updated_at = ? WHERE id = ?")
-        .run(now, m.id);
-    })();
+    const moved = this.#d.db
+      .transaction((): boolean => {
+        if (this.get(m.id)?.phase !== "awaiting_revocation") return false;
+        const now = this.#iso();
+        this.#d.db
+          .prepare("UPDATE installations SET status = 'revoked', revoked_at = ? WHERE id = ?")
+          .run(now, m.from);
+        this.#d.db
+          .prepare("UPDATE migrations SET phase = 'done', updated_at = ? WHERE id = ?")
+          .run(now, m.id);
+        return true;
+      })
+      .immediate();
+    if (!moved) return false;
     this.#d.journal.append("info", "migration.done", {
       params: {
         text: `N8 migration ${m.id} done; the old installation is revoked.`,
@@ -515,7 +568,7 @@ export class Migrations {
     const to = m.to ?? this.get(m.id)?.to ?? null;
     if (to !== null)
       db.prepare(
-        "UPDATE installations SET status = 'retired', retired_at = coalesce(retired_at, ?), status_detail = ? WHERE id = ?",
+        "UPDATE installations SET status = 'retired', retired_at = coalesce(retired_at, ?), status_detail = ? WHERE id = ? AND status = 'active'",
       ).run(now, `N8 ${m.id} aborted`, to);
     db.prepare(
       "UPDATE installations SET status = 'active', status_detail = NULL WHERE id = ? AND status = 'frozen'",
