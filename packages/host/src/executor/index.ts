@@ -16,6 +16,7 @@ export {
   Intents,
   type NewIntent,
   OpenIntentExistsError,
+  PreparationBlockedError,
   ulid,
 } from "./intents.js";
 export { type Admission, LIMITS, type LimitConfig, Limits, type PlannedWork } from "./limits.js";

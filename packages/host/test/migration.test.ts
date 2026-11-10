@@ -1,7 +1,11 @@
 // N8 from quiescence (D-010 r4 §9, B17 P1-1): precondition, atomic freeze, fresh LIVE, switch,
 // revocation, abort.
 
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { Executor, Intents, type NewIntent } from "../src/executor/index.js";
 import { Holds, Journal, openBridgeDatabase } from "../src/index.js";
 import type { RevocationVerdict } from "../src/lfcp/access.js";
 import {
@@ -15,8 +19,10 @@ import {
 
 const T0 = Date.parse("2026-11-10T10:00:00Z");
 
-function rig(opts: { afterPairing?: (db: ReturnType<typeof openBridgeDatabase>) => void } = {}) {
-  const db = openBridgeDatabase(":memory:");
+function rig(
+  opts: { afterPairing?: (db: ReturnType<typeof openBridgeDatabase>) => void; file?: string } = {},
+) {
+  const db = openBridgeDatabase(opts.file ?? ":memory:");
   const clock = { t: T0 };
   db.prepare(
     "INSERT INTO installations (id, dir, principal, root, label, created_at) VALUES ('i1', '/old', 'p1', 'r', 'Mac', '2026-11-01T00:00:00Z')",
@@ -290,5 +296,61 @@ describe("N8 blocked, abort, resume", () => {
     expect((await r.m.advance("m1")).phase).toBe("catching_up");
     expect(r.calls.filter((c) => c.startsWith("pair"))).toEqual([]);
     expect(r.holds("b1")).toEqual(["migration"]);
+  });
+});
+
+const update = (task: string): NewIntent => ({
+  bindingId: "b1",
+  taskId: task,
+  installationId: "i1",
+  direction: "to_apple",
+  kind: "update",
+  fields: ["title"],
+  basis: {},
+  payload: { kind: "update", ref: { id: `rem-${task}` }, expect: { rev: "1" } },
+});
+const openIntents = (db: ReturnType<typeof openBridgeDatabase>) =>
+  (db.prepare("SELECT count(*) AS n FROM intents").get() as { n: number }).n;
+
+describe("N8: no new intents for a frozen installation (review PR 13 P1-1)", () => {
+  const executor = (db: ReturnType<typeof openBridgeDatabase>) =>
+    new Executor({
+      db,
+      transport: {} as never,
+      lfcp: {} as never,
+      gates: {} as never,
+      handler: {} as never,
+    });
+
+  it("after the freeze the executor prepares nothing for the old installation; after abort it does", async () => {
+    const r = rig();
+    const out = await r.m.add("i1", ["Work"]);
+    const id = (out as { migration: { id: string; phase: string } }).migration.id;
+    expect(r.m.get(id)?.phase).toBe("catching_up");
+    expect(() => executor(r.db).prepare("b1", { intents: [update("T1")], unlinks: 0 })).toThrow(
+      /migration/,
+    );
+    expect(openIntents(r.db)).toBe(0);
+    r.m.abort(id);
+    expect(executor(r.db).prepare("b1", { intents: [update("T1")], unlinks: 0 })).toHaveLength(1);
+  });
+
+  it("another connection to the same database cannot prepare either once the freeze committed", async () => {
+    const file = join(mkdtempSync(join(tmpdir(), "lfcp-n8-")), "bridge.sqlite");
+    const r = rig({ file });
+    const other = openBridgeDatabase(file);
+    try {
+      await r.m.add("i1", ["Work"]);
+      expect(() => new Intents(other).prepare(update("T2"))).toThrow(/migration/);
+      expect(openIntents(other)).toBe(0);
+    } finally {
+      other.close();
+    }
+  });
+
+  it("an installation that is not active gets no new intents", () => {
+    const r = rig();
+    r.db.prepare("UPDATE installations SET status = 'retired' WHERE id = 'i1'").run();
+    expect(() => new Intents(r.db).prepare(update("T3"))).toThrow(/not active/);
   });
 });
