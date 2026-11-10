@@ -20,6 +20,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -116,10 +117,13 @@ async function backup(db, file, to) {
   );
   const why = unsafeTarget(file, target);
   if (why !== undefined) throw new Error(`refusing the backup: ${why}`);
-  // Written next to it under a temporary name, then linked into place: link never overwrites, so
-  // a file that appeared meanwhile stays, and a failed backup leaves no file under the name.
-  const tmp = `${target}.${process.pid}.tmp`;
+  // Written into a directory of our own (mkdtemp creates it new, so nothing in it is anyone
+  // else's), next to the target, then linked into place: link never overwrites, so a file that
+  // appeared meanwhile stays, and a failed backup leaves no file under the name. Only that
+  // directory is removed afterwards.
+  const scratch = mkdtempSync(join(dirname(target), ".bridge-db-backup-"));
   try {
+    const tmp = join(scratch, "copy.sqlite");
     await db.backup(tmp);
     const copy = openBridgeDatabase(tmp, { migrate: false });
     try {
@@ -130,7 +134,7 @@ async function backup(db, file, to) {
     }
     linkSync(tmp, target);
   } finally {
-    for (const f of [tmp, `${tmp}-wal`, `${tmp}-shm`]) rmSync(f, { force: true });
+    rmSync(scratch, { recursive: true, force: true });
   }
   return target;
 }
@@ -264,6 +268,20 @@ async function selfTest() {
     }
     if (readFileSync(existing, "utf8") !== "irreplaceable old backup")
       throw new Error("an existing backup was overwritten");
+    // Files at names a backup might use for its scratch copy are not ours: they stay as they are,
+    // and the backup is still an independent copy (review PR 14 r2 P2-1).
+    const foreignTmp = join(dir, `a.bak.${process.pid}.tmp`);
+    writeFileSync(foreignTmp, "irreplaceable data");
+    await run(["backup", "--to", join(dir, "a.bak")], env, say);
+    if (readFileSync(foreignTmp, "utf8") !== "irreplaceable data")
+      throw new Error("a foreign file at the scratch name was overwritten or removed");
+    const linkTmp = join(dir, `b.bak.${process.pid}.tmp`);
+    symlinkSync(file, linkTmp);
+    await run(["backup", "--to", join(dir, "b.bak")], env, say);
+    if (statSync(join(dir, "b.bak")).ino === statSync(file).ino)
+      throw new Error("the backup is the database itself, not a copy");
+    if (!lstatSync(linkTmp).isSymbolicLink()) throw new Error("a foreign link was replaced");
+    if (version() !== SCHEMA_VERSION) throw new Error("a backup changed the schema");
     await run(["migrate", "--to", "1", "--backup", join(dir, "before.bak")], env, say);
     const back = open(join(dir, "before.bak"));
     const backVersion = schemaVersion(back);
