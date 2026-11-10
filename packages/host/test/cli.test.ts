@@ -31,7 +31,7 @@ describe("lfcp-bridge", () => {
   });
 
   it("answers every command of a later PR with 'not available in this build', exit 2", async () => {
-    for (const c of COMMANDS) {
+    for (const c of COMMANDS.filter((x) => x.ready !== true)) {
       const r = await run(...c.name.split(" "));
       expect([r.code, r.err]).toEqual([
         EXIT.USAGE,
