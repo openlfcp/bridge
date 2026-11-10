@@ -9,7 +9,6 @@ import { resume, stop, stopState } from "./db/stop.js";
 import { doctor, worst } from "./doctor.js";
 import { EXIT, type ExitCode } from "./exit.js";
 import { installLaunchAgent, uninstallLaunchAgent } from "./launchd.js";
-import { OwnershipGuard } from "./ownership.js";
 import { machineRuntime, type Runtime } from "./runtime.js";
 
 export interface CommandInfo {
@@ -303,15 +302,8 @@ async function run(
         );
         await (transport as { requestAccess?: () => Promise<unknown> }).requestAccess?.();
       }
-      if (transport !== undefined && transport.status().state === "ok") {
-        await new OwnershipGuard(
-          rt.db,
-          rt.holds,
-          rt.journal,
-          transport,
-          rt.config.bridgeInstanceId,
-        ).checkAll();
-      }
+      // Read-only (review PR 9 P2-2): doctor reports markers through inspectMarkers; holds are
+      // set by the run loop's OwnershipGuard, never by a diagnosis.
       const checks = await doctor({
         db: rt.db,
         home: rt.paths.home,
