@@ -20,6 +20,8 @@ export const HOLD_REASONS = Object.freeze([
   "migration",
   // §5.9: the server refuses the section (a blocked batch, a refused open); revocationStatus follows.
   "access_refused",
+  // §7.5, §8.2: the helper did not stay up (more than 3 restarts within 5 min, PR 9 supervision).
+  "helper_unavailable",
 ] as const);
 
 export type HoldReason = (typeof HOLD_REASONS)[number];
