@@ -163,11 +163,8 @@ export async function bridge(o: BridgeOptions = {}) {
     async sync() {
       const r = await pass.dryRun("b");
       if (r.kind !== "planned") throw new Error(`${r.kind}: ${"reason" in r ? r.reason : ""}`);
-      const applied = await links.apply("b", r.plan);
-      const prepared =
-        applied.kind === "held"
-          ? []
-          : (e.prepare("b", { intents: r.plan.intents, unlinks: 0 }) ?? []);
+      const applied = await links.apply("b", r.plan, { executor: e, guards: r.guards });
+      const prepared = applied.kind === "held" ? [] : applied.prepared;
       const outcomes = [];
       for (const i of prepared) outcomes.push(await e.run(i.id));
       return { plan: r.plan, applied, prepared, outcomes };

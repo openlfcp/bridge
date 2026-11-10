@@ -187,15 +187,21 @@ export class Executor {
    * (InvalidIntentError) before anything is prepared; one that would write a
    * field in quarantine is left out (journaled) and the rest prepared.
    */
-  prepare(bindingId: string, planned: PlannedWork): readonly Intent[] | undefined {
+  prepare(
+    bindingId: string,
+    planned: PlannedWork,
+    /** admitted: the whole pass was already checked against the limits (LinkApplier). */
+    o: { readonly admitted?: boolean } = {},
+  ): readonly Intent[] | undefined {
     const binding = this.#binding(bindingId);
     for (const n of planned.intents) {
       const invalid = this.#invalid(n, binding);
       if (invalid !== undefined) throw new InvalidIntentError(n, invalid);
     }
-    const limits = new Limits(this.#o.db, undefined, this.#now);
-    const admitted = limits.admit(bindingId, planned);
-    if (!admitted.ok) return undefined;
+    if (o.admitted !== true) {
+      const admitted = new Limits(this.#o.db, undefined, this.#now).admit(bindingId, planned);
+      if (!admitted.ok) return undefined;
+    }
     return this.#o.db
       .transaction(() => {
         const out: Intent[] = [];
@@ -428,6 +434,17 @@ export class Executor {
       });
       return { kind: "refused", reason: "invalid_intent" };
     }
+    const stale = this.#stale(i);
+    if (stale !== undefined) {
+      // The link changed since the plan (review PR 12 #14): not sent; the next pass re-plans.
+      this.#intents.end(i.id, "superseded", stale);
+      this.#journal.append("info", "intent.stale", {
+        bindingId: i.bindingId,
+        taskId: i.taskId,
+        params: { intent: i.id, reason: stale },
+      });
+      return { kind: "superseded", reason: stale };
+    }
     const held = this.#quarantinedFields(i);
     if (held.length > 0) {
       // Planned on a basis the quarantine makes doubtful: re-plan after it is resolved.
@@ -439,6 +456,24 @@ export class Executor {
       });
       return { kind: "superseded", reason: "field_quarantined" };
     }
+    return undefined;
+  }
+
+  /**
+   * Why a prepared intent no longer fits its Task's link (§6.1–6.4, B11; review PR 12 #14): the
+   * link left synchronization (out_of_filter, task_gone, unlinked, quarantine), or it is locked by
+   * a recurrence and the intent writes status or due. Undefined when it still fits (no link yet:
+   * a create).
+   */
+  #stale(i: Intent): string | undefined {
+    const link = this.#o.db
+      .prepare("SELECT state, status_locked FROM links WHERE binding_id = ? AND task_id = ?")
+      .get(i.bindingId, i.taskId) as { state: string; status_locked: number } | undefined;
+    if (link === undefined) return undefined;
+    if (!["linked", "pending_apple_create", "pending_lfcp_create"].includes(link.state))
+      return `link_${link.state}`;
+    if (link.status_locked === 1 && i.fields.some((f) => f === "status" || f === "due"))
+      return "status_locked";
     return undefined;
   }
 
@@ -473,6 +508,12 @@ export class Executor {
     if (again.length > 0) {
       this.#intents.retry(i.id, this.#now(), { denied: again });
       return { kind: "denied", denials: again };
+    }
+    // Nothing was sent yet: a link change that came meanwhile still stops it.
+    const stale = this.#stale(effecting);
+    if (stale !== undefined) {
+      this.#intents.end(i.id, "superseded", stale);
+      return { kind: "superseded", reason: stale };
     }
     // Nothing was sent yet: a quarantine that appeared meanwhile still stops it.
     const held = this.#quarantinedFields(effecting);
