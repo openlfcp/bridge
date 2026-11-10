@@ -37,6 +37,7 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 | `src/bootstrap.ts`, `src/ownership.ts` | bind: scan → list → marker (§6.5, B16/B17), unknown outcomes resolved by a person; the ownership check (foreign_bridge, ownership_lost) | 9 |
 | `src/supervisor.ts` | the helper process: ping 30 s, restart, 3 in 5 min → helper_unavailable, orphan from helper.pid | 9 |
 | `src/launchd.ts`, `src/doctor.ts`, `src/verification.ts`, `src/runtime.ts`, `src/config.ts` | LaunchAgent, preflight (§7.4), write modes and writesVerified (§7.6), the machine, paths and config.json | 9 |
+| `src/migration.ts` | N8 from quiescence (§9 r4, B17 P1-1): precondition, the atomic freeze with quiescence checked again, fresh LIVE, switch, revocation, abort before switching; phase, `blocked_reason` and `aborted_reason` apart | 13 |
 
 ## Adapter (`packages/reminders/src/adapter/`, PR 8)
 
