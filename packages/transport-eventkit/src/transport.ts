@@ -148,6 +148,20 @@ export class EventKitTransport implements RemindersTransport {
     return this.#status;
   }
 
+  /**
+   * Asks for full Reminders access (the system dialog of the helper app). Only on a person's
+   * explicit command (doctor --request-access, bind): never in the background (§8.2).
+   */
+  async requestAccess(timeoutSec = 300): Promise<TransportStatus> {
+    const r = await this.#link?.request(
+      "access.request",
+      { timeoutSec },
+      { timeoutMs: (timeoutSec + 10) * 1000 },
+    );
+    if (r?.ok === true) this.#status = statusOf(String(r.authorization));
+    return this.#status;
+  }
+
   /** Changes the helper's write gate (bootstrap → verified, …); resolves once the helper confirmed it. */
   async setWriteMode(mode: WriteMode): Promise<void> {
     this.#writes = mode;
