@@ -9,9 +9,10 @@ import { describe, expect, it } from "vitest";
 import { LIST_PREFIX, VERIFY_PREFIX } from "../src/bootstrap.js";
 import { bridgePaths, loadConfig } from "../src/config.js";
 import { EXIT, Holds, Journal, main, openBridgeDatabase } from "../src/index.js";
+import type { MigrationPorts } from "../src/migration.js";
 import type { Runtime } from "../src/runtime.js";
 
-async function machine() {
+async function machine(ports?: MigrationPorts) {
   const home = mkdtempSync(join(tmpdir(), "lfcp-cli-"));
   const paths = {
     ...bridgePaths({ LFCP_BRIDGE_HOME: home, LFCP_BRIDGE_LOGS: join(home, "logs") }, home),
@@ -47,6 +48,7 @@ async function machine() {
     launchctl: (a) => ctl.push([...a]),
     node: "/usr/local/bin/node",
     cli: "/opt/bridge/cli.js",
+    ...(ports === undefined ? {} : { migrationPorts: async () => ports }),
     async close() {},
   });
   const call = async (...argv: string[]) => {
@@ -152,5 +154,56 @@ describe("lfcp-bridge (PR 9 commands)", () => {
       code: EXIT.USAGE,
       err: "run: not available in this build (D-010 PR 9 (after 8))",
     });
+  });
+
+  it("sections add and migrate: refused without quiescence; the whole N8 through the ports; status", async () => {
+    let fresh = false;
+    let proven = false;
+    const ports: MigrationPorts = {
+      pair: async (req) => {
+        expect(req.sections).toEqual(["Home"]);
+        return { id: "i2", dir: "/new", principal: "p2", root: "r", label: "Mac" };
+      },
+      catchUp: async (_i, rs) =>
+        rs.map((r) => ({
+          resourceId: r,
+          live: fresh,
+          connectedAt: new Date(Date.now() + 60_000).toISOString(),
+        })),
+      closeOld: async () => {},
+      revocationStatus: async () => (proven ? "revocation-proven" : "active"),
+    };
+    const m = await machine(ports);
+    await m.call("bind", "Work");
+    const id = (m.db.prepare("SELECT id FROM bindings").get() as { id: string }).id;
+    m.db
+      .prepare(
+        `INSERT INTO intents (id, binding_id, task_id, installation_id, direction, kind, fields_json, basis_json,
+           payload_json, operation_id, state, created_at)
+         VALUES ('x', ?, 'T', 'i1', 'to_apple', 'update', '[]', '{}', '{}', 'op', 'prepared', 'now')`,
+      )
+      .run(id);
+    const refused = await m.call("sections", "add", "Home");
+    expect(refused.code).toBe(EXIT.NEEDS_PERSON);
+    expect(refused.err).toContain("sections add refused: open_intents 1");
+    m.db.prepare("UPDATE intents SET state = 'finalized'").run();
+    const started = await m.call("sections", "add", "Home");
+    expect(started.code).toBe(EXIT.OK);
+    expect(started.out).toMatch(/m_\w+ {2}catching_up {2}i1 -> i2/);
+    fresh = true;
+    const switched = await m.call("migrate", "resume");
+    expect(switched.out).toContain("awaiting_revocation");
+    expect(switched.out).toContain("revoke the old device (installation i1)");
+    expect((await m.call("migrate", "abort")).err).toContain("after switching only forward");
+    proven = true;
+    await m.call("migrate", "resume");
+    expect((await m.call("migrate", "status")).out).toMatch(/done {2}i1 -> i2/);
+  });
+
+  it("sections add needs the run process in this build; migrate status works without it", async () => {
+    const m = await machine();
+    expect(await m.call("sections", "add", "Home")).toMatchObject({ code: EXIT.USAGE });
+    expect((await m.call("migrate", "status")).out).toBe("no migrations");
+    expect((await m.call("migrate", "abort")).code).toBe(EXIT.NOT_FOUND);
   });
 });
