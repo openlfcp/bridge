@@ -32,9 +32,21 @@
 import type { CapabilityDeclaration } from "../capabilities.js";
 import type { AppleItem, ListRef, WritableSet } from "../transport.js";
 import { type FilterMode, inFilter, projectable } from "./filter.js";
-import { type LfcpTaskIntent, type LfcpValues, lfcpStatusWrite, lfcpWrite } from "./lfcp-write.js";
+import {
+  type LfcpTaskIntent,
+  type LfcpValues,
+  lfcpPriority,
+  lfcpStatusWrite,
+  lfcpWrite,
+} from "./lfcp-write.js";
 import { taskLink } from "./link.js";
-import { type LinkMatch, type LinkRow, type MatchResult, match } from "./matching.js";
+import {
+  type ItemOutcome,
+  type LinkMatch,
+  type LinkRow,
+  type MatchResult,
+  match,
+} from "./matching.js";
 import {
   type AppleNative,
   type AppleWrite,
@@ -92,6 +104,26 @@ export interface PassView {
   readonly capabilities: Pick<CapabilityDeclaration, "recurringCompletion">;
   /** The zone Apple's completion dates are read in. */
   readonly timeZone: string;
+  /**
+   * Where a new Task goes: the section's end (`sectionEnd`, G9); without it nothing is imported
+   * (§6.2). Its parent is the section, `after` the last node at depth 0.
+   */
+  readonly sectionEnd?: { readonly parent: string; readonly after: string | null };
+  /**
+   * The host's Task factory for an import (the adapter has no SDK): a new Task (profile JSON) with
+   * the id derived from `key` (stable for the reminder: its externalId, else its id), no
+   * assignee (§6.2).
+   */
+  readonly newTask?: (input: NewTaskInput) => { readonly id: string; readonly task: unknown };
+}
+
+/** What an imported reminder gives its new Task (the LFCP side of its projections). */
+export interface NewTaskInput {
+  /** Stable for the reminder in this binding: "ext:<externalId>" or "id:<id>". */
+  readonly key: string;
+  readonly title: string;
+  readonly due: string | null;
+  readonly priority: string;
 }
 
 /** An intent as the host's executor prepares it (structurally its NewIntent). */
@@ -110,6 +142,8 @@ export interface PlannedBasis {
   readonly native?: AppleNative;
   /** B14: Apple's values this write overrules, by field — journaled at finalize. */
   readonly appleOverruled?: Partial<Projections>;
+  /** create_task: the reminder imported. */
+  readonly reminder?: ImportedReminder;
 }
 
 /** to_lfcp (PR 10): Task intents on the binding's section, through commitGuarded. */
@@ -118,11 +152,32 @@ export interface PlannedLfcpIntent {
   readonly taskId: string;
   readonly installationId: string;
   readonly direction: "to_lfcp";
-  readonly kind: "update_task";
+  /** create_task: a new reminder imported (§6.2, PR 11). */
+  readonly kind: "update_task" | "create_task";
   readonly fields: readonly Field[];
   readonly basis: PlannedBasis;
-  readonly payload: { readonly resource: string; readonly intents: readonly LfcpTaskIntent[] };
+  readonly payload: {
+    readonly resource: string;
+    readonly intents: readonly (LfcpTaskIntent | LfcpCreateIntent)[];
+  };
   readonly warnings: readonly string[];
+}
+
+/** task.create_in_section at the section's end (§6.2): the whole new Task in the payload. */
+export interface LfcpCreateIntent {
+  readonly intent: "task.create_in_section";
+  readonly task: unknown;
+  readonly parent: string;
+  readonly after: string | null;
+}
+
+/** The reminder an import comes from: what the pending link and its finalize need. */
+export interface ImportedReminder {
+  readonly id: string;
+  readonly externalId?: string;
+  readonly title: string;
+  /** A URL of the person's: kept, url_state user_replaced, never restore_url. */
+  readonly userUrl?: string;
 }
 
 export interface PlannedAppleIntent {
@@ -130,10 +185,16 @@ export interface PlannedAppleIntent {
   readonly taskId: string;
   readonly installationId: string;
   readonly direction: "to_apple";
-  readonly kind: "create" | "update";
+  readonly kind: "create" | "update" | "restore_url";
   readonly fields: readonly Field[];
   readonly basis: PlannedBasis;
   readonly payload:
+    | {
+        readonly kind: "restore_url";
+        readonly ref: { readonly id: string; readonly externalId?: string };
+        readonly linkUrl: string;
+        readonly expect: { readonly rev: string };
+      }
     | {
         readonly kind: "create";
         readonly list: ListRef;
@@ -290,7 +351,13 @@ export function plan(view: PassView): Plan {
   let linkedApple = 0;
   let linkedLfcp = 0;
 
-  const reconcile = (link: LinkRow, task: LfcpTask, item: AppleItem, unlocked = false) => {
+  const reconcile = (
+    link: LinkRow,
+    task: LfcpTask,
+    item: AppleItem,
+    unlocked = false,
+    appleBusy = false,
+  ) => {
     const pL = projectLfcp(task);
     const pA = projectApple(item, view.timeZone);
     const shadow = shadowOf(task);
@@ -318,7 +385,7 @@ export function plan(view: PassView): Plan {
         decide(field, "conflict", extra);
         return;
       }
-      if (view.openIntent(task.id, "to_apple")) {
+      if (appleBusy || view.openIntent(task.id, "to_apple")) {
         decide(field, "pending_intent", extra);
         return;
       }
@@ -490,7 +557,26 @@ export function plan(view: PassView): Plan {
         if (lm.kind !== "matched") continue;
         if (lm.ignore.length > 0)
           transitions.push({ taskId: link.taskId, kind: "ignore_copies", ignore: lm.ignore });
-        if (lm.restoreUrl) items.push(note("restore_url", lm.item, { taskId: link.taskId }));
+        // restore_url (§5.4, §6.2): our link back on a reminder whose URL is empty. It is this pass's
+        // to_apple intent for the Task (one open per direction): field writes to Apple wait.
+        const restoring = lm.restoreUrl && !view.openIntent(link.taskId, "to_apple");
+        if (restoring)
+          intents.push({
+            bindingId: b.id,
+            taskId: link.taskId,
+            installationId: b.installationId,
+            direction: "to_apple",
+            kind: "restore_url",
+            fields: [],
+            basis: { rev: lm.item.rev, pL: {}, shadow: shadowOf(task as LfcpTask) },
+            payload: {
+              kind: "restore_url",
+              ref: ref(lm.item),
+              linkUrl: link.remUrl ?? taskLink(link.taskId, b.section, b.bridgeInstanceId),
+              expect: { rev: lm.item.rev },
+            },
+            warnings: [],
+          });
         if (lm.userReplaced && link.urlState !== "user_replaced")
           items.push(note("user_replaced", lm.item, { taskId: link.taskId }));
         // §6.4: a recurrence the person set locks status and due (read-only both ways); its
@@ -507,6 +593,7 @@ export function plan(view: PassView): Plan {
           task as LfcpTask,
           lm.item,
           lm.item.hasRecurrence !== link.statusLocked && !lm.item.hasRecurrence,
+          restoring,
         );
         break;
       }
@@ -529,6 +616,7 @@ export function plan(view: PassView): Plan {
 
   // Pass 2 of matching: orphans, foreign reminders, new ones.
   const orphaned = new Set<string>();
+  const imports: Extract<ItemOutcome, { kind: "import" }>[] = [];
   for (const o of m.items) {
     switch (o.kind) {
       case "orphan_link":
@@ -551,6 +639,7 @@ export function plan(view: PassView): Plan {
         break;
       case "import":
         items.push(note("import", o.item, o.userReplaced ? { reason: "user_replaced" } : {}));
+        imports.push(o);
         break;
       case "import_blocked":
         items.push(note("import_blocked", o.item));
@@ -559,6 +648,69 @@ export function plan(view: PassView): Plan {
         items.push(note("ignore", o.item, { reason: o.reason }));
         break;
     }
+  }
+
+  // New reminders → Tasks (§6.2, PR 11): task.create_in_section at the section's end, in the
+  // snapshot's order; the Task's id is stable for the reminder (its key), so a repeat is the same
+  // Task. Matching already left out markers, completed reminders and, under import_ambiguous,
+  // everything (import_blocked).
+  let after = view.sectionEnd?.after ?? null;
+  for (const o of imports) {
+    if (view.sectionEnd === undefined || view.newTask === undefined) continue;
+    const pA = projectApple(o.item, view.timeZone);
+    const values: LfcpValues = {
+      title: pA.title,
+      due: pA.due,
+      priority: lfcpPriority(pA.priority, "normal"),
+      status: "todo",
+      completion_date: null,
+    };
+    const made = view.newTask({
+      key:
+        o.item.ref.externalId !== undefined
+          ? `ext:${o.item.ref.externalId}`
+          : `id:${o.item.ref.id}`,
+      title: values.title,
+      due: values.due,
+      priority: values.priority,
+    });
+    if (view.openIntent(made.id, "to_lfcp")) continue;
+    const pL = projectLfcp(values);
+    intents.push({
+      bindingId: b.id,
+      taskId: made.id,
+      installationId: b.installationId,
+      direction: "to_lfcp",
+      kind: "create_task",
+      // Status is not a change of a create: not counted by guard_mass_status. Finalize records all four bases.
+      fields: ["title", "due", "priority"],
+      basis: {
+        pL,
+        shadow: { status: values.status, priority: values.priority },
+        lfcp: values,
+        pA,
+        native: appleNative(o.item),
+        reminder: {
+          id: o.item.ref.id,
+          ...(o.item.ref.externalId === undefined ? {} : { externalId: o.item.ref.externalId }),
+          title: o.item.title,
+          ...(o.userReplaced && o.item.linkUrl !== undefined ? { userUrl: o.item.linkUrl } : {}),
+        },
+      },
+      payload: {
+        resource: b.section,
+        intents: [
+          {
+            intent: "task.create_in_section",
+            task: made.task,
+            parent: view.sectionEnd.parent,
+            after,
+          },
+        ],
+      },
+      warnings: [],
+    });
+    after = made.id;
   }
 
   // New projections: projectable Tasks with no link and no orphan reminder.
