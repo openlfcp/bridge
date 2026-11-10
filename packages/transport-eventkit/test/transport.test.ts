@@ -127,6 +127,15 @@ describe("open and status", () => {
     });
   });
 
+  it("setWriteMode sends hello with the new mode (bootstrap → verified)", async () => {
+    const { link, t } = await open(helloOk);
+    await t.setWriteMode("bootstrap");
+    await t.setWriteMode("verified");
+    const modes = link.calls.filter((c) => c.op === "hello").map((c) => c.body.writes);
+    expect(modes).toEqual(["verified", "bootstrap", "verified"]);
+    expect(t.writeMode).toBe("verified");
+  });
+
   it("authorization maps to needs_human; access_changed updates status and notifies", async () => {
     const { link, t, status } = await open(helloOk, { authorization: "notDetermined" });
     expect(status).toEqual({ state: "needs_human", reason: "tcc_not_determined" });
