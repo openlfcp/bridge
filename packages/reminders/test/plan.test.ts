@@ -495,7 +495,7 @@ describe("the plan of a pass §5.5", () => {
     expect(p.intents).toEqual([
       expect.objectContaining({
         kind: "restore_url",
-        fields: [],
+        fields: ["url"],
         payload: {
           kind: "restore_url",
           ref: noUrl.ref,
