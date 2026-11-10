@@ -2,18 +2,22 @@ name: helper
 
 on:
   push:
-    paths: ["helper/**", ".github/workflows/helper.yml"]
+    paths: ["helper/**", "packages/reminders/**", "packages/transport-eventkit/**", "package.json", "pnpm-lock.yaml", "tsconfig*.json", "vitest.config.ts", ".github/workflows/helper.yml"]
   pull_request:
-    paths: ["helper/**", ".github/workflows/helper.yml"]
+    paths: ["helper/**", "packages/reminders/**", "packages/transport-eventkit/**", "package.json", "pnpm-lock.yaml", "tsconfig*.json", "vitest.config.ts", ".github/workflows/helper.yml"]
 
 jobs:
   helper:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
+      # setup-node v5 turns on the package-manager cache by itself when package.json names
+      # packageManager (pnpm), and then fails: this job has no pnpm and needs none (node runs
+      # scripts/smoke.mjs only).
       - uses: actions/setup-node@v5
         with:
           node-version: 24
+          package-manager-cache: false
       - name: HelperCore tests (swiftc, arm64 + x86_64; runs the native slice)
         working-directory: helper
         run: scripts/build.sh
@@ -31,3 +35,24 @@ jobs:
         run: |
           swift build -c release
           swift run -c release helper-core-tests
+
+  # D-010 §1.3: the Node transport against the real helper (memory backend, no EventKit, no TCC),
+  # including the shared transportContract and the open + FIFO launch.
+  helper-protocol:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build the helper app (native architecture)
+        working-directory: helper
+        run: ARCHS="$(uname -m)" scripts/build-app.sh
+      - run: pnpm build
+      - name: Transport tests against the helper (fail, not skip, without the app)
+        env:
+          REQUIRE_HELPER: "1"
+        run: pnpm exec vitest run packages/transport-eventkit
