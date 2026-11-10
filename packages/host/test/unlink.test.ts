@@ -401,3 +401,23 @@ describe("review PR 12", () => {
     ).toEqual([]);
   });
 });
+
+describe("review PR 12 r2", () => {
+  it("#19 a limit hold not yet accepted stops the whole pass, even once the anomaly shrank", async () => {
+    b = await bridge({ filter: "mine" });
+    const tasks = [];
+    for (let k = 0; k < 4; k++) tasks.push(await b.task(`T${k}`));
+    await b.sync();
+    for (const task of tasks) await b.edit(unassign(b.now(task.id), b.root));
+    expect((await b.sync()).applied).toEqual({ kind: "held", holds: ["guard_mass_unlink"] });
+    // Three come back: one unlink left, under the limit — but the hold is not accepted.
+    for (const task of tasks.slice(0, 3)) await b.edit(assign(b.now(task.id), b.root));
+    const r = await b.sync();
+    expect(r.applied).toEqual({ kind: "held", holds: ["guard_mass_unlink"] });
+    expect(b.link((tasks[3] as { id: string }).id)?.state).toBe("linked");
+    // Accepted (resume --accept, PR 9: the hold lifted): the pass goes on.
+    b.db.prepare("DELETE FROM binding_holds WHERE reason = 'guard_mass_unlink'").run();
+    expect((await b.sync()).applied.kind).toBe("applied");
+    expect(b.link((tasks[3] as { id: string }).id)?.state).toBe("out_of_filter");
+  });
+});

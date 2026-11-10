@@ -110,7 +110,14 @@ export class LinkApplier {
     for (const h of plan.holds)
       if (holds.set(bindingId, h, { seen: new Date(this.#now()).toISOString() }))
         this.#journal.append("warn", `hold.${h}`, { bindingId });
-    if (plan.holds.includes("foreign_bridge")) return { kind: "held", holds: ["foreign_bridge"] };
+    // A hold already set and not accepted (`resume --accept`) stops the whole pass, even when this
+    // plan alone would pass (review PR 12 #19): the anomaly is the person's to accept, not the
+    // next pass's to outgrow. import_ambiguous only stops imports — matching left them out already.
+    const standing = holds
+      .of(bindingId)
+      .map((h) => h.reason)
+      .filter((r) => r !== "import_ambiguous");
+    if (standing.length > 0) return { kind: "held", holds: standing };
 
     // 1. Global finds, nothing changed yet.
     const located = new Map<string, Located>();
