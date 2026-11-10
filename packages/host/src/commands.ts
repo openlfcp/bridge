@@ -212,9 +212,17 @@ async function run(
         instanceId: rt.config.bridgeInstanceId,
         stopped,
       }).unbind(id);
+      if (r.refused !== undefined) {
+        env.err(`unbind refused: ${r.refused.join(", ")} (lfcp-bridge resume first)`);
+        return EXIT.STOPPED;
+      }
       env.out(
         `binding ${id} removed${r.retired ? "; its marker retired" : ""}; the list and its reminders stay`,
       );
+      if (r.denied !== undefined)
+        env.out(
+          `its ownership marker was left in Reminders (${r.denied.join(", ")}); delete "LFCP bridge · не удалять" there if you want`,
+        );
       return EXIT.OK;
     }
     case "status": {
