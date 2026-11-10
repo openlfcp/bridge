@@ -108,6 +108,11 @@ export interface Gates {
 export interface IntentHandler {
   /** Writes the bases of the intent's fields (§5.6 formulas) and their `intent_id`, in `db`'s transaction. */
   finalize(intent: Intent, result: unknown, db: BridgeDatabase): void;
+  /**
+   * Called in prepare's transaction for each intent prepared: what must be durable with it
+   * (an import's pending_lfcp_create link, §6.2). Optional.
+   */
+  prepared?(intent: Intent, db: BridgeDatabase): void;
   /** to_lfcp, inside the SDK's stage: the replica still matches the intent's basis. */
   lfcpBasis(replica: SectionReplica, intent: Intent): true | false | string;
 }
@@ -215,7 +220,9 @@ export class Executor {
             });
             continue;
           }
-          out.push(this.#intents.prepare(n));
+          const prepared = this.#intents.prepare(n);
+          this.#o.handler.prepared?.(prepared, this.#o.db);
+          out.push(prepared);
         }
         return out;
       })

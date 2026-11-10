@@ -39,6 +39,8 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 | `src/launchd.ts`, `src/doctor.ts`, `src/verification.ts`, `src/runtime.ts`, `src/config.ts` | LaunchAgent, preflight (§7.4), write modes and writesVerified (§7.6), the machine, paths and config.json | 9 |
 | `src/migration.ts` | N8 from quiescence (§9 r4, B17 P1-1): precondition, the atomic freeze with quiescence checked again, fresh LIVE, switch, revocation, abort before switching; phase, `blocked_reason` and `aborted_reason` apart | 13 |
 | `src/reconcile/links.ts` | a pass's application (§6.1–6.4, B4, B11): global finds first (complete only; several candidates → quarantine), then the whole pass — intents, real unlinks, the dry run's count drop — against the limits on the state before any change (r2 §7.2); then the transitions and the intents; task_gone / out_of_filter, a global find before unlinked (moved_out, deleted_in_apple) and before a new projection on a return (R2-9 (3)), relink as a first link, orphans, quarantine, recurring copies, status_locked; nothing deleted anywhere | 12 |
+| `src/reconcile/import-task.ts` | a new reminder's Task (§6.2): its id stable for the reminder (UUIDv7 from a hash of section, binding and the reminder's externalId or id), no assignee | 11 |
+| `src/lfcp/fallback/section-end.ts` | **FALLBACK for sdk-ts G9**: the section's end (after the last node at depth 0) for an import | 11 |
 
 ## Adapter (`packages/reminders/src/adapter/`, PR 8)
 
