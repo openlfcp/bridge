@@ -134,25 +134,15 @@ export class LinkApplier {
       if (where?.kind === "elsewhere" || (t.kind === "apple_missing" && where?.kind === "absent"))
         unlinks++;
     }
-    const admitted = new Limits(db, undefined, this.#now).admit(bindingId, {
-      intents: plan.intents,
-      unlinks,
-    });
+    const admitted = new Limits(db, undefined, this.#now).admit(
+      bindingId,
+      { intents: plan.intents, unlinks },
+      o.guards?.includes("guard_count_drop") ? ["guard_count_drop"] : [],
+    );
     const stopped: HoldReason[] = admitted.ok ? [] : [...admitted.holds];
     // An accepted anomaly: this pass's unlinks are journaled as accepted, its imports become the
     // new baseline — the next pass is not stopped by the very work a person accepted.
     const accepted = admitted.ok ? (admitted.accepted ?? []) : [];
-    if (
-      o.guards?.includes("guard_count_drop") &&
-      !holds.takeAccepted(bindingId, "guard_count_drop")
-    ) {
-      if (holds.set(bindingId, "guard_count_drop", { seen: new Date(this.#now()).toISOString() }))
-        this.#journal.append("error", "guard.limit", {
-          bindingId,
-          params: { holds: "guard_count_drop" },
-        });
-      stopped.push("guard_count_drop");
-    }
     if (stopped.length > 0) return { kind: "held", holds: stopped };
 
     // 3. Apply: the link transitions, then the intents.

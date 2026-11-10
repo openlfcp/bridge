@@ -102,16 +102,30 @@ export class Limits {
    * Whether `planned` may be prepared for `bindingId`; when not, the holds
    * are set (and journaled) and nothing of the pass is to be prepared.
    */
-  admit(bindingId: string, planned: PlannedWork): Admission {
+  admit(
+    bindingId: string,
+    planned: PlannedWork,
+    /** Guards found outside the limits for this pass (the dry run's guard_count_drop). */
+    extra: readonly HoldReason[] = [],
+  ): Admission {
     const a = this.check(bindingId, planned);
-    if (a.ok) return a;
-    // A guard a person accepted (resume --accept) lets this one pass through, once.
+    const found = [...new Set([...(a.ok ? [] : a.holds), ...extra])];
+    const counts = a.ok ? {} : a.counts;
     const h = new Holds(this.db, this.now);
-    const used = a.holds.filter((reason) => h.takeAccepted(bindingId, reason));
-    const left = a.holds.filter((reason) => !used.includes(reason));
-    if (left.length === 0) return { ok: true, accepted: used };
-    this.#hold(bindingId, left, a.counts);
-    return { ok: false, holds: left, counts: a.counts };
+    // A pass that needs no acceptance ends the waiting ones: they were for an anomaly that the
+    // moved baseline now absorbs, not for the next one (review PR 9b #24).
+    if (found.length === 0) {
+      h.clearAccepted(bindingId);
+      return { ok: true };
+    }
+    // Accepted guards let this pass through only all together, and are used up with it at once.
+    const notAccepted = found.filter((reason) => !h.hasAccepted(bindingId, reason));
+    if (notAccepted.length === 0) {
+      h.clearAccepted(bindingId);
+      return { ok: true, accepted: found };
+    }
+    this.#hold(bindingId, notAccepted, counts);
+    return { ok: false, holds: notAccepted, counts };
   }
 
   /** What admit would answer, setting nothing: a dry-run shows the guards that would stop it. */

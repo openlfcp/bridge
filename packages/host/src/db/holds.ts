@@ -94,14 +94,31 @@ export class Holds {
    */
   accept(binding: string, reason: HoldReason): boolean {
     check(reason);
+    // Only a hold that is set can be accepted: no permission is kept for an anomaly to come
+    // (review PR 9b #24).
     const lifted = this.lift(binding, reason);
+    if (!lifted) return false;
     this.db
       .prepare(
         "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
       )
       .run(`hold_accepted:${binding}:${reason}`, iso(this.now()));
     this.markAccepted(binding, reason, iso(this.now()));
-    return lifted;
+    return true;
+  }
+
+  /** An acceptance of `reason` on `binding` waits (not used up). */
+  hasAccepted(binding: string, reason: HoldReason): boolean {
+    return (
+      this.db
+        .prepare("SELECT 1 AS x FROM meta WHERE key = ?")
+        .get(`hold_accepted:${binding}:${reason}`) !== undefined
+    );
+  }
+
+  /** Drops every waiting acceptance of `binding`: a pass that needed none of them ends them. */
+  clearAccepted(binding: string): void {
+    this.db.prepare("DELETE FROM meta WHERE key LIKE ?").run(`hold_accepted:${binding}:%`);
   }
 
   /**

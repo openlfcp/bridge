@@ -280,6 +280,44 @@ describe("Limits (r2 §7.2)", () => {
     ).toBe(false);
   });
 
+  it("review PR 9b #24: one accept lets one anomaly through, not the next; no hold, no acceptance; all guards or none", () => {
+    let t = T0;
+    const limits = new Limits(db, undefined, () => t);
+    const intents = new Intents(db, () => t);
+    const holds = new Holds(db, () => t);
+    for (let k = 0; k < 10; k++) intents.prepare(imp(`H${k}`));
+    t += 1000;
+    expect(limits.admit("b", { intents: [imp("X")], unlinks: 0 })).toMatchObject({
+      ok: false,
+      holds: ["guard_mass_import"],
+    });
+    t += 1000;
+    expect(holds.accept("b", "guard_mass_import")).toBe(true);
+    t += 1000;
+    // The baseline moved: this one passes without needing the acceptance — which ends with it.
+    expect(limits.admit("b", { intents: [imp("X")], unlinks: 0 })).toEqual({ ok: true });
+    intents.prepare(imp("X"));
+    t += 1000;
+    const eleven = Array.from({ length: 11 }, (_, k) => imp(`N${k}`));
+    expect(limits.admit("b", { intents: eleven, unlinks: 0 })).toMatchObject({
+      ok: false,
+      holds: ["guard_mass_import"],
+    });
+    // Accept with no such hold: nothing kept for later.
+    expect(holds.accept("b", "guard_mass_unlink")).toBe(false);
+    expect(holds.hasAccepted("b", "guard_mass_unlink")).toBe(false);
+    // Two guards, one accepted: held, and the acceptance is not used up meanwhile.
+    expect(holds.accept("b", "guard_mass_import")).toBe(true);
+    const both = limits.admit("b", { intents: eleven, unlinks: 0 }, ["guard_count_drop"]);
+    expect(both).toMatchObject({ ok: false, holds: ["guard_count_drop"] });
+    expect(holds.hasAccepted("b", "guard_mass_import")).toBe(true);
+    expect(holds.accept("b", "guard_count_drop")).toBe(true);
+    expect(limits.admit("b", { intents: eleven, unlinks: 0 }, ["guard_count_drop"])).toMatchObject({
+      ok: true,
+    });
+    expect(holds.hasAccepted("b", "guard_mass_import")).toBe(false);
+  });
+
   it("status: > 50 % of the links in one pass, only from 6 links; backlog > 200; count drop > 50 % from 5", () => {
     const limits = new Limits(db, undefined, () => T0);
     const status = (task: string) => newIntent(task, { fields: ["completed"] });
