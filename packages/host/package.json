@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@openlfcp/bridge-reminders": "workspace:*",
+    "@openlfcp/bridge-transport-eventkit": "workspace:*",
     "@openlfcp/client": "0.5.2",
     "@openlfcp/core": "0.5.2",
     "@openlfcp/shared-objects": "0.5.2",

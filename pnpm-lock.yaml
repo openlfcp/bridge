@@ -35,6 +35,9 @@ importers:
       '@openlfcp/bridge-reminders':
         specifier: workspace:*
         version: link:../reminders
+      '@openlfcp/bridge-transport-eventkit':
+        specifier: workspace:*
+        version: link:../transport-eventkit
       '@openlfcp/client':
         specifier: 0.5.2
         version: 0.5.2
