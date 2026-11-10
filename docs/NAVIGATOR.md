@@ -67,7 +67,9 @@ once sdk-ts releases it; until then the host keeps its own fallbacks in `src/lfc
 |---|---|
 | `lint` | biome, boundaries, `tsc -b` and the tests' types |
 | `unit` | vitest |
-| `crash`, `e2e`, `helper`, `helper-protocol` | with PRs 7, 9, 5a, 6 |
+| `helper` (`helper.yml`) | HelperCore tests, the app, smoke, sign-dev tests, SwiftPM |
+| `helper-protocol` (`helper.yml`) | `transport-eventkit` against the helper (memory backend): unit tests, `transportContract`, open + FIFO |
+| `crash`, `e2e` | with PRs 7, 9 |
 
 ## Testing
 

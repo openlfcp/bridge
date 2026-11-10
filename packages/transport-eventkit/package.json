@@ -13,5 +13,8 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     }
+  },
+  "dependencies": {
+    "@openlfcp/bridge-reminders": "workspace:*"
   }
 }
