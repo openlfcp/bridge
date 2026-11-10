@@ -25,6 +25,8 @@ import {
 } from "@openlfcp/bridge-reminders/transport";
 import type { BridgeDatabase } from "./db/database.js";
 import type { Journal } from "./db/journal.js";
+import { type Denial, type EffectContext, permits } from "./executor/permissions.js";
+import { Runs } from "./executor/safe-mode.js";
 import { inspectMarkers, markerUrl } from "./ownership.js";
 
 export const LIST_PREFIX = "LFCP · ";
@@ -47,7 +49,9 @@ export type BindRefusal =
   | "list_exists"
   | "forbidden_list"
   | "already_bound"
-  | "not_unknown";
+  | "not_unknown"
+  /** permits() of PR 7 refused the effect; detail lists its denials. */
+  | "denied";
 
 export type BindOutcome =
   | {
@@ -99,6 +103,14 @@ interface OpRow {
   client_id: string;
   state: "prepared" | "effecting" | "done" | "unknown_outcome";
   result_json: string | null;
+}
+
+/** The first denial that has its own refusal; otherwise "denied" with all of them. */
+function refusalOf(denials: readonly Denial[]): Refused {
+  if (denials.includes("stopped")) return new Refused("stop", "STOP is set");
+  if (denials.includes("foreign_marker"))
+    return new Refused("foreign_bridge", "another bridge has this section");
+  return new Refused("denied", denials.join(", "));
 }
 
 class Refused extends Error {
@@ -256,15 +268,26 @@ export class Bootstrap {
     return this.resume(bindingId);
   }
 
-  /** unbind: the binding is removed; this bridge's own marker is retired; list and reminders stay. */
-  async unbind(bindingId: string): Promise<{ readonly retired: boolean }> {
+  /**
+   * unbind (the unbind column of permits()): STOP and Safe Mode refuse it entirely (nothing
+   * changes); holds do not count. When the marker may not be retired (no TCC, the list is gone,
+   * ownership not checked) the binding is still removed and the marker stays — `denied` says why.
+   */
+  async unbind(bindingId: string): Promise<{
+    readonly retired: boolean;
+    readonly refused?: readonly Denial[];
+    readonly denied?: readonly Denial[];
+  }> {
     const b = this.#binding(bindingId);
+    const denials = permits(await this.#context(b, "unbind", "marker_retire"));
+    const blocking = denials.filter((d) => d === "stopped" || d === "safe_mode");
+    if (blocking.length > 0) return { retired: false, refused: blocking };
     let retired = false;
-    if (b.target_ref !== null) {
+    if (denials.length === 0 && b.target_ref !== null) {
       const url = markerUrl(this.#d.instanceId, b.resource_id);
       const found = await this.#d.transport.find({ url }, [b.target_ref as ListRef]);
       const marker = found.items[0];
-      if (marker !== undefined && !this.#d.stopped()) {
+      if (marker !== undefined) {
         const r = await this.#d.transport.apply({
           opKey: `unbind:${bindingId}:${randomUUID().slice(0, 8)}`,
           kind: "marker_retire",
@@ -278,36 +301,80 @@ export class Bootstrap {
     this.#d.db.prepare("UPDATE bindings SET state = 'removed' WHERE id = ?").run(bindingId);
     this.#d.journal.append("info", "binding.removed", {
       bindingId,
-      params: { text: "Binding removed; the list and its reminders stay.", ...{ retired } },
+      params: {
+        text: "Binding removed; the list and its reminders stay.",
+        retired,
+        denied: denials,
+      },
     });
-    return { retired };
+    return denials.length > 0 ? { retired, denied: denials } : { retired };
   }
 
   // ---------- steps ----------
 
-  /**
-   * Before every effect (the bootstrap column of PR 7's permission table, review r3 P2-4): STOP, an
-   * active installation, the transport (TCC), no foreign marker for the section, then the write mode.
-   */
-  async #gate(b: BindingRow): Promise<void> {
-    if (this.#d.stopped()) throw new Refused("stop", "STOP is set");
+  /** The table of PR 7 (review r3 P2-4): what every effect needs, read fresh before it. */
+  async #context(
+    b: BindingRow,
+    mode: "bootstrap" | "unbind",
+    effect: EffectContext["effect"],
+  ): Promise<EffectContext> {
     const inst = this.#d.db
       .prepare(
         "SELECT i.status FROM installations i JOIN bindings b ON b.installation_id = i.id WHERE b.id = ?",
       )
       .get(b.id) as { status: string } | undefined;
-    if (inst?.status !== "active")
-      throw new Refused("transport", `installation ${inst?.status ?? "missing"}`);
-    const s = this.#d.transport.status();
-    if (s.state !== "ok") throw new Refused("transport", s.reason);
-    const v = await inspectMarkers(this.#d.transport, this.#d.instanceId, b.resource_id, false);
-    if (v.state === "incomplete")
-      throw new Refused("incomplete", "the marker search is incomplete");
-    if (v.state === "foreign")
-      throw new Refused(
-        "foreign_bridge",
-        `another bridge (${v.instances.join(", ")}) has this section`,
+    const holds = (
+      this.#d.db.prepare("SELECT reason FROM binding_holds WHERE binding_id = ?").all(b.id) as {
+        reason: string;
+      }[]
+    ).map((h) => h.reason);
+    const transportOk = this.#d.transport.status().state === "ok";
+    let listPresent: boolean | undefined;
+    let foreign = false;
+    let ownershipChecked = false;
+    if (transportOk) {
+      const current = this.#binding(b.id);
+      if (current.target_ref !== null) {
+        const lists = await this.#d.transport.lists();
+        listPresent = lists.complete
+          ? lists.lists.some((l) => l.id === current.target_ref)
+          : undefined;
+      }
+      const v = await inspectMarkers(
+        this.#d.transport,
+        this.#d.instanceId,
+        b.resource_id,
+        mode === "unbind",
       );
+      if (v.state === "incomplete" && mode === "bootstrap")
+        throw new Refused("incomplete", "the marker search is incomplete");
+      foreign = v.state === "foreign";
+      ownershipChecked = v.state === "ok";
+    }
+    return {
+      mode,
+      effect,
+      stopped: this.#d.stopped(),
+      safeMode: new Runs(this.#d.db).safeMode() !== undefined,
+      installationActive: inst?.status === "active",
+      bindingState: b.state as EffectContext["bindingState"],
+      verificationBinding: b.verification === 1,
+      holds,
+      transportOk,
+      listPresent,
+      ownershipChecked,
+      foreignMarker: foreign,
+      accessCheckedNow: false,
+      offlineCommitAllowed: false,
+      connected: false,
+      writesVerified: false,
+    };
+  }
+
+  /** Before every bootstrap effect: permits() (bootstrap column), then the helper write mode. */
+  async #gate(b: BindingRow, effect: "list_create" | "marker_create"): Promise<void> {
+    const denials = permits(await this.#context(this.#binding(b.id), "bootstrap", effect));
+    if (denials.length > 0) throw refusalOf(denials);
     await this.#d.transport.setWriteMode?.(b.verification === 1 ? "verification" : "bootstrap");
   }
 
@@ -346,7 +413,7 @@ export class Bootstrap {
       if (r.state === "unknown") return this.#markUnknown(b, "list");
       op = this.#setOp(b.id, "list", "prepared");
     }
-    await this.#gate(b);
+    await this.#gate(b, "list_create");
     this.#setOp(b.id, "list", "effecting");
     try {
       const list = await this.#d.transport.createList({
@@ -390,7 +457,7 @@ export class Bootstrap {
           : { state: "unknown_outcome", bindingId: b.id, step: "marker" };
       op = this.#setOp(b.id, "marker", "prepared");
     }
-    await this.#gate(b);
+    await this.#gate(b, "marker_create");
     this.#setOp(b.id, "marker", "effecting");
     let r: AppleOpResult;
     try {

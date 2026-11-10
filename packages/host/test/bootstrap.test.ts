@@ -9,6 +9,7 @@ import {
 import { type ListRef, MemoryKV } from "@openlfcp/bridge-reminders/transport";
 import { beforeEach, describe, expect, it } from "vitest";
 import { Bootstrap, LIST_PREFIX, VERIFY_PREFIX } from "../src/bootstrap.js";
+import { Runs } from "../src/executor/safe-mode.js";
 import { Holds, Journal, openBridgeDatabase } from "../src/index.js";
 import { markerUrl, OwnershipGuard, parseMarker } from "../src/ownership.js";
 
@@ -217,6 +218,49 @@ describe("unknown outcomes (B17, review PR 6 r2: never bypassed automatically)",
     expect(await boot.resolveList((r as { bindingId: string }).bindingId, "none")).toMatchObject({
       reason: "not_unknown",
     });
+  });
+});
+
+describe("permits() of PR 7 (review r3 P2-4, the strict reading)", () => {
+  const safeMode = (db: ReturnType<typeof openBridgeDatabase>) => {
+    const runs = new Runs(db);
+    for (let i = 0; i < 3; i++) runs.start();
+    expect(runs.safeMode()).toBeDefined();
+  };
+
+  it("Safe Mode stops the bootstrap", async () => {
+    const { db, store, boot } = await rig();
+    safeMode(db);
+    expect(await boot.bind(bindReq)).toMatchObject({
+      state: "refused",
+      detail: expect.stringContaining("safe_mode"),
+    });
+    expect(listsTitled(store, "LFCP · Work")).toHaveLength(0);
+  });
+
+  it("unbind: STOP and Safe Mode refuse it; the binding and its marker stay", async () => {
+    const x = await rig();
+    const id = ((await x.boot.bind(bindReq)) as { bindingId: string }).bindingId;
+    x.stop(true);
+    expect(await x.boot.unbind(id)).toMatchObject({ retired: false, refused: ["stopped"] });
+    expect(binding(x.db, id).state).toBe("pending_dry_run");
+    x.stop(false);
+    safeMode(x.db);
+    expect(await x.boot.unbind(id)).toMatchObject({ retired: false, refused: ["safe_mode"] });
+    expect([...x.store.items.values()].some((i) => i.linkUrl === markerUrl(ME, R))).toBe(true);
+  });
+
+  it("unbind ignores holds; without TCC it removes the binding but leaves the marker", async () => {
+    const x = await rig();
+    const id = ((await x.boot.bind(bindReq)) as { bindingId: string }).bindingId;
+    x.holds.set(id, "ownership_lost");
+    x.transport.setStatus({ state: "needs_human", reason: "tcc_denied" });
+    expect(await x.boot.unbind(id)).toMatchObject({
+      retired: false,
+      denied: expect.arrayContaining(["transport_not_ok"]),
+    });
+    expect(binding(x.db, id).state).toBe("removed");
+    expect([...x.store.items.values()].some((i) => i.linkUrl === markerUrl(ME, R))).toBe(true);
   });
 });
 
