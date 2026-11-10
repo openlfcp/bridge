@@ -1,7 +1,7 @@
 // The commands of PR 9b through `main` (D-010 §2.1): dry-run, approve, run (run.lock, the signal),
 // sections, pair's arguments. On the harness's binding (offline SectionHost, fake transport).
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OperationJournal, receiptOf } from "@openlfcp/client";
@@ -10,7 +10,7 @@ import { SECTIONS_PROFILE_ID } from "@openlfcp/shared-objects/sections";
 import { afterEach, describe, expect, it } from "vitest";
 import { bridgePaths, loadConfig } from "../src/config.js";
 import { EXIT, Holds, Journal, main, openNodeInstallation } from "../src/index.js";
-import { takeRunLock } from "../src/run/cli.js";
+import { pairResumeCommand, takeRunLock } from "../src/run/cli.js";
 import type { Runtime } from "../src/runtime.js";
 import { type Bridge, bridge } from "./support/bridge.js";
 
@@ -210,5 +210,29 @@ describe("sections and pair", () => {
     const r = await call(runtime(), "pair", "--label", "Mac");
     expect(r.code).toBe(EXIT.USAGE);
     expect(r.err).toContain("usage: lfcp-bridge pair");
+  });
+});
+
+describe("review PR 9b #30", () => {
+  it("a pairing waiting for approval prints a full command to paste: quoted label and sections, the link", () => {
+    home = mkdtempSync(join(tmpdir(), "lfcp-9b-30-"));
+    expect(pairResumeCommand("Mac bridge", "inst-1", ["Verify", "Bob's list"])).toBe(
+      "pbpaste | lfcp-bridge pair --label 'Mac bridge' --installation inst-1 --section 'Verify' --section 'Bob'\\''s list'",
+    );
+    expect(pairResumeCommand("A!", "i", ["S"])).not.toMatch(/"[^"]*![^"]*"/);
+  });
+
+  it("the owner's checklist expects the strict hold at the second unlink and says how to accept it", () => {
+    home = mkdtempSync(join(tmpdir(), "lfcp-9b-30-"));
+    const doc = readFileSync(
+      join(__dirname, "../../../docs/devel/testing/verification-run.md"),
+      "utf8",
+    );
+    const row = (n: number) => doc.split("\n").find((l) => l.startsWith(`| ${n} |`)) ?? "";
+    expect(row(14)).toContain("guard_mass_unlink");
+    expect(row(15)).toContain("resume --accept guard_mass_unlink");
+    expect(row(16)).toContain("guard_mass_unlink");
+    expect(doc).toContain("строгие лимиты");
+    expect(doc).not.toMatch(/^[^|\n]*lfcp-bridge[^\n]*!/m);
   });
 });
