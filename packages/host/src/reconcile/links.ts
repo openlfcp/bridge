@@ -139,7 +139,10 @@ export class LinkApplier {
       unlinks,
     });
     const stopped: HoldReason[] = admitted.ok ? [] : [...admitted.holds];
-    if (o.guards?.includes("guard_count_drop")) {
+    if (
+      o.guards?.includes("guard_count_drop") &&
+      !holds.takeAccepted(bindingId, "guard_count_drop")
+    ) {
       if (holds.set(bindingId, "guard_count_drop", { seen: new Date(this.#now()).toISOString() }))
         this.#journal.append("error", "guard.limit", {
           bindingId,

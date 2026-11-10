@@ -285,8 +285,8 @@ async function run(
             `lfcp-bridge resume --accept <${HOLD_REASONS.join("|")}> --binding <id>`,
           );
         env.out(
-          rt.holds.lift(binding, accept as HoldReason)
-            ? `hold ${accept} lifted on ${binding}`
+          rt.holds.accept(binding, accept as HoldReason)
+            ? `hold ${accept} lifted and accepted on ${binding}: the next pass goes through`
             : `no hold ${accept} on ${binding}`,
         );
         return EXIT.OK;

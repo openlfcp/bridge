@@ -103,8 +103,13 @@ export class Limits {
    */
   admit(bindingId: string, planned: PlannedWork): Admission {
     const a = this.check(bindingId, planned);
-    if (!a.ok) this.#hold(bindingId, a.holds, a.counts);
-    return a;
+    if (a.ok) return a;
+    // A guard a person accepted (resume --accept) lets this one pass through, once.
+    const h = new Holds(this.db, this.now);
+    const left = a.holds.filter((reason) => !h.takeAccepted(bindingId, reason));
+    if (left.length === 0) return { ok: true };
+    this.#hold(bindingId, left, a.counts);
+    return { ok: false, holds: left, counts: a.counts };
   }
 
   /** What admit would answer, setting nothing: a dry-run shows the guards that would stop it. */
