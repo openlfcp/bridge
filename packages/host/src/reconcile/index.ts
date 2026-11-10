@@ -1,3 +1,4 @@
+export { bridgeHandler, currentLfcp, type HandlerOptions } from "./handler.js";
 export {
   bridgeInstanceId,
   type DryRunRefusal,

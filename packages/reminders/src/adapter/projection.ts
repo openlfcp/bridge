@@ -18,8 +18,9 @@
 // equal or one of them is "—" (null). A status or priority the profile
 // extends (`x/…`) projects as open / none: the bridge never guesses its meaning.
 
-import type { AppleItem, WritableSet } from "../transport.js";
+import type { AppleItem, WritableSet, WrittenFields } from "../transport.js";
 import { isLocalDate, type LocalDate } from "../values.js";
+import type { LfcpValues } from "./lfcp-write.js";
 
 export type Field = "title" | "due" | "priority" | "status";
 export const FIELDS: readonly Field[] = Object.freeze(["title", "due", "priority", "status"]);
@@ -63,7 +64,9 @@ const oneLine = (s: string) => s.replace(/\r\n|\r|\n/g, " ");
 
 const dateOrNull = (v: string | null | undefined): LocalDate | null => (isLocalDate(v) ? v : null);
 
-export function projectLfcp(t: LfcpTask): Projections {
+export function projectLfcp(
+  t: Pick<LfcpTask, "title" | "due" | "priority" | "status" | "completion_date">,
+): Projections {
   return {
     title: oneLine(t.title),
     due: dateOrNull(t.due),
@@ -83,6 +86,58 @@ export function projectLfcp(t: LfcpTask): Projections {
 }
 
 export const shadowOf = (t: LfcpTask): LfcpShadow => ({ status: t.status, priority: t.priority });
+
+/** The exact values the bridge reads and writes of a Task (a to_lfcp basis). */
+export const lfcpValuesOf = (t: LfcpTask): LfcpValues => ({
+  title: t.title,
+  due: t.due ?? null,
+  priority: t.priority,
+  status: t.status,
+  completion_date: t.completion_date ?? null,
+});
+
+/** Apple's stored values of the synchronized fields (the native of an Apple base). */
+export interface AppleNative {
+  readonly title: string;
+  readonly dueDate: LocalDate | null;
+  readonly priority: number;
+  readonly completed: { readonly value: boolean; readonly completionDate?: string };
+}
+
+export const appleNative = (item: AppleItem): AppleNative => ({
+  title: item.title,
+  dueDate: item.due?.date ?? null,
+  priority: item.priority,
+  completed: {
+    value: item.completed,
+    ...(item.completionDate === undefined ? {} : { completionDate: item.completionDate }),
+  },
+});
+
+/**
+ * Apple's projections of the fields an operation wrote (`written`, §4.2), the
+ * Apple base of a to_apple finalize (§5.6). A field not written is absent.
+ */
+export function projectWritten(written: WrittenFields, timeZone: string): Partial<Projections> {
+  return {
+    ...(written.title === undefined ? {} : { title: oneLine(written.title) }),
+    ...(written.dueDate === undefined ? {} : { due: written.dueDate }),
+    ...(written.priority === undefined ? {} : { priority: priorityBucket(written.priority) }),
+    ...(written.completed === undefined
+      ? {}
+      : {
+          status: written.completed.value
+            ? {
+                closed: true,
+                date:
+                  written.completed.completionDate === undefined
+                    ? null
+                    : localDateIn(written.completed.completionDate, timeZone),
+              }
+            : { closed: false, date: null },
+        }),
+  };
+}
 
 /** The local calendar date of an instant in a zone (the Mac's, for completionDate). */
 export function localDateIn(instant: string, timeZone: string): LocalDate | null {

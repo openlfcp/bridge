@@ -243,7 +243,7 @@ describe("the plan of a pass §5.5", () => {
     expect(p.transitions).toEqual([{ taskId: "T1", kind: "link_orphan", item: orphan.ref }]);
   });
 
-  it("dL only → to_apple update with the base revision; dA only → deferred to PR 10; both → LFCP wins, Apple's value lost", () => {
+  it("dL only → to_apple update with the base revision; dA only → to_lfcp (B13 priority with the shadow); both → LFCP wins, Apple's value lost", () => {
     const before = task("T1", { title: "Old", priority: "normal" });
     const r = projection(before, { rev: "7" });
     const bases = new Map([["T1", synced(before, r)]]);
@@ -257,15 +257,26 @@ describe("the plan of a pass §5.5", () => {
     );
     expect(p.intents).toEqual([
       expect.objectContaining({
+        direction: "to_apple",
         kind: "update",
         fields: ["title"],
         payload: { kind: "update", ref: r.ref, set: { title: "New" }, expect: { rev: "7" } },
         basis: expect.objectContaining({ rev: "7", pL: { title: "New" }, pA: { title: "Old" } }),
       }),
+      expect.objectContaining({
+        direction: "to_lfcp",
+        kind: "update_task",
+        fields: ["priority"],
+        payload: {
+          resource: S,
+          intents: [{ intent: "task.set_priority", id: "T1", priority: "high" }],
+        },
+        basis: expect.objectContaining({ pL: { priority: "none" }, pA: { priority: "high" } }),
+      }),
     ]);
     expect(p.decisions.map((d) => [d.field, d.decision])).toEqual([
       ["title", "write_apple"],
-      ["priority", "deferred_to_lfcp"],
+      ["priority", "write_lfcp"],
     ]);
     const both = plan(
       view({
@@ -281,7 +292,7 @@ describe("the plan of a pass §5.5", () => {
     expect(both.intents[0]?.payload).toMatchObject({ set: { title: "LFCP title" } });
   });
 
-  it("status: LFCP closed with Apple unchanged → completed; both changed → deferred to PR 10's table", () => {
+  it("status: LFCP closed with Apple unchanged → completed; both closed with different dates → LFCP's date (row 11)", () => {
     const before = task("T1");
     const r = projection(before);
     const bases = new Map([["T1", synced(before, r)]]);
@@ -320,7 +331,11 @@ describe("the plan of a pass §5.5", () => {
         bases,
       }),
     );
-    expect(reopened.decisions.find((d) => d.field === "status")?.decision).toBe("deferred_status");
+    expect(reopened.decisions.find((d) => d.field === "status")).toMatchObject({
+      decision: "write_apple",
+      row: "11",
+      appleValueLost: true,
+    });
   });
 
   it("a status shadow change (done → cancelled) is recorded, nothing written", () => {
@@ -338,7 +353,7 @@ describe("the plan of a pass §5.5", () => {
     expect(p.decisions).toEqual([expect.objectContaining({ field: "status", decision: "shadow" })]);
   });
 
-  it("a first link (no bases): equivalent fields record bases, the rest LFCP wins, status waits", () => {
+  it("a first link (no bases): equivalent fields record bases, the rest LFCP wins, status by the table (done wins)", () => {
     const t = task("T1", { title: "Same", priority: "high", status: "done" });
     const r = projection(t, { priority: 9, completed: false });
     const p = plan(
@@ -348,8 +363,11 @@ describe("the plan of a pass §5.5", () => {
       ["title", "bases"],
       ["due", "bases"],
       ["priority", "write_apple"],
-      ["status", "deferred_status"],
+      ["status", "write_apple"],
     ]);
+    expect(p.intents[0]?.payload).toMatchObject({
+      set: { priority: 1, completed: { value: true } },
+    });
   });
 
   it("held fields (an open conflict, unknown_outcome too), status_locked, a pending intent and due_cleared_in_lfcp write nothing", () => {
@@ -507,6 +525,177 @@ describe("review PR 8", () => {
     );
     expect(copy.transitions).toEqual([
       { taskId: "T1", kind: "link_orphan", item: a.ref, ignore: [done.ref.externalId] },
+    ]);
+  });
+});
+
+describe("Apple → LFCP (PR 10)", () => {
+  const pair = (over: Partial<LfcpTask> = {}, apple: Partial<AppleItem> = {}) => {
+    const t = task("T1", over);
+    const r = projection(t, apple);
+    return { t, r, bases: new Map([["T1", synced(t, r)]]) };
+  };
+  const lfcpIntents = (p: ReturnType<typeof plan>) =>
+    p.intents.filter((i) => i.direction === "to_lfcp").map((i) => i.payload);
+
+  it("B12: a time-only change sends nothing; a date change sends the date only", () => {
+    const { t, r, bases } = pair({ due: "2026-11-12" }, { due: { date: localDate("2026-11-12") } });
+    const timeOnly = {
+      ...r,
+      due: { date: localDate("2026-11-12"), time: "18:30" as never, tz: "Europe/Moscow" },
+    };
+    expect(
+      plan(
+        view({
+          tasks: [t],
+          links: [link("T1")],
+          bases,
+          snapshot: { items: [timeOnly], complete: true },
+        }),
+      ).intents,
+    ).toEqual([]);
+    const moved = { ...timeOnly, due: { date: localDate("2026-11-14"), time: "18:30" as never } };
+    expect(
+      lfcpIntents(
+        plan(
+          view({
+            tasks: [t],
+            links: [link("T1")],
+            bases,
+            snapshot: { items: [moved], complete: true },
+          }),
+        ),
+      ),
+    ).toEqual([
+      { resource: S, intents: [{ intent: "task.set_due", id: "T1", date: "2026-11-14" }] },
+    ]);
+    const { due: _, ...noDue } = r;
+    expect(
+      lfcpIntents(
+        plan(
+          view({
+            tasks: [t],
+            links: [link("T1")],
+            bases,
+            snapshot: { items: [noDue as AppleItem], complete: true },
+          }),
+        ),
+      ),
+    ).toEqual([{ resource: S, intents: [{ intent: "task.clear_due", id: "T1" }] }]);
+  });
+
+  it("B13: a priority in the same bucket is no write; a bucket change keeps highest / lowest from the shadow", () => {
+    const { t, r, bases } = pair({ priority: "highest" }, { priority: 1 });
+    expect(
+      plan(
+        view({
+          tasks: [t],
+          links: [link("T1")],
+          bases,
+          snapshot: { items: [{ ...r, priority: 3 }], complete: true },
+        }),
+      ).intents,
+    ).toEqual([]);
+    const none = pair({ priority: "normal" }, { priority: 0 });
+    expect(
+      plan(
+        view({
+          tasks: [none.t],
+          links: [link("T1")],
+          bases: none.bases,
+          snapshot: { items: [{ ...none.r, priority: 5 }], complete: true },
+        }),
+      ).intents,
+    ).toEqual([]);
+    const lowest = pair({ priority: "lowest" }, { priority: 9 });
+    const up = plan(
+      view({
+        tasks: [lowest.t],
+        links: [link("T1")],
+        bases: lowest.bases,
+        snapshot: { items: [{ ...lowest.r, priority: 1 }], complete: true },
+      }),
+    );
+    expect(lfcpIntents(up)).toEqual([
+      { resource: S, intents: [{ intent: "task.set_priority", id: "T1", priority: "high" }] },
+    ]);
+    const back = plan(
+      view({
+        tasks: [lowest.t],
+        links: [link("T1")],
+        bases: lowest.bases,
+        snapshot: { items: [{ ...lowest.r, priority: 7 }], complete: true },
+      }),
+    );
+    expect(back.intents).toEqual([]);
+  });
+
+  it("status rows 7 and 8, title: all of a Task's Apple changes in one to_lfcp intent", () => {
+    const { t, r, bases } = pair();
+    const done = {
+      ...r,
+      title: "Renamed\nin Apple",
+      completed: true,
+      completionDate: "2026-11-09T12:00:00Z",
+    };
+    const p = plan(
+      view({ tasks: [t], links: [link("T1")], bases, snapshot: { items: [done], complete: true } }),
+    );
+    expect(p.intents).toHaveLength(1);
+    expect(p.intents[0]).toMatchObject({
+      direction: "to_lfcp",
+      kind: "update_task",
+      fields: ["title", "status"],
+      basis: {
+        lfcp: {
+          title: "Task T1",
+          status: "todo",
+          due: null,
+          priority: "normal",
+          completion_date: null,
+        },
+      },
+      payload: {
+        resource: S,
+        intents: [
+          { intent: "task.set_title", id: "T1", title: "Renamed in Apple" },
+          { intent: "task.complete", id: "T1", completionDate: "2026-11-09" },
+        ],
+      },
+    });
+    expect(p.decisions.find((d) => d.field === "status")?.row).toBe("7");
+    const closed = pair(
+      { status: "done", completion_date: "2026-11-09" },
+      { completed: true, completionDate: "2026-11-09T12:00:00Z" },
+    );
+    const reopened = plan(
+      view({
+        tasks: [closed.t],
+        links: [link("T1")],
+        bases: closed.bases,
+        snapshot: { items: [{ ...closed.r, completed: false }], complete: true },
+      }),
+    );
+    expect(lfcpIntents(reopened)).toEqual([
+      { resource: S, intents: [{ intent: "task.reopen", id: "T1" }] },
+    ]);
+  });
+
+  it("an open to_lfcp intent holds the next one back; to_apple still goes", () => {
+    const { t, r, bases } = pair();
+    const p = plan(
+      view({
+        tasks: [{ ...t, due: "2026-11-20" }],
+        links: [link("T1")],
+        bases,
+        snapshot: { items: [{ ...r, title: "Apple" }], complete: true },
+        openIntent: (_, d) => d === "to_lfcp",
+      }),
+    );
+    expect(p.intents.map((i) => i.direction)).toEqual(["to_apple"]);
+    expect(p.decisions.map((d) => [d.field, d.decision])).toEqual([
+      ["title", "pending_intent"],
+      ["due", "write_apple"],
     ]);
   });
 });

@@ -5,13 +5,18 @@
 //
 // For each linked pair and field (§4.4), with base = the field's bases:
 //   no base yet (a first link) → equivalent: record the bases; else LFCP
-//                                wins, but status waits (its table is PR 10)
-//   ¬dL ∧ ¬dA                  → nothing (a status shadow change: record it)
-//   pL ≡ pA                    → record the bases, no write
+//                                wins (B14)
+//   ¬dL ∧ ¬dA                  → nothing (a priority shadow change: record it)
+//   pL ≡ pA                    → record the bases, no write (B13: a priority in
+//                                the same bucket is no write)
 //    dL ∧ ¬dA                  → to_apple
-//   ¬dL ∧  dA                  → to_lfcp: Apple → LFCP is PR 10, shown as deferred
-//    dL ∧  dA                  → LFCP wins (B14), Apple's value to the journal;
-//                                status: "done wins" — PR 10's table, deferred
+//   ¬dL ∧  dA                  → to_lfcp (PR 10): set_title, set_due / clear_due
+//                                (the date only: time is personal, B12),
+//                                set_priority (with the shadow, B13)
+//    dL ∧  dA                  → LFCP wins (B14), Apple's value to the journal
+// The status group goes by its own table (status-table.ts, r3 P2-2): one
+// row per input, its action to Apple, to LFCP, or none (bases / shadow).
+// A Task gets at most one update intent per direction in a pass.
 // A field with an open conflict (unknown_outcome too) is held; a link with
 // status_locked writes neither status nor due (§6.4). An open intent of the
 // Task and direction holds a new one back.
@@ -22,26 +27,33 @@
 // without a reminder in a complete snapshot → a new projection (create). New reminders (§6.2) and
 // restore_url are PR 11's, the link transitions PR 12's: this PR shows them.
 //
-// This build is dry-run only (D-010 §11 PR 8): the plan is the product.
+// The host stores the plan (dry-run) or, where apply is allowed, prepares its intents.
 
 import type { CapabilityDeclaration } from "../capabilities.js";
 import type { AppleItem, ListRef, WritableSet } from "../transport.js";
 import { type FilterMode, inFilter, projectable } from "./filter.js";
+import { type LfcpTaskIntent, type LfcpValues, lfcpStatusWrite, lfcpWrite } from "./lfcp-write.js";
 import { taskLink } from "./link.js";
 import { type LinkMatch, type LinkRow, type MatchResult, match } from "./matching.js";
 import {
+  type AppleNative,
+  type AppleWrite,
+  appleNative,
   appleWrite,
   equivalent,
   FIELDS,
   type Field,
   type LfcpShadow,
   type LfcpTask,
+  lfcpValuesOf,
   type Projections,
   projectApple,
   projectLfcp,
+  type StatusProjection,
   sameProjection,
   shadowOf,
 } from "./projection.js";
+import { type StatusInput, type StatusRowId, statusKind, statusRow } from "./status-table.js";
 
 /** The bases of one field (§3 `bases`), as the plan reads them. */
 export interface FieldBase {
@@ -83,19 +95,44 @@ export interface PassView {
 }
 
 /** An intent as the host's executor prepares it (structurally its NewIntent). */
-export interface PlannedIntent {
+export type PlannedIntent = PlannedAppleIntent | PlannedLfcpIntent;
+
+/** The basis of an intent (§5.6): what the plan saw of both sides, for finalize and the §5.8 check. */
+export interface PlannedBasis {
+  readonly rev?: string;
+  /** The LFCP projections of the fields (all four for a create). */
+  readonly pL: Partial<Projections>;
+  readonly shadow: LfcpShadow;
+  /** The Task's exact values at the plan. */
+  readonly lfcp?: LfcpValues;
+  readonly pA?: Partial<Projections>;
+  /** Apple's stored values of the fields (to_lfcp: the Apple base's native). */
+  readonly native?: AppleNative;
+  /** B14: Apple's values this write overrules, by field — journaled at finalize. */
+  readonly appleOverruled?: Partial<Projections>;
+}
+
+/** to_lfcp (PR 10): Task intents on the binding's section, through commitGuarded. */
+export interface PlannedLfcpIntent {
+  readonly bindingId: string;
+  readonly taskId: string;
+  readonly installationId: string;
+  readonly direction: "to_lfcp";
+  readonly kind: "update_task";
+  readonly fields: readonly Field[];
+  readonly basis: PlannedBasis;
+  readonly payload: { readonly resource: string; readonly intents: readonly LfcpTaskIntent[] };
+  readonly warnings: readonly string[];
+}
+
+export interface PlannedAppleIntent {
   readonly bindingId: string;
   readonly taskId: string;
   readonly installationId: string;
   readonly direction: "to_apple";
   readonly kind: "create" | "update";
   readonly fields: readonly Field[];
-  readonly basis: {
-    readonly rev?: string;
-    readonly pL: Partial<Projections>;
-    readonly shadow: LfcpShadow;
-    readonly pA?: Partial<Projections>;
-  };
+  readonly basis: PlannedBasis;
   readonly payload:
     | {
         readonly kind: "create";
@@ -115,15 +152,13 @@ export interface PlannedIntent {
 
 export type FieldDecision =
   | "write_apple"
+  | "write_lfcp"
   | "bases"
   | "shadow"
   | "held"
   | "status_locked"
   | "pending_intent"
-  | "conflict"
-  /** Apple → LFCP and the status table: PR 10. */
-  | "deferred_to_lfcp"
-  | "deferred_status";
+  | "conflict";
 
 export interface Decision {
   readonly taskId: string;
@@ -133,6 +168,8 @@ export interface Decision {
   readonly apple?: unknown;
   /** B14: both changed, LFCP wins, Apple's value goes to the journal. */
   readonly appleValueLost?: boolean;
+  /** The status table's row (status only). */
+  readonly row?: StatusRowId;
 }
 
 export type TransitionKind =
@@ -253,11 +290,15 @@ export function plan(view: PassView): Plan {
     const pL = projectLfcp(task);
     const pA = projectApple(item, view.timeZone);
     const shadow = shadowOf(task);
+    const values = lfcpValuesOf(task);
     const held = new Set(view.heldFields(task.id));
     const bases = view.bases.get(task.id);
-    const writes: Field[] = [];
+    const toApple: Field[] = [];
     let set: WritableSet = {};
     const warnings: string[] = [];
+    const toLfcp: Field[] = [];
+    const overruled: Partial<Record<Field, unknown>> = {};
+    const lfcpIntents: LfcpTaskIntent[] = [];
     const decide = (field: Field, decision: FieldDecision, extra: Partial<Decision> = {}) =>
       decisions.push({
         taskId: task.id,
@@ -267,21 +308,34 @@ export function plan(view: PassView): Plan {
         apple: pA[field],
         ...extra,
       });
-    const writeApple = (field: Field, extra: Partial<Decision> = {}) => {
-      const w = appleWrite(field, pL, item, view.timeZone);
+    const writeApple = (field: Field, w: AppleWrite, extra: Partial<Decision> = {}) => {
       if (w.kind === "conflict") {
         conflicts.push({ taskId: task.id, field, kind: w.conflict });
-        decide(field, "conflict");
+        decide(field, "conflict", extra);
         return;
       }
       if (view.openIntent(task.id, "to_apple")) {
-        decide(field, "pending_intent");
+        decide(field, "pending_intent", extra);
         return;
       }
-      writes.push(field);
+      toApple.push(field);
+      if (extra.appleValueLost === true) overruled[field] = pA[field];
       set = { ...set, ...w.set };
       warnings.push(...w.warnings);
       decide(field, "write_apple", extra);
+    };
+    const writeLfcp = (
+      field: Field,
+      its: readonly LfcpTaskIntent[],
+      extra: Partial<Decision> = {},
+    ) => {
+      if (view.openIntent(task.id, "to_lfcp")) {
+        decide(field, "pending_intent", extra);
+        return;
+      }
+      toLfcp.push(field);
+      lfcpIntents.push(...its);
+      decide(field, "write_lfcp", extra);
     };
     for (const field of FIELDS) {
       if (held.has(field)) {
@@ -293,45 +347,101 @@ export function plan(view: PassView): Plan {
         continue;
       }
       const base = bases?.get(field);
+      if (field === "status") {
+        // The status group: its own table (§4.4, r3 P2-2).
+        const input: StatusInput = {
+          pL: pL.status,
+          sL: statusKind(task.status),
+          pA: pA.status,
+          ...(base === undefined
+            ? {}
+            : {
+                base: {
+                  lfcp: base.lfcpProj as StatusProjection,
+                  sL: statusKind(typeof base.lfcpShadow === "string" ? base.lfcpShadow : "todo"),
+                  apple: base.appleProj as StatusProjection,
+                },
+              }),
+        };
+        const row = statusRow(input);
+        const act = row.action(input);
+        const extra = { row: row.id, ...(row.appleOverruled ? { appleValueLost: true } : {}) };
+        if (act.kind === "apple")
+          writeApple(
+            field,
+            { kind: "set", set: { completed: act.completed }, warnings: [] },
+            extra,
+          );
+        else if (act.kind === "lfcp_complete" || act.kind === "lfcp_reopen")
+          writeLfcp(field, lfcpStatusWrite(task.id, act), extra);
+        else if (row.id === "1") {
+          if (base?.lfcpShadow !== undefined && base.lfcpShadow !== task.status)
+            decide(field, "shadow", extra);
+        } else decide(field, "bases", extra);
+        continue;
+      }
       const same = equivalent(field, pL[field], pA[field]);
       if (base === undefined) {
+        // A first link: equivalent → bases; else LFCP wins (B14).
         if (same) decide(field, "bases");
-        else if (field === "status") decide(field, "deferred_status");
-        else writeApple(field);
+        else
+          writeApple(field, appleWrite(field, pL, item, view.timeZone), { appleValueLost: true });
         continue;
       }
       const dL = !sameProjection(field, pL[field], base.lfcpProj);
       const dA = !sameProjection(field, pA[field], base.appleProj);
       if (!dL && !dA) {
-        const shadowChanged =
-          (field === "status" || field === "priority") &&
+        if (
+          field === "priority" &&
           base.lfcpShadow !== undefined &&
-          base.lfcpShadow !== shadow[field];
-        if (shadowChanged) decide(field, "shadow");
+          base.lfcpShadow !== shadow.priority
+        )
+          decide(field, "shadow");
         continue;
       }
       if (same) decide(field, "bases");
-      else if (dL && !dA) writeApple(field);
-      else if (!dL && dA) decide(field, "deferred_to_lfcp");
-      else if (field === "status") decide(field, "deferred_status");
-      else writeApple(field, { appleValueLost: true });
+      else if (dL && !dA) writeApple(field, appleWrite(field, pL, item, view.timeZone));
+      else if (!dL && dA) writeLfcp(field, lfcpWrite(field, task.id, pA, values));
+      else writeApple(field, appleWrite(field, pL, item, view.timeZone), { appleValueLost: true });
     }
-    if (writes.length > 0)
+    if (toApple.length > 0)
       intents.push({
         bindingId: b.id,
         taskId: task.id,
         installationId: b.installationId,
         direction: "to_apple",
         kind: "update",
-        fields: writes,
+        fields: toApple,
         basis: {
           rev: item.rev,
-          pL: Object.fromEntries(writes.map((f) => [f, pL[f]])),
+          pL: Object.fromEntries(toApple.map((f) => [f, pL[f]])),
           shadow,
-          pA: Object.fromEntries(writes.map((f) => [f, pA[f]])),
+          pA: Object.fromEntries(toApple.map((f) => [f, pA[f]])),
+          ...(Object.keys(overruled).length === 0
+            ? {}
+            : { appleOverruled: overruled as Partial<Projections> }),
         },
         payload: { kind: "update", ref: ref(item), set, expect: { rev: item.rev } },
         warnings,
+      });
+    if (toLfcp.length > 0)
+      intents.push({
+        bindingId: b.id,
+        taskId: task.id,
+        installationId: b.installationId,
+        direction: "to_lfcp",
+        kind: "update_task",
+        fields: toLfcp,
+        basis: {
+          rev: item.rev,
+          pL: Object.fromEntries(toLfcp.map((f) => [f, pL[f]])),
+          shadow,
+          lfcp: values,
+          pA: Object.fromEntries(toLfcp.map((f) => [f, pA[f]])),
+          native: appleNative(item),
+        },
+        payload: { resource: b.section, intents: lfcpIntents },
+        warnings: [],
       });
   };
 
@@ -455,7 +565,9 @@ export function plan(view: PassView): Plan {
       direction: "to_apple",
       kind: "create",
       fields,
-      basis: { pL: Object.fromEntries(fields.map((f) => [f, pL[f]])), shadow: shadowOf(task) },
+      // All four projections: finalize records the bases of all of them (a new reminder's
+      // status is open, its due the one written or none).
+      basis: { pL, shadow: shadowOf(task), lfcp: lfcpValuesOf(task) },
       payload: {
         kind: "create",
         list: b.list,

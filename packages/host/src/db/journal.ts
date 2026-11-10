@@ -40,6 +40,8 @@ export const JOURNAL_TEXT: Readonly<Record<string, (p: JournalParams) => string>
   "effect.off": () => "An effect would run here (effects are off in this build)",
   "effect.lost": () => "The answer of a write to Reminders was lost",
   "effect.in_flight": () => "A write to Reminders is already under way; not repeated",
+  "field.apple_overruled": (p) =>
+    `Changed on both sides: the shared task's ${String(p.field ?? "")} was kept; your Reminders value was ${String(p.apple ?? "")}`,
   "effect.refused": (p) => `Reminders refused a write: ${String(p.code ?? "")}`,
   "intent.unknown_outcome": () =>
     "Whether a write to Reminders happened is not known: decide in `lfcp-bridge quarantine`",

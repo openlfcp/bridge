@@ -8,6 +8,14 @@ export {
   needsMe,
   projectable,
 } from "./filter.js";
+export {
+  applyLfcpIntents,
+  type LfcpTaskIntent,
+  type LfcpValues,
+  lfcpPriority,
+  lfcpStatusWrite,
+  lfcpWrite,
+} from "./lfcp-write.js";
 export { instance8, markerUrl, parseTaskLink, type TaskLink, taskLink } from "./link.js";
 export {
   type ItemOutcome,
@@ -26,15 +34,20 @@ export {
   type PassBinding,
   type PassView,
   type Plan,
+  type PlannedAppleIntent,
+  type PlannedBasis,
   type PlannedConflict,
   type PlannedIntent,
+  type PlannedLfcpIntent,
   plan,
   type Transition,
   type TransitionKind,
   type Waiting,
 } from "./plan.js";
 export {
+  type AppleNative,
   type AppleWrite,
+  appleNative,
   appleWrite,
   BUCKET_TO_APPLE,
   equivalent,
@@ -42,6 +55,7 @@ export {
   type Field,
   type LfcpShadow,
   type LfcpTask,
+  lfcpValuesOf,
   localDateIn,
   type PriorityBucket,
   type Projection,
@@ -49,7 +63,19 @@ export {
   priorityBucket,
   projectApple,
   projectLfcp,
+  projectWritten,
   type StatusProjection,
   sameProjection,
   shadowOf,
 } from "./projection.js";
+export {
+  STATUS_TABLE,
+  type StatusAction,
+  type StatusInput,
+  type StatusKind,
+  type StatusRow,
+  type StatusRowId,
+  statusKind,
+  statusRow,
+  statusRows,
+} from "./status-table.js";

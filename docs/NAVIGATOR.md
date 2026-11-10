@@ -33,6 +33,7 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 | `src/executor/limits.ts`, `safe-mode.ts`, `transport-state.ts` | sliding-window limits with prepared intents counted (§7.2); runs and Safe Mode (§7.3); the transport's DurableKV in `transport_state` | 7 |
 | `src/reconcile/pass.ts`, `section-view.ts` | a pass of one binding (§5.5): the section's Tasks from the replica, the list's snapshot, links / bases / open intents / conflicts → the adapter's plan; guards §7.2 checked without setting them; **dry-run only**: the plan is stored in `runs` (kind `dry`), `apply` answers `dry_run_only` | 8 |
 | `src/lfcp/fallback/device-root.ts` | **FALLBACK for sdk-ts G4**: the person's root (who "me" is for the filter) from the finished pairing request | 8 |
+| `src/reconcile/handler.ts` | the adapter's part of the executor (§5.6, §5.8): finalize by direction (R2-1: to_apple — LFCP base from the basis, Apple base from `written`; create also links; to_lfcp — LFCP base from the stored intents applied, Apple base from the basis), B14 journal, the basis check inside stage; `currentLfcp` for delivery (§5.9) | 10 |
 
 ## Adapter (`packages/reminders/src/adapter/`, PR 8)
 
@@ -44,7 +45,9 @@ Pure: no I/O, no host; the host gives it a view and gets a plan.
 | `filter.ts` | `default` (QB10), `mine`, `all` (§6.1); what may get a new projection |
 | `link.ts` | `lfcp://task/<T>?s=<R>&b=<instance8>` and the marker URL |
 | `matching.ts` | §5.4: markers out, pass 1 (links: matched / tombstone / absent / ambiguous, recurring copies), pass 2 (orphans, foreign bridge, imports, `import_ambiguous`) |
-| `plan.ts` | §5.5: per field dL / dA against the bases → write to Apple, record bases or shadow, or deferred (Apple → LFCP and the status table: PR 10); link transitions and imports shown (PR 11, 12); new projections |
+| `plan.ts` | §5.5: per field dL / dA against the bases → write to Apple or to LFCP (one intent per direction and Task), record bases or shadow; the status group by its table; link transitions and imports shown (PR 11, 12); new projections |
+| `status-table.ts` | the status group (r3 P2-2): rows with explicit dL / dA predicates, one row for every input (tested over the whole input space); cancelled is (true, —) |
+| `lfcp-write.ts` | Apple → LFCP: set_title, set_due / clear_due (the date only, B12), set_priority with the shadow (B13), complete / reopen; `applyLfcpIntents` for the to_lfcp finalize |
 
 ## The SDK
 
