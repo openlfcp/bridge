@@ -18,8 +18,10 @@ synchronisation.
    marker gone and stops (`ownership_lost`); it never re-creates the marker by itself.
 3. **Rename the old list**, for example to "<section> (old)". The new bridge never adopts a list by its
    title. While a list "LFCP · <section>" exists, `bind` refuses with `list_exists`.
-4. On the new Mac: `lfcp-bridge pair` (the link from the plugin), then `lfcp-bridge bind <section>`,
-   `lfcp-bridge dry-run`, `lfcp-bridge approve`.
+4. On the new Mac, with the link from the plugin on the clipboard:
+   `pbpaste | lfcp-bridge pair --label "<this Mac>" --section <section>`, then
+   `lfcp-bridge bind <section>`, `lfcp-bridge dry-run <binding>`, `lfcp-bridge approve <binding>`
+   (details in [running-the-bridge.md](running-the-bridge.md#bind-a-section)).
 
 `lfcp-bridge doctor` names whatever still blocks: a foreign marker, a missing list, a bootstrap waiting
 for a decision.

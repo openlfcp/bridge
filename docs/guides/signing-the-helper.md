@@ -88,7 +88,7 @@ Choose **one** of the two.
     cp -R "build/LFCP Reminders Helper.app" ~/Applications/
 
 Then run `lfcp-bridge doctor` (helper found, signature valid, Reminders access). A new helper
-version resets `writesVerified`: run the verification again (`lfcp-bridge verify`, see
+version resets `writesVerified`: run the verification again (`lfcp-bridge verify --section <test section>`, see
 [running-the-bridge.md](running-the-bridge.md)) before normal bindings write.
 
 TCC keeps Reminders access as long as the designated requirement stays the same: same bundle

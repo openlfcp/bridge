@@ -96,7 +96,8 @@ once sdk-ts releases it; until then the host keeps its own fallbacks in `src/lfc
 
 | Path | What |
 |---|---|
-| `scripts/bridge-db.mjs` | `status` / `backup` / `migrate --to <N>` of `bridge.sqlite` (up and down; needs STOP; backs up first); `--self-test` |
+| `scripts/bridge-db.mjs` | `status` / `backup` / `migrate --to <N>` of `bridge.sqlite` (up and down; needs STOP and no `run`; backs up to a new file first, never over one); `--self-test` |
+| `scripts/check-runbook.mjs` | checks the `lfcp-bridge …` commands of the guides against the CLI sources (`--src` for another tree): command ready, flags read by the code, required flags, N8's migration ports |
 | `helper/scripts/sign-release.sh` | release signing: Developer ID, hardened runtime, `Support/release.entitlements`, notarytool submit + staple; changes no keychain without `--add-to-search-list` |
 | `helper/scripts/test-sign-release.sh` | dry run of `sign-release.sh` with stub `security` / `codesign` / `xcrun` / `ditto` / `spctl` |
 

@@ -3,14 +3,21 @@
 A runbook for a person who builds `lfcp-bridge` from source and runs it on their own Mac (D-010 r4,
 B-014). The bridge is **experimental** (MVP 0.5): read [the limits](#limits-of-the-mvp) first.
 
-Commands below are those of the current `main`. A command that is not in this build answers
+This text describes the bridge **with PR 9b** (the `run` process). Every command shown here is
+checked against that CLI (`pr9b-2-cli`, `d260354`) by `node scripts/check-runbook.mjs --src <its
+packages/host/src>`. A command that is not in a build answers
 `<command>: not available in this build (D-010 PR …)` with exit code 2; `lfcp-bridge status` lists
-them. In this text:
+them.
 
-- **(PR 9b)** — comes with the `run` process: `run`, `pair`, `sections`, `dry-run`, `approve`,
-  `resume --safe-mode-off`.
-- **(not in the CLI yet)** — the state exists in the database, the command to handle it does not:
-  `conflicts`, `quarantine`, `refused`.
+- **Before PR 9b is in `main`:** `run`, `pair`, `sections`, `dry-run` and `approve` are not
+  available.
+- **Not available yet, PR 9b included:**
+  - a command to leave Safe Mode (see [Safe Mode](#safe-mode));
+  - `conflicts`, `quarantine`, `refused` (the state is in the database, the commands are not);
+  - N8's `sections add` and `migrate resume` (the `run` process does not give them the pairing and
+    the new connection yet).
+
+  They are marked **(not available yet)** below.
 
 ## Contents
 
@@ -88,13 +95,29 @@ The agent runs `lfcp-bridge run` at login and restarts it after a crash, at most
 (`ThrottleInterval`). Exit 0 (STOP, Safe Mode) is not restarted. It records the absolute paths of
 `node` and of the CLI at install: install it again after moving the checkout or changing Node.
 
-**Until PR 9b, do not install the agent.** `run` is not in this build yet: the agent would start a
-command that exits 2, and launchd would restart it every 30 seconds.
+Install the agent only with PR 9b: before it, `run` is not in the build, and launchd would restart a
+command that exits 2 every 30 seconds.
+
+One `run` at a time: it holds `run.lock` in the data directory, and a second one exits 3. To run it
+in a terminal instead, use `lfcp-bridge run`; Ctrl-C (or SIGTERM) stops it cleanly.
 
 ## Bind a section
 
-1. **Pair** the bridge as a device of your sections, with the link from the Obsidian plugin:
-   `lfcp-bridge pair` **(PR 9b)**. `lfcp-bridge sections` lists the paired sections **(PR 9b)**.
+1. **Pair** the bridge as a device of your sections. In Obsidian: the LFCP plugin → devices → add a
+   service device with access to the sections → copy the link. Then:
+
+   ```sh
+   pbpaste | lfcp-bridge pair --label "Mac bridge" --section Work --section Home
+   lfcp-bridge sections
+   ```
+
+   The link is read from standard input. `pair` prints a fingerprint: compare it with Obsidian and
+   approve there. It waits up to 10 minutes (`--wait <seconds>`).
+   - `paired: installation …` — done.
+   - `not approved yet` — approve, then run the command it prints. That command has
+     `--installation <id>`; give it the link on standard input again.
+
+   `sections` lists the paired sections of every installation, bound or not.
 2. **Bind** a section to a new Reminders list:
 
    ```sh
@@ -104,8 +127,15 @@ command that exits 2, and launchd would restart it every 30 seconds.
 
    The bridge only binds a list it creates. If a list "LFCP · Work" already exists, `bind` refuses
    (`list_exists`): rename that list first. The binding ends in `pending_dry_run`.
-3. **Dry run, then approve:** `lfcp-bridge dry-run <binding>` and `lfcp-bridge approve <binding>`
-   **(PR 9b)**.
+3. **Dry run, then approve:**
+
+   ```sh
+   lfcp-bridge dry-run <binding>   # a full pass without effects: what it would create, update, import, unlink
+   lfcp-bridge approve <binding>   # pending_dry_run -> active
+   ```
+
+   `approve` needs a dry run of that binding less than an hour old, and ownership not lost. The
+   binding then runs with strict limits for 24 hours.
 4. **Verify writes once per helper version and macOS.** Until then normal bindings only dry-run
    (`writesVerified: no` in `status`).
 
@@ -113,8 +143,8 @@ command that exits 2, and launchd would restart it every 30 seconds.
    lfcp-bridge verify --section "Bridge test"   # a test section and its own list "LFCP Verify · …"
    ```
 
-   The verification run itself writes only to that list. It starts with the `run` process
-   **(PR 9b)**.
+   The verification run writes only to that list and that section, with the `run` process. The
+   owner's walk-through is `docs/devel/testing/verification-run.md` (PR 9b).
 
 ## Day to day: status, log, doctor
 
@@ -126,7 +156,7 @@ lfcp-bridge doctor                            # what blocks, and what to do
 
 ## Update
 
-1. Stop effects and unload the agent:
+1. Stop effects, unload the agent, and stop a `run` started by hand (Ctrl-C):
 
    ```sh
    lfcp-bridge stop --reason update
@@ -134,7 +164,8 @@ lfcp-bridge doctor                            # what blocks, and what to do
    ```
 
 2. Back up the database: `node scripts/bridge-db.mjs backup`. It is a consistent online copy next to
-   `bridge.sqlite`, named with its version and the time.
+   `bridge.sqlite`, named with its version and the time. A backup is always a new file: the script
+   never writes over a file, the database or its `-wal` / `-shm`.
 3. Update and build:
 
    ```sh
@@ -170,7 +201,7 @@ lfcp-bridge doctor                            # what blocks, and what to do
 An older build refuses a database written by a newer one ("bridge.sqlite has schema version N;
 this build knows up to M"). It does not guess. To go back to an older build:
 
-1. Stop and unload, as for an update:
+1. Stop and unload, as for an update (a `run` started by hand too):
 
    ```sh
    lfcp-bridge stop --reason rollback
@@ -182,14 +213,15 @@ this build knows up to M"). It does not guess. To go back to an older build:
 
    ```sh
    node scripts/bridge-db.mjs status
-   node scripts/bridge-db.mjs migrate --to 3   # refuses without STOP; backs up first
+   node scripts/bridge-db.mjs migrate --to 3   # needs STOP and no run; backs up to a new file first
    ```
 
    Down drops what the later versions added (table above). The backup keeps it.
 3. Check out and build the older version, then `doctor`, `service install`, `resume`.
 
 To undo a rollback, update again: the newer build migrates up. If the data of the dropped versions
-matters, restore the backup instead: copy it over `bridge.sqlite` with the agent unloaded.
+matters, restore the backup instead: with no `run` running, copy it over `bridge.sqlite` and delete
+`bridge.sqlite-wal` and `bridge.sqlite-shm`.
 
 ## Recover
 
@@ -207,9 +239,15 @@ same. `unbind` refuses while STOP is set (exit 5).
 ### Safe Mode
 
 Two crashed runs in a row, started less than 10 minutes apart, put the bridge into Safe Mode: no
-effect runs, and the bootstrap and `unbind` refuse. Look at the log and the launchd output in the
-logs directory, fix the cause, then `lfcp-bridge resume --safe-mode-off` **(PR 9b)**. Only `run`
-enters Safe Mode, so it cannot happen before PR 9b.
+effect runs, and the bootstrap and `unbind` refuse. Only `run` enters it. Look at the log and the
+launchd output in the logs directory and fix the cause.
+
+**Leaving Safe Mode has no command yet (not available yet).** `resume` only removes STOP, and it
+ignores flags it does not know: a `--safe-mode-off` flag is planned but not in the CLI, and passing
+it changes nothing. Until it exists, the state is the `safe_mode` row of the `meta` table. With the
+agent unloaded and no `run` running, remove it with
+`sqlite3 bridge.sqlite "DELETE FROM meta WHERE key = 'safe_mode'"` in the data directory. That is
+what the planned command does, without its journal entry.
 
 ### Holds
 
@@ -220,6 +258,9 @@ of one binding:
 lfcp-bridge resume --accept <hold> --binding <id>
 ```
 
+For a guard hold this also accepts the anomaly once: the next pass goes through with it as the new
+baseline.
+
 Accept a hold only once its cause is understood:
 
 | Hold | Why | What to do |
@@ -227,7 +268,7 @@ Accept a hold only once its cause is understood:
 | `guard_mass_unlink`, `guard_mass_import`, `guard_mass_status`, `guard_count_drop`, `guard_backlog` | a pass would change more than the hourly limits allow (§7.2) | check the list and the section; if the change is meant, accept |
 | `ownership_lost` | this bridge's marker "LFCP bridge · не удалять" is gone from the list | never lifted or re-created by itself. If you deleted it by mistake, unbind and bind again. If another Mac took over, this bridge is done here |
 | `foreign_bridge` | another bridge's marker for this section exists | lifts itself when that marker is gone. See [replacing the Mac](replacing-the-mac.md). One bridge per Apple ID |
-| `import_ambiguous` | a new reminder could match more than one pending Task | resolve the quarantine **(not in the CLI yet)**, then accept |
+| `import_ambiguous` | a new reminder could match more than one pending Task | resolve the quarantine **(not available yet)**, then accept |
 | `access_refused` | the server refused the section (revoked device or grant) | lifts on an "allowed" answer; a proven revocation is final |
 | `helper_unavailable` | the helper restarted more than 3 times in 5 minutes | `doctor`; fix the helper (signature, Reminders access); accept |
 | `migration` | set by an N8 migration on the old installation's bindings | **do not accept by hand**: `migrate resume` or `migrate abort` lift it |
@@ -251,9 +292,9 @@ lfcp-bridge bind --binding <id>                                   # continue a b
 **While syncing.** A write whose outcome is unknown is never repeated by itself. The intent goes to
 quarantine with field conflicts. A refused intent stays refused. Both wait for a person:
 
-- `quarantine list|link|ignore|drop` **(not in the CLI yet)**;
-- `conflicts list|resolve <id> --take lfcp|apple` **(not in the CLI yet)**;
-- `refused list|retry|drop` **(not in the CLI yet)**.
+- `quarantine list|link|ignore|drop` **(not available yet)**;
+- `conflicts list|resolve <id> --take lfcp|apple` **(not available yet)**;
+- `refused list|retry|drop` **(not available yet)**.
 
 The database records the person's decision (`intent_resolutions`, schema version 5). Until then an
 unresolved refused or quarantined intent also keeps [N8](#add-a-section-n8) from starting.
@@ -265,7 +306,17 @@ marker, rename the old list, then pair and bind on the new Mac. There is no "ado
 
 ## Add a section (N8)
 
-A paired installation cannot gain a section. `sections add` pairs a **new** installation whose scope
+**Starting a migration is not available yet**, PR 9b included. `sections add` and `migrate resume`
+are in the command table, but they need the pairing and the new connection of the `run` process,
+which does not give them yet: they answer "not available in this build" (exit 2). What works now:
+
+```sh
+lfcp-bridge migrate status                # migrations, their phase, blocked or aborted reason
+lfcp-bridge migrate abort [<migration>]   # before switching only
+```
+
+How it will run, once available. A paired installation cannot gain a section. `sections add <name>
+[--from <installation>]` pairs a **new** installation whose scope
 is the old sections plus the new one, moves every binding to it, and retires the old one. It runs
 **only from quiescence**. Before it starts, there must be:
 
@@ -275,18 +326,7 @@ is the old sections plus the new one, moves every binding to it, and retires the
 - no other migration under way.
 
 Otherwise it refuses with the reasons (exit 3): wait for the synchronisation, resolve what waits,
-try again.
-
-```sh
-lfcp-bridge sections add <name> [--from <installation>]
-lfcp-bridge migrate status
-lfcp-bridge migrate resume [<migration>]
-lfcp-bridge migrate abort [<migration>]
-```
-
-`sections add` and `migrate resume` need the pairing and the new connection of the `run` process:
-until **PR 9b** they answer "not available in this build". `migrate status` and `migrate abort`
-work now.
+try again. `migrate resume [<migration>]` continues a migration from its stored phase.
 
 What happens:
 
@@ -294,7 +334,7 @@ What happens:
 2. **freeze**, one transaction: quiescence is checked again, the old installation is frozen, its
    bindings get the hold `migration`, and no new intent can be prepared for them. If work appeared
    during the pairing, the migration is aborted instead (`not_quiescent`), and the old installation
-   works on. Run `sections add` again later.
+   works on. Start it again later.
 3. **catching_up**: the new installation must be LIVE on every section, on a connection opened after
    the freeze. After 24 hours `migrate status` shows it blocked; `migrate abort` is still possible.
 4. **switching**: one transaction moves the bindings to the new installation and retires the old
