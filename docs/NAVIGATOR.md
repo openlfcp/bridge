@@ -74,7 +74,7 @@ once sdk-ts releases it; until then the host keeps its own fallbacks in `src/lfc
 |---|---|
 | `lint` | biome, boundaries, `tsc -b` and the tests' types |
 | `unit` | vitest |
-| `helper` (`helper.yml`) | HelperCore tests, the app, smoke, sign-dev tests, SwiftPM |
+| `helper` (`helper.yml`) | HelperCore tests, the app, smoke, sign-dev tests, the sign-release dry run, SwiftPM |
 | `helper-protocol` (`helper.yml`) | `transport-eventkit` against the helper (memory backend): unit tests, `transportContract`, open + FIFO |
 | `crash`, `e2e` | with PRs 7, 9 |
 
@@ -88,7 +88,17 @@ once sdk-ts releases it; until then the host keeps its own fallbacks in `src/lfc
 
 | Document | What |
 |---|---|
+| `docs/guides/running-the-bridge.md` | **the runbook** (B-014): install from source, LaunchAgent, update and roll back the database, STOP, Safe Mode, holds, unknown outcomes, N8, disconnecting, exit codes, the limits of the MVP |
 | `docs/guides/replacing-the-mac.md` | one bridge per Apple ID; replacing the Mac (revoke, delete the marker, rename the list, bind); unknown bootstrap outcomes |
+| `docs/guides/signing-the-helper.md` | the release signature of the helper (Developer ID, hardened runtime, notarization) and how the owner gets the notary credentials |
+
+## Scripts
+
+| Path | What |
+|---|---|
+| `scripts/bridge-db.mjs` | `status` / `backup` / `migrate --to <N>` of `bridge.sqlite` (up and down; needs STOP; backs up first); `--self-test` |
+| `helper/scripts/sign-release.sh` | release signing: Developer ID, hardened runtime, `Support/release.entitlements`, notarytool submit + staple; changes no keychain without `--add-to-search-list` |
+| `helper/scripts/test-sign-release.sh` | dry run of `sign-release.sh` with stub `security` / `codesign` / `xcrun` / `ditto` / `spctl` |
 
 ## Runtime files (§2.2)
 
