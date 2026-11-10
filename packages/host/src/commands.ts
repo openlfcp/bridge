@@ -131,7 +131,13 @@ function bindResult(r: BindOutcome, env: CliEnvironment): ExitCode {
               .join(
                 "\n",
               )}\nChoose: lfcp-bridge bind --binding ${r.bindingId} --resolve-list <id>|none`
-          : `binding ${r.bindingId}: whether the ownership marker was written is unknown; check Reminders, then lfcp-bridge bind --binding ${r.bindingId} --retry-marker`,
+          : `binding ${r.bindingId}: whether the ownership marker was written is unknown. Markers with its url in the list:\n${(
+              r.markers ?? []
+            )
+              .map((m) => `  ${m.ref.id ?? m.ref.externalId}  ${m.title}`)
+              .join(
+                "\n",
+              )}\nChoose: lfcp-bridge bind --binding ${r.bindingId} --resolve-marker <id>|none`,
       );
       return EXIT.NEEDS_PERSON;
     case "refused":
@@ -168,6 +174,9 @@ async function run(
         const choice = opts.get("resolve-list");
         if (typeof choice === "string")
           return bindResult(await boot.resolveList(bindingId, choice), env);
+        const marker = opts.get("resolve-marker");
+        if (typeof marker === "string")
+          return bindResult(await boot.resolveMarker(bindingId, marker), env);
         if (opts.get("retry-marker") === true)
           return bindResult(await boot.retryMarker(bindingId), env);
         return bindResult(await boot.resume(bindingId), env);
