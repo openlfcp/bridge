@@ -7,5 +7,12 @@
     "types": ["node"]
   },
   "include": ["src"],
-  "references": [{ "path": "../reminders" }]
+  "references": [
+    {
+      "path": "../reminders"
+    },
+    {
+      "path": "../transport-eventkit"
+    }
+  ]
 }
