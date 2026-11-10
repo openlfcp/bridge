@@ -2,7 +2,9 @@
  * The helper process lifecycle under failure (review PR 6, P2-2..P2-4), with a stand-in `open`
  * and helper (test/fixtures) instead of LaunchServices and the Swift app.
  */
-import { execFile, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { executableName, HelperLostError, HelperProcess } from "../src/link.js";
@@ -55,6 +57,54 @@ describe("start failures reject and leave nothing behind (P2-2, P2-3)", { timeou
     const r = await runStart({ RUN_LAUNCHER: "missing" });
     expect(r.hung).toBe(false);
     expect(r.out).toMatchObject({ rejected: true, name: "HelperLostError" });
+  });
+
+  it("cleanup leaves no FIFO open blocked: one that starts just before the unlink returns at once", async () => {
+    // The race behind a flaky "missing launcher" run: a stream's open of a FIFO end reached the
+    // threadpool after cleanup tried to unblock it and before the FIFOs were removed; with no
+    // other end it blocked for ever and the process could not exit. The hook runs in exactly that
+    // window; a blocking open of each end (in another process, as a pool thread would) must return.
+    // Every threadpool thread waits on a FIFO of the test, so the helper streams' own opens are
+    // still queued when cleanup runs: cleanup cannot find them waiting.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lfcp-pool-"));
+    const pool = Number(process.env.UV_THREADPOOL_SIZE ?? 4);
+    const blockers = Array.from({ length: pool }, (_, i) => path.join(dir, `b${i}`));
+    for (const b of blockers) execFileSync("mkfifo", [b]);
+    const held = blockers.map(
+      (b) =>
+        new Promise<number>((resolve, reject) =>
+          fs.open(b, "r", (e, fd) => (e ? reject(e) : resolve(fd))),
+        ),
+    );
+    await new Promise((r) => setTimeout(r, 100));
+    const opened: string[] = [];
+    try {
+      await expect(
+        HelperProcess.start({
+          appPath: "/nonexistent/LFCP Reminders Helper.app",
+          launcher: ["/nonexistent/open"],
+          helperName: "node",
+          readyTimeoutMs: 3000,
+          beforeFifoUnlink: (fifos) => {
+            for (const [file, mode] of [
+              [fifos.in, ">"],
+              [fifos.out, "<"],
+              [fifos.err, "<"],
+            ] as const) {
+              execFileSync("sh", ["-c", `exec 3${mode}"$0"`, file], { timeout: 2000 });
+              opened.push(path.basename(file));
+            }
+          },
+        }),
+      ).rejects.toBeInstanceOf(HelperLostError);
+    } finally {
+      // Release the pool: a writer for each blocker.
+      const writers = blockers.map((b) => fs.openSync(b, fs.constants.O_RDWR));
+      for (const fd of await Promise.all(held)) fs.closeSync(fd);
+      for (const fd of writers) fs.closeSync(fd);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    expect(opened).toEqual(["in", "out", "err"]);
   });
 
   it("the transport reports a missing helper as unavailable", async () => {
