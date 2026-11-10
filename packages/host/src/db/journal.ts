@@ -60,6 +60,12 @@ export const JOURNAL_TEXT: Readonly<Record<string, (p: JournalParams) => string>
     "The reminder repeats: its completion and due date are not synchronized while it does",
   "link.status_unlocked": () =>
     "The reminder no longer repeats: completion and due are synchronized again",
+  "hold.import_ambiguous": () =>
+    "A reminder being imported cannot be found any more: new reminders are not imported until you decide (lfcp-bridge quarantine)",
+  "hold.foreign_bridge": () =>
+    "Another bridge's reminders are in this list: synchronization stopped (lfcp-bridge doctor)",
+  "intent.stale": (p) =>
+    `A planned write was dropped: the task's link changed meanwhile (${String(p.reason ?? "")}); it is planned again`,
   "effect.refused": (p) => `Reminders refused a write: ${String(p.code ?? "")}`,
   "intent.unknown_outcome": () =>
     "Whether a write to Reminders happened is not known: decide in `lfcp-bridge quarantine`",

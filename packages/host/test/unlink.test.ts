@@ -12,6 +12,7 @@ import {
   unassign,
 } from "@openlfcp/shared-objects";
 import { afterEach, describe, expect, it } from "vitest";
+import type { Intent } from "../src/index.js";
 import { type Bridge, bridge } from "./support/bridge.js";
 
 let b: Bridge;
@@ -250,5 +251,153 @@ describe("task_gone, quarantine, the recurrence lock", () => {
       expect.objectContaining({ field: "due", decision: "write_apple" }),
       expect.objectContaining({ field: "status", decision: "write_lfcp", row: "X:F2" }),
     ]);
+  });
+});
+
+describe("review PR 12", () => {
+  it("#14 a prepared to_apple update does not run after the Task left the filter (B11)", async () => {
+    b = await bridge({ filter: "mine" });
+    const task = await linked("A");
+    await b.edit(setTitle(b.now(task.id), "B"));
+    const r = await b.pass.dryRun("b");
+    if (r.kind !== "planned") throw new Error(r.kind);
+    const [i] = b.e.prepare("b", { intents: r.plan.intents, unlinks: 0 }) ?? [];
+    await b.edit(unassign(b.now(task.id), b.root));
+    await b.sync();
+    expect(b.link(task.id)?.state).toBe("out_of_filter");
+    expect(await b.e.run((i as Intent).id)).toEqual({
+      kind: "superseded",
+      reason: "link_out_of_filter",
+    });
+    expect(b.reminders()[0]?.title).toBe("A");
+  });
+
+  it("#14 a prepared to_lfcp due does not run after the recurrence lock (§6.4); the title still goes", async () => {
+    b = await bridge();
+    const task = await linked("A", { due: "2026-11-12" });
+    b.person.edit(reminderOf("A").ref, { dueDate: "2026-11-19", title: "A2" });
+    const r = await b.pass.dryRun("b");
+    if (r.kind !== "planned") throw new Error(r.kind);
+    const [i] = b.e.prepare("b", { intents: r.plan.intents, unlinks: 0 }) ?? [];
+    expect((i as Intent).fields).toEqual(["title", "due"]);
+    b.person.edit(reminderOf("A2").ref, { recurrence: true });
+    await b.sync();
+    expect(b.link(task.id)?.status_locked).toBe(1);
+    expect(await b.e.run((i as Intent).id)).toEqual({
+      kind: "superseded",
+      reason: "status_locked",
+    });
+    expect(b.now(task.id).due).toBe("2026-11-12");
+    // Re-planned: the title alone.
+    const again = await b.sync();
+    expect(again.prepared.map((x) => x.fields)).toEqual([["title"]]);
+    expect(b.now(task.id)).toMatchObject({ title: "A2", due: "2026-11-12" });
+  });
+
+  it("#15 the whole pass is checked before any change: a mass status change stops the link transitions too", async () => {
+    b = await bridge({ filter: "mine" });
+    const tasks = [];
+    for (let k = 0; k < 6; k++) tasks.push(await b.task(`T${k}`));
+    await b.sync();
+    for (const t of tasks.slice(0, 4))
+      await b.edit({ intent: { intent: "task.complete", id: t.id, completionDate: "2026-11-10" } });
+    await b.edit(unassign(b.now((tasks[5] as { id: string }).id), b.root));
+    const r = await b.sync();
+    expect(r.applied).toEqual({ kind: "held", holds: ["guard_mass_status"] });
+    expect(r.prepared).toEqual([]);
+    expect(b.link((tasks[5] as { id: string }).id)?.state).toBe("linked");
+    expect(b.reminders().filter((x) => x.completed)).toEqual([]);
+  });
+
+  it("#15 a count drop the dry run saw stops the pass", async () => {
+    b = await bridge();
+    for (const t of ["A", "B", "C", "D", "E", "F"]) await b.task(t);
+    await b.sync();
+    await b.sync();
+    const list = b.list.id;
+    const keep = b.reminders(list).slice(0, 2);
+    // Four reminders gone from the snapshot read (an empty list answer), the links still there.
+    const snapshot = b.t.snapshot.bind(b.t);
+    b.t.snapshot = async (l) => ({ ...(await snapshot(l)), items: keep });
+    const r = await b.sync();
+    expect(r.applied).toMatchObject({
+      kind: "held",
+      holds: expect.arrayContaining(["guard_count_drop"]),
+    });
+    expect(b.db.prepare("SELECT state FROM links WHERE state <> 'linked'").all()).toEqual([]);
+  });
+
+  it("#16 return_find's moved_out counts toward the unlink limit (strict: more than one)", async () => {
+    b = await bridge({ strict: true });
+    const a = await b.task("A");
+    const c = await b.task("C");
+    await b.sync();
+    b.db.prepare("UPDATE links SET state = 'out_of_filter'").run();
+    const other = b.person.createList("Elsewhere");
+    for (const r of b.reminders()) b.person.edit(r.ref, { moveTo: other.id });
+    const r = await b.sync();
+    expect(r.applied).toEqual({ kind: "held", holds: ["guard_mass_unlink"] });
+    expect(b.link(a.id)?.state).toBe("out_of_filter");
+    expect(b.link(c.id)?.state).toBe("out_of_filter");
+  });
+
+  it("#17 an incomplete find decides nothing, found or not, mixed completeness too", async () => {
+    b = await bridge();
+    const task = await linked("A");
+    const other = b.person.createList("Elsewhere");
+    b.person.edit(reminderOf("A").ref, { moveTo: other.id });
+    const find = b.t.find.bind(b.t);
+    b.t.find = async (q, s) => ({ ...(await find(q, s)), complete: false });
+    await b.sync();
+    expect(b.link(task.id)?.state).toBe("linked");
+    // Only the URL read incomplete, the externalId one complete: still nothing.
+    b.t.find = async (q, s) => ({ ...(await find(q, s)), complete: !("url" in q) });
+    await b.sync();
+    expect(b.link(task.id)?.state).toBe("linked");
+    b.t.find = find;
+    await b.sync();
+    expect(b.link(task.id)).toMatchObject({ state: "unlinked", state_reason: "moved_out" });
+  });
+
+  it("#18 a global find with two candidates quarantines, never picks one", async () => {
+    b = await bridge({ filter: "mine" });
+    const task = await linked("A");
+    const old = reminderOf("A");
+    await b.edit(unassign(b.now(task.id), b.root));
+    await b.sync();
+    const other = b.person.createList("Elsewhere");
+    b.person.edit(old.ref, { moveTo: other.id });
+    await b.edit(assign(b.now(task.id), b.root));
+    const r = await b.pass.dryRun("b");
+    if (r.kind !== "planned") throw new Error(r.kind);
+    b.person.create(b.list.id, "Copy", { url: old.linkUrl as string });
+    await b.links.apply("b", r.plan);
+    expect(b.link(task.id)).toMatchObject({ state: "quarantine", state_reason: "ambiguous_find" });
+    expect(
+      b.db.prepare("SELECT count(*) AS n FROM bases WHERE task_id = ?").get(task.id),
+    ).not.toEqual({ n: 0 });
+  });
+
+  it("status_unlock drops the locked-era status and due bases even when nothing is written", async () => {
+    b = await bridge();
+    const task = await linked("A", { due: "2026-11-12" });
+    b.person.edit(reminderOf("A").ref, { recurrence: true });
+    await b.sync();
+    // While locked, both sides move the due to the same date.
+    b.person.edit(reminderOf("A").ref, { dueDate: "2026-11-19" });
+    await b.edit(setDue(b.now(task.id), "2026-11-19"));
+    await b.sync();
+    b.person.edit(reminderOf("A").ref, { recurrence: false });
+    const un = await b.sync();
+    expect(un.prepared).toEqual([]);
+    expect(un.plan.decisions.filter((d) => d.field === "due")).toEqual([
+      expect.objectContaining({ decision: "bases" }),
+    ]);
+    // The locked-era base (2026-11-12) is gone; the bases are the next apply's to record (PR 9).
+    expect(
+      b.db
+        .prepare("SELECT field FROM bases WHERE task_id = ? AND field IN ('status','due')")
+        .all(task.id),
+    ).toEqual([]);
   });
 });
