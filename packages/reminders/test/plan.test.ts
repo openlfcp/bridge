@@ -385,7 +385,15 @@ describe("the plan of a pass §5.5", () => {
       ["status", "write_apple"],
     ]);
     expect(held.conflicts).toEqual([{ taskId: "T1", field: "due", kind: "due_cleared_in_lfcp" }]);
-    const locked = plan(view({ ...base, links: [link("T1", { statusLocked: true })] }));
+    // A reminder that repeats (§6.4): the link is locked.
+    const locked = plan(
+      view({
+        ...base,
+        snapshot: { items: [{ ...r, hasRecurrence: true }], complete: true },
+        links: [link("T1", { statusLocked: true })],
+      }),
+    );
+    expect(locked.transitions).toEqual([]);
     expect(locked.decisions.map((d) => [d.field, d.decision])).toEqual([
       ["title", "write_apple"],
       ["due", "status_locked"],

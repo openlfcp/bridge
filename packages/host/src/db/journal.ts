@@ -42,6 +42,30 @@ export const JOURNAL_TEXT: Readonly<Record<string, (p: JournalParams) => string>
   "effect.in_flight": () => "A write to Reminders is already under way; not repeated",
   "field.apple_overruled": (p) =>
     `Changed on both sides: the shared task's ${String(p.field ?? "")} was kept; your Reminders value was ${String(p.apple ?? "")}`,
+  "link.out_of_filter": () =>
+    "The task left this list's filter (reassigned or no due date): the reminder stays with you and is no longer synchronized",
+  "link.task_gone": () =>
+    "The task was deleted in the shared section: the reminder stays with you and is no longer synchronized",
+  "link.unlinked": (p) =>
+    p.reason === "moved_out"
+      ? "You moved the reminder to another list: it is no longer synchronized (the task stays shared)"
+      : "You deleted the reminder: the task stays shared and does not come back to this list",
+  "link.relinked": () =>
+    "The task is back in this list's filter: synchronized with its reminder again",
+  "link.reprojected": () =>
+    "The task is back in this list's filter and its old reminder is gone: a new one will be made",
+  "link.quarantine": (p) =>
+    `Which reminder belongs to the task is not clear (${String(p.reason ?? "")}): decide in \`lfcp-bridge quarantine\``,
+  "link.status_locked": () =>
+    "The reminder repeats: its completion and due date are not synchronized while it does",
+  "link.status_unlocked": () =>
+    "The reminder no longer repeats: completion and due are synchronized again",
+  "hold.import_ambiguous": () =>
+    "A reminder being imported cannot be found any more: new reminders are not imported until you decide (lfcp-bridge quarantine)",
+  "hold.foreign_bridge": () =>
+    "Another bridge's reminders are in this list: synchronization stopped (lfcp-bridge doctor)",
+  "intent.stale": (p) =>
+    `A planned write was dropped: the task's link changed meanwhile (${String(p.reason ?? "")}); it is planned again`,
   "effect.refused": (p) => `Reminders refused a write: ${String(p.code ?? "")}`,
   "intent.unknown_outcome": () =>
     "Whether a write to Reminders happened is not known: decide in `lfcp-bridge quarantine`",
