@@ -43,6 +43,8 @@ export type MigrationPhase =
 export type NotQuiescent =
   | "open_intents"
   | "unfinished_batches"
+  | "refused"
+  | "quarantined"
   | "open_conflicts"
   | "quarantine"
   | "open_migration";
@@ -117,9 +119,10 @@ const OPEN_PHASES = [
 
 /**
  * Whether the installation is quiescent (§9 precondition): no open intent (prepared, effecting,
- * applied), every batch to LFCP final (accepted or a no-op), no open conflict (lfcp_rejected and
- * lfcp_partial included: a refused batch leaves one; unknown_outcome quarantine leaves one too), no
- * link in quarantine, and no other migration under way.
+ * applied), every batch to LFCP final (accepted or a no-op), no refused or quarantined intent a
+ * person has not resolved (intent_resolutions; no conflict proves nothing, review PR 13 P2-2), no
+ * open conflict (lfcp_rejected, lfcp_partial, unknown_outcome), no link in quarantine, and no
+ * other migration under way.
  */
 export function quiescence(db: BridgeDatabase, installationId: string): Quiescence {
   const count = (sql: string) => (db.prepare(sql).get(installationId) as { n: number }).n;
@@ -136,6 +139,20 @@ export function quiescence(db: BridgeDatabase, installationId: string): Quiescen
       count(
         `SELECT count(*) AS n FROM intents WHERE installation_id = ? AND direction = 'to_lfcp'
            AND state = 'finalized' AND coalesce(batch_status, '') NOT IN ('accepted','noop')`,
+      ),
+    ],
+    [
+      "refused",
+      count(
+        `SELECT count(*) AS n FROM intents WHERE installation_id = ? AND state = 'refused'
+           AND id NOT IN (SELECT intent_id FROM intent_resolutions)`,
+      ),
+    ],
+    [
+      "quarantined",
+      count(
+        `SELECT count(*) AS n FROM intents WHERE installation_id = ? AND state = 'quarantined'
+           AND id NOT IN (SELECT intent_id FROM intent_resolutions)`,
       ),
     ],
     [

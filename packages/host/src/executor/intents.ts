@@ -156,6 +156,23 @@ export class Intents {
     return r === undefined ? undefined : fromRow(r);
   }
 
+  /**
+   * A person's decision on a refused or quarantined intent (kept, dropped, …), durable. Only
+   * such an intent can be resolved; a second decision replaces the first.
+   */
+  resolve(id: string, resolution: string): void {
+    const i = this.get(id);
+    if (i === undefined) throw new Error(`no intent ${id}`);
+    if (i.state !== "refused" && i.state !== "quarantined")
+      throw new Error(`intent ${id} is ${i.state}: only a refused or quarantined one is resolved`);
+    this.db
+      .prepare(
+        `INSERT INTO intent_resolutions (intent_id, resolution, resolved_at) VALUES (?, ?, ?)
+         ON CONFLICT (intent_id) DO UPDATE SET resolution = excluded.resolution, resolved_at = excluded.resolved_at`,
+      )
+      .run(id, resolution, this.#iso());
+  }
+
   /** The open intents (prepared, effecting, applied), oldest first: what a start recovers (§5.7). */
   open(): readonly Intent[] {
     return (

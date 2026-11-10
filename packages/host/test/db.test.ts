@@ -66,7 +66,7 @@ const V2_TABLES = [
   "migrations",
   "transport_state",
 ];
-const V4_TABLES = ["migration_details"];
+const LATER_TABLES = ["migration_details", "intent_resolutions"];
 
 const now = "2026-11-10T00:00:00.000Z";
 function seedV1(d: BridgeDatabase) {
@@ -95,7 +95,7 @@ describe("bridge.sqlite migrations", () => {
     const d = db();
     expect(SCHEMA_VERSION).toBe(MIGRATIONS.length);
     expect(schemaVersion(d)).toBe(SCHEMA_VERSION);
-    expect(tables(d)).toEqual([...V1_TABLES, ...V2_TABLES, ...V4_TABLES].sort());
+    expect(tables(d)).toEqual([...V1_TABLES, ...V2_TABLES, ...LATER_TABLES].sort());
     expect(d.pragma("journal_mode", { simple: true })).toBe("wal");
     expect(d.pragma("synchronous", { simple: true })).toBe(2);
     expect(d.pragma("foreign_keys", { simple: true })).toBe(1);
@@ -169,7 +169,7 @@ describe("bridge.sqlite migrations", () => {
     expect(() => db()).toThrow(SchemaTooNewError);
     const raw = db({ migrate: false, migrations: [] }, "other.sqlite");
     expect(schemaVersion(raw)).toBe(0);
-    expect(() => migrateTo(raw, 5)).toThrow(RangeError);
+    expect(() => migrateTo(raw, SCHEMA_VERSION + 1)).toThrow(RangeError);
   });
 });
 

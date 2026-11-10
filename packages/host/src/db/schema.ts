@@ -9,6 +9,7 @@
 // Version 2: the synchronisation state: links, bases, personal Apple data,
 // conflicts, intents, bootstrap steps, transport state, N8 migrations.
 // Version 3: runs and journal of r2. Version 4: N8 migration details.
+// Version 5: a person's decisions on refused and quarantined intents.
 //
 // Beyond §3: STRICT tables, NOT NULL where a row has no meaning without the
 // value, and foreign keys to installations and bindings (PRAGMA
@@ -313,8 +314,25 @@ const V4: Migration = {
   down: ["DROP TABLE migration_details"],
 };
 
+// Version 5: a person's decision on a refused or quarantined intent, durable.
+// Until it exists the intent waits for a person: N8 counts it against
+// quiescence (§9 r4 "no refused, no quarantine"; review PR 13 P2-2) — no
+// conflict, or a resolved one, does not prove it was looked at.
+const V5: Migration = {
+  version: 5,
+  name: "intent resolutions",
+  up: [
+    `CREATE TABLE intent_resolutions (
+      intent_id TEXT PRIMARY KEY REFERENCES intents(id),
+      resolution TEXT NOT NULL,
+      resolved_at TEXT NOT NULL
+    ) STRICT, WITHOUT ROWID`,
+  ],
+  down: ["DROP TABLE intent_resolutions"],
+};
+
 /** Every migration, in order. */
-export const MIGRATIONS: readonly Migration[] = Object.freeze([V1, V2, V3, V4]);
+export const MIGRATIONS: readonly Migration[] = Object.freeze([V1, V2, V3, V4, V5]);
 
 /** The schema version this build writes. */
 export const SCHEMA_VERSION = MIGRATIONS.length;

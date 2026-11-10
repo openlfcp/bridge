@@ -443,3 +443,27 @@ describe("N8: the freeze keeps a revoked installation revoked (review PR 13 P2-1
     expect(r.inst("i1")).toBe("revoked");
   });
 });
+
+describe("N8: refused and quarantined intents wait for a person (review PR 13 P2-2)", () => {
+  it("a refused intent without a conflict is not quiescence; resolved by a person, it is", () => {
+    const r = rig();
+    intent(r.db, "x1", "refused");
+    expect(quiescence(r.db, "i1")).toMatchObject({
+      quiescent: false,
+      reasons: [{ reason: "refused", count: 1 }],
+    });
+    new Intents(r.db).resolve("x1", "dropped");
+    expect(quiescence(r.db, "i1").quiescent).toBe(true);
+  });
+
+  it("a quarantined intent counts until a person resolves it, conflicts or not", () => {
+    const r = rig();
+    intent(r.db, "x2", "quarantined");
+    expect(quiescence(r.db, "i1")).toMatchObject({
+      quiescent: false,
+      reasons: [{ reason: "quarantined", count: 1 }],
+    });
+    new Intents(r.db).resolve("x2", "kept_apple");
+    expect(quiescence(r.db, "i1").quiescent).toBe(true);
+  });
+});
