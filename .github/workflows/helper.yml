@@ -11,9 +11,13 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
+      # setup-node v5 turns on the package-manager cache by itself when package.json names
+      # packageManager (pnpm), and then fails: this job has no pnpm and needs none (node runs
+      # scripts/smoke.mjs only).
       - uses: actions/setup-node@v5
         with:
           node-version: 24
+          package-manager-cache: false
       - name: HelperCore tests (swiftc, arm64 + x86_64; runs the native slice)
         working-directory: helper
         run: scripts/build.sh
