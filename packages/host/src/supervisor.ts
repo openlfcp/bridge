@@ -1,6 +1,7 @@
 // Supervision of the helper process by the host (D-010 r4 §8.2; moved here from PR 6):
 // - on start, an orphan from helper.pid (a previous run that died) is stopped, if that pid still
-//   runs our helper executable;
+//   runs our helper executable: SIGTERM, a grace period, then SIGKILL; the replacement starts only
+//   once the orphan is gone (review PR 9 P2-4);
 // - helper.pid is written once the helper is ready, removed on stop;
 // - a ping every 30 s; no answer (the ping's own timeout, 10 s) or an unexpected exit → restart;
 // - more than 3 restarts within 5 min → unavailable: no more restarts, the host sets the hold
@@ -28,6 +29,8 @@ export interface SupervisorOptions {
   readonly restartWindowMs?: number;
   /** The pid runs our helper executable (default: `ps` comm is lfcp-reminders-helper). */
   readonly isOurs?: (pid: number) => boolean;
+  /** How long an orphan has after SIGTERM before SIGKILL (default 5 s). */
+  readonly orphanGraceMs?: number;
   readonly onUnavailable?: (reason: string) => void;
   readonly onRestart?: (reason: string, helper: SupervisedHelper) => void;
   readonly now?: () => number;
@@ -60,6 +63,18 @@ const alive = (pid: number) => {
   }
 };
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Waits up to `ms` for the pid to be gone. */
+async function gone(pid: number, ms: number): Promise<boolean> {
+  const until = Date.now() + ms;
+  while (alive(pid)) {
+    if (Date.now() >= until) return false;
+    await sleep(Math.min(50, ms));
+  }
+  return true;
+}
+
 export class HelperSupervisor {
   readonly #o: SupervisorOptions;
   #helper: SupervisedHelper | undefined;
@@ -83,7 +98,7 @@ export class HelperSupervisor {
 
   /** Stops an orphan from helper.pid (if ours), starts the helper, starts pinging. */
   async start(): Promise<void> {
-    this.#killOrphan();
+    await this.#stopOrphan();
     await this.#launch();
     const every = this.#o.pingEveryMs ?? 30_000;
     const h = (this.#o.setInterval ?? setInterval)(() => {
@@ -123,7 +138,12 @@ export class HelperSupervisor {
     if (this.#state === "unavailable") await this.#launch();
   }
 
-  #killOrphan(): void {
+  /**
+   * Stops the helper of a previous run named in helper.pid, if that pid runs our executable, and
+   * waits until it is gone. Throws (keeping helper.pid) when it survives SIGKILL: no replacement
+   * starts next to it.
+   */
+  async #stopOrphan(): Promise<void> {
     let pid: number;
     try {
       pid = Number(readFileSync(this.#o.pidFile, "utf8").trim());
@@ -135,6 +155,13 @@ export class HelperSupervisor {
       try {
         process.kill(pid, "SIGTERM");
       } catch {}
+      if (!(await gone(pid, this.#o.orphanGraceMs ?? 5_000))) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {}
+        if (!(await gone(pid, 2_000)))
+          throw new Error(`the previous helper (pid ${pid}) does not exit; not starting another`);
+      }
     }
     rmSync(this.#o.pidFile, { force: true });
   }
