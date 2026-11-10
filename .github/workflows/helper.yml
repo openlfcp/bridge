@@ -27,6 +27,9 @@ jobs:
       - name: sign-dev.sh (stubbed security; a throwaway keychain, never the login keychain)
         working-directory: helper
         run: scripts/test-sign-dev.sh --real
+      - name: sign-release.sh dry run (stubbed codesign, notarytool, stapler; no keychain, nothing sent)
+        working-directory: helper
+        run: scripts/test-sign-release.sh
       - name: Smoke test the app without Reminders access
         working-directory: helper
         run: node scripts/smoke.mjs

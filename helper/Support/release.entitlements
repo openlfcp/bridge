@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements of the release build of LFCP Reminders Helper.app (hardened runtime, Developer ID,
+  B5 as changed by the owner). Under the hardened runtime, EventKit access to reminders needs the
+  Calendars resource-access entitlement (Reminders has none of its own); without it TCC never
+  shows the prompt. Nothing else: no sandbox, no JIT, no library validation exceptions.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.personal-information.calendars</key>
+	<true/>
+</dict>
+</plist>
