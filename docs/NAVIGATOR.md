@@ -33,6 +33,9 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 | `src/executor/limits.ts`, `safe-mode.ts`, `transport-state.ts` | sliding-window limits with prepared intents counted (§7.2); runs and Safe Mode (§7.3); the transport's DurableKV in `transport_state` | 7 |
 | `src/reconcile/pass.ts`, `section-view.ts` | a pass of one binding (§5.5): the section's Tasks from the replica, the list's snapshot, links / bases / open intents / conflicts → the adapter's plan; guards §7.2 checked without setting them; **dry-run only**: the plan is stored in `runs` (kind `dry`), `apply` answers `dry_run_only` | 8 |
 | `src/lfcp/fallback/device-root.ts` | **FALLBACK for sdk-ts G4**: the person's root (who "me" is for the filter) from the finished pairing request | 8 |
+| `src/bootstrap.ts`, `src/ownership.ts` | bind: scan → list → marker (§6.5, B16/B17), unknown outcomes resolved by a person; the ownership check (foreign_bridge, ownership_lost) | 9 |
+| `src/supervisor.ts` | the helper process: ping 30 s, restart, 3 in 5 min → helper_unavailable, orphan from helper.pid | 9 |
+| `src/launchd.ts`, `src/doctor.ts`, `src/verification.ts`, `src/runtime.ts`, `src/config.ts` | LaunchAgent, preflight (§7.4), write modes and writesVerified (§7.6), the machine, paths and config.json | 9 |
 
 ## Adapter (`packages/reminders/src/adapter/`, PR 8)
 
@@ -73,6 +76,12 @@ once sdk-ts releases it; until then the host keeps its own fallbacks in `src/lfc
 | Document | What |
 |---|---|
 | `docs/devel/testing/helper-live-checklist.md` | the owner's live EventKit check of the helper (TCC, `live-check.mjs`, `sign-dev.sh`), linked to the R-001 live run |
+
+## Guides
+
+| Document | What |
+|---|---|
+| `docs/guides/replacing-the-mac.md` | one bridge per Apple ID; replacing the Mac (revoke, delete the marker, rename the list, bind); unknown bootstrap outcomes |
 
 ## Runtime files (§2.2)
 
