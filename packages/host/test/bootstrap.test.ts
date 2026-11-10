@@ -195,9 +195,9 @@ describe("unknown outcomes (B17, review PR 6 r2: never bypassed automatically)",
     expect(listsTitled(store, "LFCP · Work")).toHaveLength(1);
   });
 
-  it("lost marker answer: the marker record with its exact url proves it was written", async () => {
+  it("lost marker answer: unknown stays unknown even when the marker is visible; a person decides (B19)", async () => {
     const { db, transport, boot } = await rig();
-    // Two writes: createList (kept), marker_create (answer lost).
+    // Two writes: createList (kept), marker_create (written, answer lost, recover says unknown).
     const original = transport.apply.bind(transport);
     let first = true;
     transport.apply = async (op) => {
@@ -207,9 +207,48 @@ describe("unknown outcomes (B17, review PR 6 r2: never bypassed automatically)",
       }
       return original(op);
     };
+    transport.recover = async () => ({ state: "unknown" }) as never;
     const r = await boot.bind(bindReq);
-    expect(r).toMatchObject({ state: "pending_dry_run" });
-    expect(binding(db, (r as { bindingId: string }).bindingId).marker_ref).not.toBeNull();
+    expect(r).toMatchObject({ state: "unknown_outcome", step: "marker" });
+    const id = (r as { bindingId: string }).bindingId;
+    expect(binding(db, id).marker_ref).toBeNull();
+    // The visible marker is evidence for the person, not a result.
+    const evidence = r.state === "unknown_outcome" ? (r.markers ?? []) : [];
+    expect(evidence).toHaveLength(1);
+    expect(await boot.resume(id)).toMatchObject({ state: "unknown_outcome", step: "marker" });
+    // "none" while the marker exists would make a second one: refused.
+    expect(await boot.resolveMarker(id, "none")).toMatchObject({
+      state: "refused",
+      reason: "marker_exists",
+    });
+    const done = await boot.resolveMarker(id, evidence[0]?.ref.id as string);
+    expect(done).toMatchObject({ state: "pending_dry_run" });
+    expect(binding(db, id).marker_ref).not.toBeNull();
+  });
+
+  it("lost marker answer, nothing written: 'none' makes a new attempt with a new key", async () => {
+    const { db, store, transport, boot } = await rig();
+    const original = transport.apply.bind(transport);
+    let first = true;
+    transport.apply = async (op) => {
+      if (op.kind === "marker_create" && first) {
+        first = false;
+        throw new Error("connection lost");
+      }
+      return original(op);
+    };
+    const recover = transport.recover.bind(transport);
+    transport.recover = async (k) =>
+      k.endsWith(":marker:1") ? ({ state: "unknown" } as never) : recover(k);
+    const r = await boot.bind(bindReq);
+    expect(r).toMatchObject({ state: "unknown_outcome", step: "marker", markers: [] });
+    const id = (r as { bindingId: string }).bindingId;
+    expect(await boot.resolveMarker(id, "none")).toMatchObject({ state: "pending_dry_run" });
+    const op = db
+      .prepare("SELECT client_id FROM bootstrap_ops WHERE binding_id = ? AND step = 'marker'")
+      .get(id) as { client_id: string };
+    expect(op.client_id).toMatch(/:marker:2$/);
+    expect([...store.items.values()].filter((i) => i.linkUrl === markerUrl(ME, R))).toHaveLength(1);
   });
 
   it("resolveList refuses when the outcome is not unknown", async () => {

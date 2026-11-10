@@ -115,7 +115,7 @@ export async function doctor(d: DoctorDeps): Promise<readonly Check[]> {
         name,
         "warn",
         unknown.length > 0
-          ? `bootstrap waits for a person: unknown ${unknown.map((u) => u.step).join(", ")} (bind --resolve-list / --retry-marker)`
+          ? `bootstrap waits for a person: unknown ${unknown.map((u) => u.step).join(", ")} (bind --resolve-list / --resolve-marker)`
           : "bootstrap not finished: `lfcp-bridge bind` continues it",
       );
       continue;
