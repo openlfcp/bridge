@@ -79,6 +79,25 @@ interface FifoEnd {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/**
+ * The file name of the executable a pid runs, or undefined. Linux: /proc/<pid>/exe — `ps -o comm=`
+ * there is the main thread's name (Node calls it "MainThread") cut to 15 characters, so it names
+ * neither node nor lfcp-reminders-helper. macOS: `ps -o comm=` is the executable's path.
+ */
+export function executableName(pid: number): string | undefined {
+  try {
+    return path.basename(fs.readlinkSync(`/proc/${pid}/exe`));
+  } catch {}
+  try {
+    const comm = execFileSync("ps", ["-o", "comm=", "-p", String(pid)])
+      .toString()
+      .trim();
+    return comm === "" ? undefined : path.basename(comm);
+  } catch {
+    return undefined;
+  }
+}
+
 const alive = (pid: number): boolean => {
   try {
     process.kill(pid, 0);
@@ -349,14 +368,7 @@ export class HelperProcess implements HelperLink {
 
   /** The pid runs our helper executable (guards against a reused pid). */
   #owned(pid: number): boolean {
-    try {
-      const comm = execFileSync("ps", ["-o", "comm=", "-p", String(pid)])
-        .toString()
-        .trim();
-      return path.basename(comm) === (this.#opts.helperName ?? HELPER_NAME);
-    } catch {
-      return false;
-    }
+    return executableName(pid) === (this.#opts.helperName ?? HELPER_NAME);
   }
 
   /** Releases FIFO opens still waiting for their other end, closes streams, removes the FIFOs. */

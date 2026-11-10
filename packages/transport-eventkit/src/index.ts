@@ -7,6 +7,7 @@ export const PACKAGE = "@openlfcp/bridge-transport-eventkit";
 
 export {
   EXECUTABLE,
+  executableName,
   type HelperLink,
   HelperLostError,
   HelperProcess,

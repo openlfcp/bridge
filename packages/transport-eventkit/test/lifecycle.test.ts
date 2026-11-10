@@ -2,10 +2,10 @@
  * The helper process lifecycle under failure (review PR 6, P2-2..P2-4), with a stand-in `open`
  * and helper (test/fixtures) instead of LaunchServices and the Swift app.
  */
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { HelperLostError, HelperProcess } from "../src/link.js";
+import { executableName, HelperLostError, HelperProcess } from "../src/link.js";
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const FAKE_OPEN = [process.execPath, path.join(here, "fixtures", "fake-open.mjs")];
@@ -80,6 +80,20 @@ describe("start failures reject and leave nothing behind (P2-2, P2-3)", { timeou
     const r = await runStart({ FAKE_HELPER_MODE: "old-protocol" });
     expect(r.hung).toBe(false);
     expect(r.out).toMatchObject({ rejected: true, message: expect.stringContaining("protocol") });
+  });
+});
+
+describe("which executable a pid runs (CI on Linux)", () => {
+  it("names the executable, not a thread name cut to 15 characters", async () => {
+    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 5000)"], {
+      stdio: "ignore",
+    });
+    try {
+      await new Promise((r) => setTimeout(r, 300));
+      expect(executableName(child.pid as number)).toBe(path.basename(process.execPath));
+    } finally {
+      child.kill("SIGKILL");
+    }
   });
 });
 
