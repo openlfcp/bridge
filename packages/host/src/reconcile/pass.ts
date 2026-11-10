@@ -31,10 +31,12 @@ import {
   type Plan,
   plan,
 } from "@openlfcp/bridge-reminders/adapter";
-import { fromHex, resourceId } from "@openlfcp/core";
+import { fromHex, type PrincipalId, resourceId } from "@openlfcp/core";
 import type { BridgeDatabase } from "../db/database.js";
 import type { HoldReason } from "../db/holds.js";
 import { Limits } from "../executor/limits.js";
+import { sectionEnd } from "../lfcp/fallback/section-end.js";
+import { importTaskFactory } from "./import-task.js";
 import { type LfcpReader, sectionView } from "./section-view.js";
 
 export interface PassOptions {
@@ -43,6 +45,11 @@ export interface PassOptions {
   readonly lfcp: LfcpReader;
   /** The person's root as a PrincipalRef (G4): who "me" is for the filter; undefined when not known. */
   readonly me: (installationId: string) => Promise<string | undefined>;
+  /**
+   * The installation's Principal, the `created_by` of a Task imported from a new reminder
+   * (§6.2); without it the pass imports nothing.
+   */
+  readonly createdBy?: (installationId: string) => Promise<PrincipalId | undefined>;
   /** The zone Apple's completion dates are read in (default: this process's). */
   readonly timeZone?: string;
   readonly now?: () => number;
@@ -153,6 +160,9 @@ export class Pass {
 
     const R = resourceId(fromHex(b.resource_id));
     const lfcp = sectionView(this.#o.lfcp, R);
+    const replica = this.#o.lfcp.replica(R);
+    const end = replica === undefined ? undefined : sectionEnd(replica);
+    const createdBy = await this.#o.createdBy?.(b.installation_id);
     if (lfcp === undefined) return refused("section_closed");
 
     const t = this.#o.transport;
@@ -243,6 +253,12 @@ export class Pass {
       heldFields: (task) => held.get(task) ?? [],
       capabilities: t.capabilities,
       timeZone: this.#o.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+      ...(end === undefined || createdBy === undefined
+        ? {}
+        : {
+            sectionEnd: end,
+            newTask: importTaskFactory({ section: b.resource_id, bindingId: b.id, createdBy }),
+          }),
     });
 
     // §7.2, as admit would answer; nothing is set by a dry run.
@@ -250,7 +266,12 @@ export class Pass {
     const admission = limits.check(b.id, {
       intents: p.intents,
       unlinks: p.counts.unlinks,
-      imports: p.counts.imports,
+      // Imports not planned as create_task (no section end or Task factory: shown only); the
+      // planned ones are counted from the intents — each once (review PR 11 #22).
+      imports: Math.max(
+        0,
+        p.counts.imports - p.intents.filter((i) => i.kind === "create_task").length,
+      ),
     });
     const guards: HoldReason[] = admission.ok ? [] : [...admission.holds];
     const previous = this.#previousCounts(b.id);

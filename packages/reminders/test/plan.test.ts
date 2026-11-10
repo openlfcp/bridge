@@ -479,7 +479,7 @@ describe("the plan of a pass §5.5", () => {
     expect(away.intents).toEqual([]);
   });
 
-  it("new reminders, restore_url and foreign ones are shown, not planned (PR 11); holds come from matching", () => {
+  it("restore_url is this pass's to_apple intent (field writes wait); without a section end and a Task factory nothing is imported", () => {
     const t = task("T1");
     const { linkUrl: _, ...rest } = projection(t);
     const noUrl: AppleItem = { ...rest, ref: { id: "rz", externalId: "xz" } };
@@ -492,8 +492,19 @@ describe("the plan of a pass §5.5", () => {
         snapshot: { items: [noUrl, fresh], complete: true },
       }),
     );
-    expect(p.intents).toEqual([]);
-    expect(p.items.map((i) => i.kind)).toEqual(["restore_url", "import"]);
+    expect(p.intents).toEqual([
+      expect.objectContaining({
+        kind: "restore_url",
+        fields: ["url"],
+        payload: {
+          kind: "restore_url",
+          ref: noUrl.ref,
+          linkUrl: taskLink("T1", S, BRIDGE),
+          expect: { rev: noUrl.rev },
+        },
+      }),
+    ]);
+    expect(p.items.map((i) => i.kind)).toEqual(["import"]);
     expect(p.counts.imports).toBe(1);
   });
 });

@@ -16,6 +16,7 @@ import { createTask, principalRef, type Task } from "@openlfcp/shared-objects";
 import {
   type BridgeDatabase,
   bridgeHandler,
+  type CrashPoint,
   Executor,
   LinkApplier,
   offlineTestPort,
@@ -74,24 +75,35 @@ export async function bridge(o: BridgeOptions = {}) {
     scope: { listTitlePrefixes: ["LFCP · "], listIds: [list.id as ListRef] },
   });
   const TZ = "UTC";
-  const e = new Executor({
-    db,
-    transport: t,
-    lfcp: offlineTestPort({
-      commitGuarded: (c: Parameters<SectionHost["commitGuarded"]>[0]) => host.commitGuarded(c),
-      receipt: (r: ResourceId, op: string) => receiptOf(m.storage, r, op),
-    }),
-    gates: {
-      stopped: () => false,
-      safeMode: () => false,
-      ownershipChecked: () => true,
-      accessCheckedNow: () => true,
-      offlineCommitAllowed: () => true,
-      connected: () => false,
-    },
-    handler: bridgeHandler({ timeZone: TZ }),
-    effects: { enabled: true },
+  const port = offlineTestPort({
+    commitGuarded: (c: Parameters<SectionHost["commitGuarded"]>[0]) => host.commitGuarded(c),
+    receipt: (r: ResourceId, op: string) => receiptOf(m.storage, r, op),
   });
+  /** An executor on this bridge; `crash` throws at that boundary (the crash suite's hook). */
+  const executor = (crash?: CrashPoint) =>
+    new Executor({
+      db,
+      transport: t,
+      lfcp: port,
+      gates: {
+        stopped: () => false,
+        safeMode: () => false,
+        ownershipChecked: () => true,
+        accessCheckedNow: () => true,
+        offlineCommitAllowed: () => true,
+        connected: () => false,
+      },
+      handler: bridgeHandler({ timeZone: TZ }),
+      effects: { enabled: true },
+      ...(crash === undefined
+        ? {}
+        : {
+            crash: (p: CrashPoint) => {
+              if (p === crash) throw new Error(`crash ${p}`);
+            },
+          }),
+    });
+  const e = executor();
   /** lfcp_live (§5.3): the offline host never is; the test says when LFCP is caught up. */
   const lfcp = { live: true };
   const pass = new Pass({
@@ -99,6 +111,7 @@ export async function bridge(o: BridgeOptions = {}) {
     transport: t,
     lfcp: { replica: (r: ResourceId) => host.replica(r), isLive: () => lfcp.live },
     me: async () => principalRef(root),
+    createdBy: async () => root,
     timeZone: TZ,
   });
   const links = new LinkApplier({ db, transport: t });
@@ -117,6 +130,8 @@ export async function bridge(o: BridgeOptions = {}) {
     pass,
     links,
     lfcp,
+    executor,
+    storage: m.storage,
     /** A Task in the section, assigned to me unless `unassigned`. */
     async task(title: string, over: { due?: string; unassigned?: boolean } = {}): Promise<Task> {
       const task = createTask({
@@ -151,6 +166,26 @@ export async function bridge(o: BridgeOptions = {}) {
       return [...store.items.values()]
         .map((x) => store.view(x))
         .filter((x) => of === undefined || x.list === of);
+    },
+    /** The link of a reminder (by its id), whatever its Task. */
+    linkOf(reminderId: string) {
+      return db
+        .prepare(
+          "SELECT task_id, state, origin, url_state, rem_url FROM links WHERE rem_id_cache = ?",
+        )
+        .get(reminderId) as
+        | {
+            task_id: string;
+            state: string;
+            origin: string;
+            url_state: string;
+            rem_url: string | null;
+          }
+        | undefined;
+    },
+    /** The section's Tasks in projection order (depth 0). */
+    order(): string[] {
+      return (host.replica(R)?.tree().tree ?? []).filter((x) => x.depth === 0).map((x) => x.id);
     },
     link(task: string) {
       return db

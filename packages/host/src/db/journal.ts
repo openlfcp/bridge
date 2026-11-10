@@ -66,6 +66,8 @@ export const JOURNAL_TEXT: Readonly<Record<string, (p: JournalParams) => string>
     "Another bridge's reminders are in this list: synchronization stopped (lfcp-bridge doctor)",
   "intent.stale": (p) =>
     `A planned write was dropped: the task's link changed meanwhile (${String(p.reason ?? "")}); it is planned again`,
+  "link.user_replaced": () =>
+    "You put your own link on the reminder: the bridge keeps it and never puts its own back",
   "effect.refused": (p) => `Reminders refused a write: ${String(p.code ?? "")}`,
   "intent.unknown_outcome": () =>
     "Whether a write to Reminders happened is not known: decide in `lfcp-bridge quarantine`",
