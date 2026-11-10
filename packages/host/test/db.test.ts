@@ -66,6 +66,7 @@ const V2_TABLES = [
   "migrations",
   "transport_state",
 ];
+const V4_TABLES = ["migration_details"];
 
 const now = "2026-11-10T00:00:00.000Z";
 function seedV1(d: BridgeDatabase) {
@@ -94,7 +95,7 @@ describe("bridge.sqlite migrations", () => {
     const d = db();
     expect(SCHEMA_VERSION).toBe(MIGRATIONS.length);
     expect(schemaVersion(d)).toBe(SCHEMA_VERSION);
-    expect(tables(d)).toEqual([...V1_TABLES, ...V2_TABLES].sort());
+    expect(tables(d)).toEqual([...V1_TABLES, ...V2_TABLES, ...V4_TABLES].sort());
     expect(d.pragma("journal_mode", { simple: true })).toBe("wal");
     expect(d.pragma("synchronous", { simple: true })).toBe(2);
     expect(d.pragma("foreign_keys", { simple: true })).toBe(1);
@@ -124,12 +125,14 @@ describe("bridge.sqlite migrations", () => {
     const d = db();
     const latest = schema(d);
     seedV1(d);
-    expect(migrateTo(d, 1)).toEqual([2, 1]);
+    expect(migrateTo(d, 1)).toEqual(
+      Array.from({ length: SCHEMA_VERSION - 1 }, (_, i) => SCHEMA_VERSION - 1 - i),
+    );
     expect(tables(d)).toEqual(V1_TABLES);
     expect(new Holds(d).of("b1")).toHaveLength(1);
     expect(migrateTo(d, 0)).toEqual([0]);
     expect(tables(d)).toEqual([]);
-    expect(migrateTo(d, SCHEMA_VERSION)).toEqual([1, 2, 3]);
+    expect(migrateTo(d, SCHEMA_VERSION)).toEqual(MIGRATIONS.map((m) => m.version));
     expect(schema(d)).toEqual(latest);
   });
 
@@ -146,7 +149,7 @@ describe("bridge.sqlite migrations", () => {
 
   it("a failing migration leaves the last complete version, nothing of itself", () => {
     const bad: Migration = {
-      version: 3,
+      version: MIGRATIONS.length + 1,
       name: "broken",
       up: ["CREATE TABLE half_done (a TEXT) STRICT", "THIS IS NOT SQL"],
       down: ["DROP TABLE half_done"],
