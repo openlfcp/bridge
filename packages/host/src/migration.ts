@@ -369,6 +369,17 @@ export class Migrations {
       .transaction((): Quiescence | "stale" => {
         // Still this migration's turn (an abort may have come meanwhile, review PR 13 P1-2)?
         if (this.get(m.id)?.phase !== "pairing") return "stale";
+        // Only an active installation is frozen: a revoked or retired one stays as it is
+        // (review PR 13 P2-1).
+        const status = (
+          db.prepare("SELECT status FROM installations WHERE id = ?").get(m.from) as
+            | { status: string }
+            | undefined
+        )?.status;
+        if (status !== "active") {
+          this.#abortIn(m, `installation_${status ?? "missing"}`);
+          return { quiescent: false, reasons: [] };
+        }
         const q = quiescence(db, m.from);
         // The migration itself is the one open migration of `from`: not a reason here.
         const reasons = q.reasons.filter((r) => r.reason !== "open_migration" || r.count > 1);
@@ -398,6 +409,16 @@ export class Migrations {
       })
       .immediate();
     if (outcome === "stale") return false;
+    if (!outcome.quiescent && outcome.reasons.length === 0) {
+      this.#d.journal.append("warn", "migration.aborted", {
+        params: {
+          text: `N8 migration ${m.id} aborted: installation ${m.from} is no longer active.`,
+          migration: m.id,
+          reason: this.get(m.id)?.abortedReason ?? "installation_not_active",
+        },
+      });
+      return false;
+    }
     if (!outcome.quiescent) {
       this.#d.journal.append("warn", "migration.aborted", {
         params: {
@@ -570,9 +591,10 @@ export class Migrations {
       db.prepare(
         "UPDATE installations SET status = 'retired', retired_at = coalesce(retired_at, ?), status_detail = ? WHERE id = ? AND status = 'active'",
       ).run(now, `N8 ${m.id} aborted`, to);
+    // Back to active only what this migration froze (review PR 13 P2-1).
     db.prepare(
-      "UPDATE installations SET status = 'active', status_detail = NULL WHERE id = ? AND status = 'frozen'",
-    ).run(m.from);
+      "UPDATE installations SET status = 'active', status_detail = NULL WHERE id = ? AND status = 'frozen' AND status_detail = ?",
+    ).run(m.from, `N8 ${m.id}`);
     const holds = new Holds(db, this.#now);
     for (const b of this.#bindingsOf(m.from)) holds.lift(b, "migration");
     db.prepare("UPDATE migration_details SET aborted_reason = ? WHERE migration_id = ?").run(

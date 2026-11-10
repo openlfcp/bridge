@@ -420,3 +420,26 @@ describe("N8: a late answer never moves an aborted migration (review PR 13 P1-2)
     expect([r.holds("b1"), r.holds("b2")]).toEqual([[], []]);
   });
 });
+
+describe("N8: the freeze keeps a revoked installation revoked (review PR 13 P2-1)", () => {
+  it("revoked during the pairing: aborted, still revoked; abort later does not make it active", async () => {
+    const r = rig({
+      afterPairing: (db) =>
+        db.prepare("UPDATE installations SET status = 'revoked' WHERE id = 'i1'").run(),
+    });
+    const out = await r.m.add("i1", ["Work"]);
+    expect(out).toMatchObject({ migration: { phase: "aborted" } });
+    if (out.state === "started") expect(out.migration.abortedReason).toContain("revoked");
+    expect(r.inst("i1")).toBe("revoked");
+    expect([r.holds("b1"), r.holds("b2")]).toEqual([[], []]);
+  });
+
+  it("abort returns to active only an installation this migration froze", async () => {
+    const r = rig();
+    const out = await r.m.add("i1", ["Work"]);
+    const id = (out as { migration: { id: string } }).migration.id;
+    r.db.prepare("UPDATE installations SET status = 'revoked' WHERE id = 'i1'").run();
+    r.m.abort(id);
+    expect(r.inst("i1")).toBe("revoked");
+  });
+});
