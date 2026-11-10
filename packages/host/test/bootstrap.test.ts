@@ -117,6 +117,27 @@ describe("bind", () => {
     for (const x of [a, b, c]) expect(x.store.lists.size).toBe(1); // only the default list
   });
 
+  it("a foreign marker that appears after the list stops the marker step (checked before every effect)", async () => {
+    const { store, person, transport, boot } = await rig();
+    const original = transport.createList.bind(transport);
+    transport.createList = async (op) => {
+      const l = await original(op);
+      const other = person.createList("Elsewhere");
+      person.create(other.id, "marker", { url: markerUrl("inst-other", R), completed: true });
+      return l;
+    };
+    const r = await boot.bind(bindReq);
+    expect(r).toMatchObject({ state: "refused", reason: "foreign_bridge" });
+    expect([...store.items.values()].some((i) => i.linkUrl === markerUrl(ME, R))).toBe(false);
+  });
+
+  it("an installation that is not active refuses the bootstrap", async () => {
+    const { db, store, boot } = await rig();
+    db.prepare("UPDATE installations SET status = 'frozen'").run();
+    expect(await boot.bind(bindReq)).toMatchObject({ state: "refused" });
+    expect(listsTitled(store, "LFCP · Work")).toHaveLength(0);
+  });
+
   it("a verification binding gets an 'LFCP Verify · …' list", async () => {
     const { db, boot } = await rig();
     const r = await boot.bind({ ...bindReq, verification: true });
