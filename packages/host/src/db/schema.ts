@@ -8,6 +8,7 @@
 // holds, the journal, runs (Safe Mode), meta.
 // Version 2: the synchronisation state: links, bases, personal Apple data,
 // conflicts, intents, bootstrap steps, transport state, N8 migrations.
+// Version 3: runs and journal of r2. Version 4: N8 migration details.
 //
 // Beyond §3: STRICT tables, NOT NULL where a row has no meaning without the
 // value, and foreign keys to installations and bindings (PRAGMA
@@ -293,8 +294,27 @@ const V3: Migration = {
   ],
 };
 
+// Version 4: what N8 (§9 r4, PR 13) keeps besides the phase of a migration:
+// the sections asked for, when the old installation was frozen (the catch-up
+// must be LIVE on a connection opened after it) and why it ended, if it was
+// aborted. The phase stays in migrations.phase, a blocked state in
+// migrations.blocked_reason: three separate things.
+const V4: Migration = {
+  version: 4,
+  name: "N8 migration details",
+  up: [
+    `CREATE TABLE migration_details (
+      migration_id TEXT PRIMARY KEY REFERENCES migrations(id),
+      sections_json TEXT NOT NULL,
+      frozen_at TEXT,
+      aborted_reason TEXT
+    ) STRICT, WITHOUT ROWID`,
+  ],
+  down: ["DROP TABLE migration_details"],
+};
+
 /** Every migration, in order. */
-export const MIGRATIONS: readonly Migration[] = Object.freeze([V1, V2, V3]);
+export const MIGRATIONS: readonly Migration[] = Object.freeze([V1, V2, V3, V4]);
 
 /** The schema version this build writes. */
 export const SCHEMA_VERSION = MIGRATIONS.length;
