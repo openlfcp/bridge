@@ -61,8 +61,9 @@ export interface HelperProcessOptions {
 }
 
 /**
- * A seam for this package's own tests, not part of its API: src/index.ts does not export it and
- * package.json exports only ".", so no consumer can reach it. `beforeUnlink` runs in cleanup after
+ * @internal
+ * A seam for this package's own tests, not part of its API: src/index.ts does not export it,
+ * package.json exports only ".", and `stripInternal` keeps it out of every built declaration. `beforeUnlink` runs in cleanup after
  * the pending FIFO opens were released and before the FIFOs are removed — the window where a late
  * open of an end must still return. Whatever it throws is ignored: cleanup always completes.
  */

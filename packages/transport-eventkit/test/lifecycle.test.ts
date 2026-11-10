@@ -125,6 +125,19 @@ describe("start failures reject and leave nothing behind (P2-2, P2-3)", { timeou
     expect(options.appPath).toBe("/x.app");
   });
 
+  it("no built declaration names the FIFO test seam (review flake r2 F-P2-1)", () => {
+    // CI builds before it tests; a stale or missing dist is a failure here, not a skip.
+    const dist = path.join(here, "..", "dist");
+    const decls = fs.readdirSync(dist).filter((f) => f.endsWith(".d.ts"));
+    expect(decls).toContain("link.d.ts");
+    const naming = decls.filter((f) =>
+      /fifoTestHooks|beforeUnlink|beforeFifoUnlink/.test(
+        fs.readFileSync(path.join(dist, f), "utf8"),
+      ),
+    );
+    expect(naming).toEqual([]);
+  });
+
   it("the transport reports a missing helper as unavailable", async () => {
     const r = await runStart({ RUN_LAUNCH: "direct", RUN_VIA: "transport" });
     expect(r.hung).toBe(false);
