@@ -187,7 +187,11 @@ export type TransitionKind =
   | "link_orphan"
   | "quarantine"
   /** Recurring copies to ignore (§6.4). */
-  | "ignore_copies";
+  | "ignore_copies"
+  /** The person put a recurrence on the reminder: status, completion date and due become read-only (§6.4). */
+  | "status_lock"
+  /** The recurrence is gone: the group is agreed again as on a first link (§6.4). */
+  | "status_unlock";
 
 export interface Transition {
   readonly taskId: string;
@@ -286,7 +290,7 @@ export function plan(view: PassView): Plan {
   let linkedApple = 0;
   let linkedLfcp = 0;
 
-  const reconcile = (link: LinkRow, task: LfcpTask, item: AppleItem) => {
+  const reconcile = (link: LinkRow, task: LfcpTask, item: AppleItem, unlocked = false) => {
     const pL = projectLfcp(task);
     const pA = projectApple(item, view.timeZone);
     const shadow = shadowOf(task);
@@ -346,7 +350,9 @@ export function plan(view: PassView): Plan {
         decide(field, "status_locked");
         continue;
       }
-      const base = bases?.get(field);
+      // Just unlocked: status and due are agreed again as on a first link (§6.4).
+      const base =
+        unlocked && (field === "status" || field === "due") ? undefined : bases?.get(field);
       if (field === "status") {
         // The status group: its own table (§4.4, r3 P2-2).
         const input: StatusInput = {
@@ -487,7 +493,21 @@ export function plan(view: PassView): Plan {
         if (lm.restoreUrl) items.push(note("restore_url", lm.item, { taskId: link.taskId }));
         if (lm.userReplaced && link.urlState !== "user_replaced")
           items.push(note("user_replaced", lm.item, { taskId: link.taskId }));
-        reconcile(link, task as LfcpTask, lm.item);
+        // §6.4: a recurrence the person set locks status and due (read-only both ways); its
+        // removal unlocks them, re-agreed as on a first link. Effective in this pass already.
+        if (lm.item.hasRecurrence !== link.statusLocked)
+          transitions.push({
+            taskId: link.taskId,
+            kind: lm.item.hasRecurrence ? "status_lock" : "status_unlock",
+          });
+        reconcile(
+          lm.item.hasRecurrence === link.statusLocked
+            ? link
+            : { ...link, statusLocked: lm.item.hasRecurrence },
+          task as LfcpTask,
+          lm.item,
+          lm.item.hasRecurrence !== link.statusLocked && !lm.item.hasRecurrence,
+        );
         break;
       }
       case "out_of_filter":
