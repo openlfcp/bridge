@@ -251,6 +251,62 @@ describe("unknown outcomes (B17, review PR 6 r2: never bypassed automatically)",
     expect([...store.items.values()].filter((i) => i.linkUrl === markerUrl(ME, R))).toHaveLength(1);
   });
 
+  it("a new attempt replaces the unknown op atomically: a crash in between keeps the old row (review PR 9 P2-5)", async () => {
+    const { db, store, person, transport, boot } = await rig();
+    transport.faults.loseNextResponse = 1;
+    transport.recover = async () => ({ state: "unknown" }) as never;
+    const r = await boot.bind(bindReq);
+    const id = (r as { bindingId: string }).bindingId;
+    person.renameList(listsTitled(store, "LFCP · Work")[0]?.id as ListRef, "Old work");
+    const row = () =>
+      db
+        .prepare(
+          "SELECT client_id, state FROM bootstrap_ops WHERE binding_id = ? AND step = 'list'",
+        )
+        .get(id);
+    const before = row();
+    expect(before).toMatchObject({ state: "unknown_outcome" });
+    // A crash inside the switch: after the old row is gone or the new one is in, before the end.
+    db.exec(`CREATE TRIGGER crash_ops BEFORE INSERT ON bootstrap_ops BEGIN SELECT RAISE(ABORT, 'crash'); END;
+             CREATE TRIGGER crash_step BEFORE UPDATE OF bootstrap_step ON bindings BEGIN SELECT RAISE(ABORT, 'crash'); END;`);
+    await expect(boot.resolveList(id, "none")).rejects.toThrow("crash");
+    expect(row()).toEqual(before);
+    db.exec("DROP TRIGGER crash_ops; DROP TRIGGER crash_step;");
+    // After the crash the person's decision still works, with a new key.
+    expect(await boot.resolveList(id, "none")).toMatchObject({ state: "pending_dry_run" });
+    expect((row() as { client_id: string }).client_id).toMatch(/:list:2$/);
+  });
+
+  it("the same holds for a new marker attempt", async () => {
+    const { db, transport, boot } = await rig();
+    const original = transport.apply.bind(transport);
+    transport.apply = async (op) => {
+      if (op.kind === "marker_create" && op.opKey.endsWith(":marker:1"))
+        throw new Error("connection lost");
+      return original(op);
+    };
+    const recover = transport.recover.bind(transport);
+    transport.recover = async (k) =>
+      k.endsWith(":marker:1") ? ({ state: "unknown" } as never) : recover(k);
+    const id = ((await boot.bind(bindReq)) as { bindingId: string }).bindingId;
+    const row = () =>
+      db
+        .prepare(
+          "SELECT client_id, state FROM bootstrap_ops WHERE binding_id = ? AND step = 'marker'",
+        )
+        .get(id);
+    const before = row();
+    expect(before).toMatchObject({ state: "unknown_outcome" });
+    db.exec(
+      "CREATE TRIGGER crash_ops BEFORE INSERT ON bootstrap_ops BEGIN SELECT RAISE(ABORT, 'crash'); END;",
+    );
+    await expect(boot.resolveMarker(id, "none")).rejects.toThrow("crash");
+    expect(row()).toEqual(before);
+    db.exec("DROP TRIGGER crash_ops;");
+    expect(await boot.resolveMarker(id, "none")).toMatchObject({ state: "pending_dry_run" });
+    expect((row() as { client_id: string }).client_id).toMatch(/:marker:2$/);
+  });
+
   it("resolveList refuses when the outcome is not unknown", async () => {
     const { boot } = await rig();
     const r = await boot.bind(bindReq);
