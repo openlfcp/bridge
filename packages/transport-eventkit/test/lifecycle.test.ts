@@ -2,10 +2,19 @@
  * The helper process lifecycle under failure (review PR 6, P2-2..P2-4), with a stand-in `open`
  * and helper (test/fixtures) instead of LaunchServices and the Swift app.
  */
-import { execFile, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { executableName, HelperLostError, HelperProcess } from "../src/link.js";
+import * as publicApi from "../src/index.js";
+import {
+  executableName,
+  fifoTestHooks,
+  HelperLostError,
+  HelperProcess,
+  type HelperProcessOptions,
+} from "../src/link.js";
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const FAKE_OPEN = [process.execPath, path.join(here, "fixtures", "fake-open.mjs")];
@@ -55,6 +64,78 @@ describe("start failures reject and leave nothing behind (P2-2, P2-3)", { timeou
     const r = await runStart({ RUN_LAUNCHER: "missing" });
     expect(r.hung).toBe(false);
     expect(r.out).toMatchObject({ rejected: true, name: "HelperLostError" });
+  });
+
+  it("cleanup leaves no FIFO open blocked: one that starts just before the unlink returns at once", async () => {
+    // The race behind a flaky "missing launcher" run: a stream's open of a FIFO end reached the
+    // threadpool after cleanup tried to unblock it and before the FIFOs were removed; with no
+    // other end it blocked for ever and the process could not exit. The hook runs in exactly that
+    // window; a blocking open of each end (in another process, as a pool thread would) must return.
+    // Every threadpool thread waits on a FIFO of the test, so the helper streams' own opens are
+    // still queued when cleanup runs: cleanup cannot find them waiting.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lfcp-pool-"));
+    const pool = Number(process.env.UV_THREADPOOL_SIZE ?? 4);
+    const blockers = Array.from({ length: pool }, (_, i) => path.join(dir, `b${i}`));
+    for (const b of blockers) execFileSync("mkfifo", [b]);
+    const held = blockers.map(
+      (b) =>
+        new Promise<number>((resolve, reject) =>
+          fs.open(b, "r", (e, fd) => (e ? reject(e) : resolve(fd))),
+        ),
+    );
+    await new Promise((r) => setTimeout(r, 100));
+    const opened: string[] = [];
+    fifoTestHooks.beforeUnlink = (fifos) => {
+      for (const [file, mode] of [
+        [fifos.in, ">"],
+        [fifos.out, "<"],
+        [fifos.err, "<"],
+      ] as const) {
+        execFileSync("sh", ["-c", `exec 3${mode}"$0"`, file], { timeout: 2000 });
+        opened.push(path.basename(file));
+      }
+    };
+    try {
+      await expect(
+        HelperProcess.start({
+          appPath: "/nonexistent/LFCP Reminders Helper.app",
+          launcher: ["/nonexistent/open"],
+          helperName: "node",
+          readyTimeoutMs: 3000,
+        }),
+      ).rejects.toBeInstanceOf(HelperLostError);
+    } finally {
+      delete fifoTestHooks.beforeUnlink;
+      // Release the pool: a writer for each blocker.
+      const writers = blockers.map((b) => fs.openSync(b, fs.constants.O_RDWR));
+      for (const fd of await Promise.all(held)) fs.closeSync(fd);
+      for (const fd of writers) fs.closeSync(fd);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    expect(opened).toEqual(["in", "out", "err"]);
+  });
+
+  it("the FIFO test seam is not part of the package's API (review fix-launcher-flake P2-1)", () => {
+    expect("fifoTestHooks" in publicApi).toBe(false);
+    const options: HelperProcessOptions = {
+      appPath: "/x.app",
+      // @ts-expect-error the options of HelperProcess (and of the transport) have no test hook
+      beforeFifoUnlink: () => {},
+    };
+    expect(options.appPath).toBe("/x.app");
+  });
+
+  it("no built declaration names the FIFO test seam (review flake r2 F-P2-1)", () => {
+    // CI builds before it tests; a stale or missing dist is a failure here, not a skip.
+    const dist = path.join(here, "..", "dist");
+    const decls = fs.readdirSync(dist).filter((f) => f.endsWith(".d.ts"));
+    expect(decls).toContain("link.d.ts");
+    const naming = decls.filter((f) =>
+      /fifoTestHooks|beforeUnlink|beforeFifoUnlink/.test(
+        fs.readFileSync(path.join(dist, f), "utf8"),
+      ),
+    );
+    expect(naming).toEqual([]);
   });
 
   it("the transport reports a missing helper as unavailable", async () => {

@@ -60,6 +60,21 @@ export interface HelperProcessOptions {
   readonly onStderr?: (line: string) => void;
 }
 
+/**
+ * @internal
+ * A seam for this package's own tests, not part of its API: src/index.ts does not export it,
+ * package.json exports only ".", and `stripInternal` keeps it out of every built declaration. `beforeUnlink` runs in cleanup after
+ * the pending FIFO opens were released and before the FIFOs are removed — the window where a late
+ * open of an end must still return. Whatever it throws is ignored: cleanup always completes.
+ */
+export const fifoTestHooks: {
+  beforeUnlink?: (fifos: {
+    readonly in: string;
+    readonly out: string;
+    readonly err: string;
+  }) => void;
+} = {};
+
 export const EXECUTABLE = path.join("Contents", "MacOS", "lfcp-reminders-helper");
 const HELPER_NAME = "lfcp-reminders-helper";
 
@@ -74,8 +89,6 @@ interface FifoEnd {
   readonly path: string;
   readonly stream: Readable | Writable;
   opened: boolean;
-  /** Flags to open the other end without blocking, which lets our pending open return. */
-  readonly counterpart: number;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -197,14 +210,13 @@ export class HelperProcess implements HelperLink {
       out = fs.createReadStream(fout);
       err = fs.createReadStream(ferr);
       this.#input = input;
-      const { O_RDONLY, O_WRONLY, O_NONBLOCK } = fs.constants;
-      const ends: [string, Readable | Writable, number][] = [
-        [fin, input, O_RDONLY | O_NONBLOCK],
-        [fout, out, O_WRONLY | O_NONBLOCK],
-        [ferr, err, O_WRONLY | O_NONBLOCK],
+      const ends: [string, Readable | Writable][] = [
+        [fin, input],
+        [fout, out],
+        [ferr, err],
       ];
-      for (const [p, stream, counterpart] of ends) {
-        const end: FifoEnd = { path: p, stream, opened: false, counterpart };
+      for (const [p, stream] of ends) {
+        const end: FifoEnd = { path: p, stream, opened: false };
         stream.once("open", () => {
           end.opened = true;
         });
@@ -371,32 +383,59 @@ export class HelperProcess implements HelperLink {
     return executableName(pid) === (this.#opts.helperName ?? HELPER_NAME);
   }
 
-  /** Releases FIFO opens still waiting for their other end, closes streams, removes the FIFOs. */
+  /**
+   * Releases FIFO opens still waiting for their other end, closes streams, removes the FIFOs.
+   *
+   * A stream opens its FIFO end on the threadpool, and that open blocks until the other end is
+   * open. For every end not opened yet we hold an O_RDWR descriptor (on a FIFO, Linux and macOS
+   * open it at once, and it is a reader and a writer) from before the FIFOs are removed until the
+   * streams closed: an open that started before the removal returns at once, one after it fails
+   * with ENOENT. (O_NONBLOCK counterparts were not enough: O_WRONLY|O_NONBLOCK fails with ENXIO
+   * while no reader is waiting yet, and a reader that entered open just after that blocked for
+   * ever — a lost pool thread and a process that could not exit.)
+   */
   #cleanup(): void {
-    const unblock: number[] = [];
+    const held: number[] = [];
     for (const end of this.#fifos) {
       if (!end.opened) {
         try {
-          unblock.push(fs.openSync(end.path, end.counterpart));
+          held.push(fs.openSync(end.path, fs.constants.O_RDWR));
         } catch {
-          // no pending open on this end
+          // the FIFO is gone already
         }
       }
     }
     for (const r of this.#readers) r.close();
+    const closed = this.#fifos.map(
+      (end) =>
+        new Promise<void>((resolve) => {
+          if (end.stream.closed) resolve();
+          else end.stream.once("close", () => resolve());
+        }),
+    );
     for (const end of this.#fifos) end.stream.destroy();
     this.#input?.destroy();
-    // Close our counterparts once the pending opens have returned.
-    setTimeout(() => {
-      for (const fd of unblock) {
+    if (this.#fifoDir !== undefined) {
+      const dir = this.#fifoDir;
+      try {
+        fifoTestHooks.beforeUnlink?.({
+          in: path.join(dir, "in"),
+          out: path.join(dir, "out"),
+          err: path.join(dir, "err"),
+        });
+      } catch {
+        // a test hook never stops the cleanup
+      }
+      fs.rmSync(this.#fifoDir, { recursive: true, force: true });
+      this.#fifoDir = undefined;
+    }
+    // Our ends close once every stream has (its pending open returned, or failed).
+    void Promise.all(closed).then(() => {
+      for (const fd of held) {
         try {
           fs.closeSync(fd);
         } catch {}
       }
-    }, 50).unref();
-    if (this.#fifoDir !== undefined) {
-      fs.rmSync(this.#fifoDir, { recursive: true, force: true });
-      this.#fifoDir = undefined;
-    }
+    });
   }
 }
