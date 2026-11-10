@@ -7,7 +7,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { executableName, HelperLostError, HelperProcess } from "../src/link.js";
+import * as publicApi from "../src/index.js";
+import {
+  executableName,
+  fifoTestHooks,
+  HelperLostError,
+  HelperProcess,
+  type HelperProcessOptions,
+} from "../src/link.js";
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const FAKE_OPEN = [process.execPath, path.join(here, "fixtures", "fake-open.mjs")];
@@ -78,6 +85,16 @@ describe("start failures reject and leave nothing behind (P2-2, P2-3)", { timeou
     );
     await new Promise((r) => setTimeout(r, 100));
     const opened: string[] = [];
+    fifoTestHooks.beforeUnlink = (fifos) => {
+      for (const [file, mode] of [
+        [fifos.in, ">"],
+        [fifos.out, "<"],
+        [fifos.err, "<"],
+      ] as const) {
+        execFileSync("sh", ["-c", `exec 3${mode}"$0"`, file], { timeout: 2000 });
+        opened.push(path.basename(file));
+      }
+    };
     try {
       await expect(
         HelperProcess.start({
@@ -85,19 +102,10 @@ describe("start failures reject and leave nothing behind (P2-2, P2-3)", { timeou
           launcher: ["/nonexistent/open"],
           helperName: "node",
           readyTimeoutMs: 3000,
-          beforeFifoUnlink: (fifos) => {
-            for (const [file, mode] of [
-              [fifos.in, ">"],
-              [fifos.out, "<"],
-              [fifos.err, "<"],
-            ] as const) {
-              execFileSync("sh", ["-c", `exec 3${mode}"$0"`, file], { timeout: 2000 });
-              opened.push(path.basename(file));
-            }
-          },
         }),
       ).rejects.toBeInstanceOf(HelperLostError);
     } finally {
+      delete fifoTestHooks.beforeUnlink;
       // Release the pool: a writer for each blocker.
       const writers = blockers.map((b) => fs.openSync(b, fs.constants.O_RDWR));
       for (const fd of await Promise.all(held)) fs.closeSync(fd);
@@ -105,6 +113,16 @@ describe("start failures reject and leave nothing behind (P2-2, P2-3)", { timeou
       fs.rmSync(dir, { recursive: true, force: true });
     }
     expect(opened).toEqual(["in", "out", "err"]);
+  });
+
+  it("the FIFO test seam is not part of the package's API (review fix-launcher-flake P2-1)", () => {
+    expect("fifoTestHooks" in publicApi).toBe(false);
+    const options: HelperProcessOptions = {
+      appPath: "/x.app",
+      // @ts-expect-error the options of HelperProcess (and of the transport) have no test hook
+      beforeFifoUnlink: () => {},
+    };
+    expect(options.appPath).toBe("/x.app");
   });
 
   it("the transport reports a missing helper as unavailable", async () => {

@@ -58,16 +58,21 @@ export interface HelperProcessOptions {
   readonly closeGraceMs?: number;
   /** stderr lines of the helper (EventKit logs noise there). */
   readonly onStderr?: (line: string) => void;
-  /**
-   * Tests only: called in cleanup after the pending FIFO opens were released and before the FIFOs
-   * are removed — the window where a late open of an end must still return.
-   */
-  readonly beforeFifoUnlink?: (fifos: {
+}
+
+/**
+ * A seam for this package's own tests, not part of its API: src/index.ts does not export it and
+ * package.json exports only ".", so no consumer can reach it. `beforeUnlink` runs in cleanup after
+ * the pending FIFO opens were released and before the FIFOs are removed — the window where a late
+ * open of an end must still return. Whatever it throws is ignored: cleanup always completes.
+ */
+export const fifoTestHooks: {
+  beforeUnlink?: (fifos: {
     readonly in: string;
     readonly out: string;
     readonly err: string;
   }) => void;
-}
+} = {};
 
 export const EXECUTABLE = path.join("Contents", "MacOS", "lfcp-reminders-helper");
 const HELPER_NAME = "lfcp-reminders-helper";
@@ -411,11 +416,15 @@ export class HelperProcess implements HelperLink {
     this.#input?.destroy();
     if (this.#fifoDir !== undefined) {
       const dir = this.#fifoDir;
-      this.#opts.beforeFifoUnlink?.({
-        in: path.join(dir, "in"),
-        out: path.join(dir, "out"),
-        err: path.join(dir, "err"),
-      });
+      try {
+        fifoTestHooks.beforeUnlink?.({
+          in: path.join(dir, "in"),
+          out: path.join(dir, "out"),
+          err: path.join(dir, "err"),
+        });
+      } catch {
+        // a test hook never stops the cleanup
+      }
       fs.rmSync(this.#fifoDir, { recursive: true, force: true });
       this.#fifoDir = undefined;
     }
