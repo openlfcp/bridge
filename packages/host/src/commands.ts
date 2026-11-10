@@ -10,6 +10,13 @@ import { doctor, worst } from "./doctor.js";
 import { EXIT, type ExitCode } from "./exit.js";
 import { installLaunchAgent, uninstallLaunchAgent } from "./launchd.js";
 import { MigrationError, type MigrationRow, Migrations } from "./migration.js";
+import {
+  approveCommand,
+  dryRunCommand,
+  pairCommand,
+  runCommand,
+  sectionsCommand,
+} from "./run/cli.js";
 import { machineRuntime, type Runtime } from "./runtime.js";
 
 export interface CommandInfo {
@@ -22,11 +29,16 @@ export interface CommandInfo {
 }
 
 export const COMMANDS: readonly CommandInfo[] = Object.freeze([
-  { name: "pair", summary: "pair a new installation (link on standard input)", pr: "9 (after 8)" },
-  { name: "sections", summary: "the sections of the installations", pr: "9 (after 8)" },
+  {
+    name: "pair",
+    summary: "pair a new installation (link on standard input)",
+    pr: "9b",
+    ready: true,
+  },
+  { name: "sections", summary: "the sections of the installations", pr: "9b", ready: true },
   { name: "bind", summary: "bind a section to a new Reminders list", pr: "9", ready: true },
-  { name: "dry-run", summary: "a full pass without effects", pr: "8" },
-  { name: "approve", summary: "pending_dry_run -> active", pr: "9 (after 8)" },
+  { name: "dry-run", summary: "a full pass without effects", pr: "9b", ready: true },
+  { name: "approve", summary: "pending_dry_run -> active", pr: "9b", ready: true },
   {
     name: "unbind",
     summary: "remove a binding (the list and reminders stay)",
@@ -39,7 +51,7 @@ export const COMMANDS: readonly CommandInfo[] = Object.freeze([
     pr: "9",
     ready: true,
   },
-  { name: "run", summary: "the long-running process", pr: "9 (after 8)" },
+  { name: "run", summary: "the long-running process", pr: "9b", ready: true },
   { name: "stop", summary: "write STOP: no effect runs until resume", pr: "9", ready: true },
   { name: "resume", summary: "remove STOP, or accept one hold", pr: "9", ready: true },
   { name: "doctor", summary: "preflight checks; the TCC request", pr: "9", ready: true },
@@ -69,6 +81,10 @@ ${COMMANDS.map((c) => `  ${c.name.padEnd(14)} ${c.summary}`).join("\n")}
 export interface CliEnvironment {
   readonly out: (line: string) => void;
   readonly err: (line: string) => void;
+  /** `run`: resolves when the process should stop (default: SIGTERM / SIGINT). */
+  readonly until?: Promise<string>;
+  /** `pair`: the link (default: standard input). */
+  readonly stdin?: () => string;
   /** The machine (tests pass their own). */
   readonly runtime?: () => Promise<Runtime>;
 }
@@ -164,6 +180,32 @@ async function run(
   const { positional, opts } = options(args);
   const stopped = () => stopState(rt.paths.home) !== undefined;
   switch (name) {
+    case "run":
+      return runCommand(rt, env);
+    case "dry-run":
+      return dryRunCommand(rt, positional[0], env);
+    case "approve":
+      return approveCommand(rt, positional[0], env);
+    case "sections":
+      return sectionsCommand(rt, env);
+    case "pair": {
+      const sections: string[] = [];
+      for (let i = 0; i < args.length; i++)
+        if (args[i] === "--section" && args[i + 1]) sections.push(args[i + 1] as string);
+      const label = opts.get("label");
+      const inst = opts.get("installation");
+      const wait = opts.get("wait");
+      return pairCommand(
+        rt,
+        {
+          ...(typeof label === "string" ? { label } : {}),
+          sections,
+          ...(typeof inst === "string" ? { installation: inst } : {}),
+          ...(typeof wait === "string" ? { wait: Number(wait) } : {}),
+        },
+        env,
+      );
+    }
     case "bind":
     case "verify": {
       const transport = await rt.openTransport();
@@ -211,7 +253,7 @@ async function run(
       const code = bindResult(r, env);
       if (name === "verify" && code === EXIT.OK)
         env.out(
-          "verification binding ready. Its writes start with the verification run, which comes with PR 8 (apply).",
+          "verification binding ready: lfcp-bridge dry-run, then lfcp-bridge approve, then lfcp-bridge run (docs/devel/testing/verification-run.md)",
         );
       return code;
     }
