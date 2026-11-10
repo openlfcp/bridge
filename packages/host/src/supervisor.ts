@@ -10,9 +10,8 @@
 //   older one never launches a helper, and a helper whose start was in flight is closed before
 //   stop() resolves (review PR 9 P2-3).
 
-import { execFileSync } from "node:child_process";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
-import { basename } from "node:path";
+import { executableName } from "@openlfcp/bridge-transport-eventkit";
 
 export interface SupervisedHelper {
   readonly pid: number | undefined;
@@ -43,18 +42,9 @@ export interface SupervisorOptions {
 
 export const HELPER_EXECUTABLE = "lfcp-reminders-helper";
 
+/** The pid runs our helper executable (Linux: /proc/<pid>/exe; macOS: ps comm). */
 export function isHelperProcess(pid: number, name = HELPER_EXECUTABLE): boolean {
-  try {
-    return (
-      basename(
-        execFileSync("ps", ["-o", "comm=", "-p", String(pid)])
-          .toString()
-          .trim(),
-      ) === name
-    );
-  } catch {
-    return false;
-  }
+  return executableName(pid) === name;
 }
 
 const alive = (pid: number) => {

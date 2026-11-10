@@ -4,9 +4,9 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { HelperSupervisor, type SupervisedHelper } from "../src/supervisor.js";
+import { HelperSupervisor, isHelperProcess, type SupervisedHelper } from "../src/supervisor.js";
 
 class FakeHelper implements SupervisedHelper {
   static next = 50_000;
@@ -208,6 +208,19 @@ describe("HelperSupervisor", () => {
       await s.stop();
     } finally {
       orphan.kill("SIGKILL");
+    }
+  });
+
+  it("recognises the executable a pid runs on Linux too (not ps comm, a thread name there)", async () => {
+    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 5000)"], {
+      stdio: "ignore",
+    });
+    try {
+      await new Promise((r) => setTimeout(r, 300));
+      expect(isHelperProcess(child.pid as number, basename(process.execPath))).toBe(true);
+      expect(isHelperProcess(child.pid as number)).toBe(false);
+    } finally {
+      child.kill("SIGKILL");
     }
   });
 });
