@@ -307,22 +307,28 @@ export class Bootstrap {
    * unbind (the unbind column of permits()): STOP and Safe Mode refuse it entirely (nothing
    * changes); holds do not count. When the marker may not be retired (no TCC, the list is gone,
    * ownership not checked) the binding is still removed and the marker stays — `denied` says why.
+   * When permitted, the helper's narrow write mode is switched on first (each command opens a
+   * transport with writes off, review PR 9 r2 P2-1); a retire the transport refuses is a partial
+   * unbind too — `failed` names its code.
    */
   async unbind(bindingId: string): Promise<{
     readonly retired: boolean;
     readonly refused?: readonly Denial[];
     readonly denied?: readonly Denial[];
+    readonly failed?: string;
   }> {
     const b = this.#binding(bindingId);
     const denials = permits(await this.#context(b, "unbind", "marker_retire"));
     const blocking = denials.filter((d) => d === "stopped" || d === "safe_mode");
     if (blocking.length > 0) return { retired: false, refused: blocking };
     let retired = false;
+    let failed: string | undefined;
     if (denials.length === 0 && b.target_ref !== null) {
       const url = markerUrl(this.#d.instanceId, b.resource_id);
       const found = await this.#d.transport.find({ url }, [b.target_ref as ListRef]);
       const marker = found.items[0];
       if (marker !== undefined) {
+        await this.#d.transport.setWriteMode?.(b.verification === 1 ? "verification" : "bootstrap");
         const r = await this.#d.transport.apply({
           opKey: `unbind:${bindingId}:${randomUUID().slice(0, 8)}`,
           kind: "marker_retire",
@@ -331,6 +337,7 @@ export class Bootstrap {
           expect: { rev: marker.rev },
         });
         retired = r.ok;
+        if (!r.ok) failed = r.code;
       }
     }
     this.#d.db.prepare("UPDATE bindings SET state = 'removed' WHERE id = ?").run(bindingId);
@@ -340,9 +347,14 @@ export class Bootstrap {
         text: "Binding removed; the list and its reminders stay.",
         retired,
         denied: denials,
+        ...(failed === undefined ? {} : { failed }),
       },
     });
-    return denials.length > 0 ? { retired, denied: denials } : { retired };
+    return {
+      retired,
+      ...(denials.length > 0 ? { denied: denials } : {}),
+      ...(failed === undefined ? {} : { failed }),
+    };
   }
 
   // ---------- steps ----------
