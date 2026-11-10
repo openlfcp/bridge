@@ -6,8 +6,14 @@
  *
  * Lifecycle rules (review PR 6, P2-2..P2-4):
  * - every failure of start (spawn error, launcher or helper exit before ready, ready timeout, wrong
- *   protocol) rejects with HelperLostError and runs one cleanup: stop what was started, unblock
- *   FIFO opens still waiting for their other end, close streams, remove the FIFO directory;
+ *   protocol) rejects with HelperLostError and runs one cleanup: stop what was started, close the
+ *   FIFO sockets, remove the FIFO directory;
+ * - the FIFOs are opened O_RDWR | O_NONBLOCK before the launcher starts and used as net.Sockets:
+ *   libuv polls them, no threadpool thread waits on a quiet FIFO (fs streams held one per FIFO in
+ *   read(): two helpers took all four threads and no request was written, R-001 live run). On a
+ *   FIFO, O_RDWR never blocks and never fails with ENXIO, so the helper's opens never wait either.
+ *   We hold the write side of stdout/stderr ourselves, so EOF never comes from there: the helper's
+ *   end is the launcher's exit (open -W), or the child's;
  * - close() asks the helper to stop, then stops the helper itself (its pid from ready, checked to be
  *   our executable) — with `open`, the launcher is not the helper;
  * - a request timeout rejects only that request (HelperLostError: its outcome is unknown); the
@@ -17,6 +23,7 @@
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { createInterface, type Interface } from "node:readline";
@@ -63,9 +70,10 @@ export interface HelperProcessOptions {
 /**
  * @internal
  * A seam for this package's own tests, not part of its API: src/index.ts does not export it,
- * package.json exports only ".", and `stripInternal` keeps it out of every built declaration. `beforeUnlink` runs in cleanup after
- * the pending FIFO opens were released and before the FIFOs are removed — the window where a late
- * open of an end must still return. Whatever it throws is ignored: cleanup always completes.
+ * package.json exports only ".", and `stripInternal` keeps it out of every built declaration.
+ * `beforeUnlink` runs in cleanup before the FIFOs are removed, while our ends are still open — the
+ * window where a late open of an end must still return. Whatever it throws is ignored: cleanup
+ * always completes.
  */
 export const fifoTestHooks: {
   beforeUnlink?: (fifos: {
@@ -83,13 +91,6 @@ type Pending = {
   reject: (e: Error) => void;
   timer: NodeJS.Timeout;
 };
-
-/** One end of a FIFO we open: whether its (blocking) open completed, and how to release it if not. */
-interface FifoEnd {
-  readonly path: string;
-  readonly stream: Readable | Writable;
-  opened: boolean;
-}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /**
@@ -129,7 +130,7 @@ export class HelperProcess implements HelperLink {
   #child: ChildProcess | undefined;
   #childExited = false;
   #fifoDir: string | undefined;
-  readonly #fifos: FifoEnd[] = [];
+  readonly #fifoSockets: net.Socket[] = [];
   readonly #readers: Interface[] = [];
   #closed = false;
   #stopping: Promise<void> = Promise.resolve();
@@ -184,6 +185,19 @@ export class HelperProcess implements HelperLink {
         path.join(this.#fifoDir as string, n),
       ) as [string, string, string];
       for (const f of [fin, fout, ferr]) execFileSync("mkfifo", [f]);
+      const { O_RDWR, O_NONBLOCK } = fs.constants;
+      const socket = (file: string, readable: boolean) => {
+        const s = new net.Socket({
+          fd: fs.openSync(file, O_RDWR | O_NONBLOCK),
+          readable,
+          writable: !readable,
+        });
+        this.#fifoSockets.push(s);
+        return s;
+      };
+      this.#input = socket(fin, false);
+      out = socket(fout, true);
+      err = socket(ferr, true);
       const launcher = opts.launcher ?? ["open"];
       child = spawn(
         launcher[0] as string,
@@ -205,23 +219,6 @@ export class HelperProcess implements HelperLink {
         ],
         { stdio: "ignore" },
       );
-      // Opening a FIFO blocks until the other side opens it; fs streams do that on the threadpool.
-      const input = fs.createWriteStream(fin);
-      out = fs.createReadStream(fout);
-      err = fs.createReadStream(ferr);
-      this.#input = input;
-      const ends: [string, Readable | Writable][] = [
-        [fin, input],
-        [fout, out],
-        [ferr, err],
-      ];
-      for (const [p, stream] of ends) {
-        const end: FifoEnd = { path: p, stream, opened: false };
-        stream.once("open", () => {
-          end.opened = true;
-        });
-        this.#fifos.push(end);
-      }
     }
     this.#child = child;
     for (const s of [this.#input, out, err]) s?.on("error", () => {});
@@ -338,7 +335,10 @@ export class HelperProcess implements HelperLink {
       else this.#child?.once("exit", () => r());
     });
     await this.request("shutdown", {}, { timeoutMs: 5_000 }).catch(() => {});
-    this.#input?.end();
+    // EOF reaches the helper only when every write end of its stdin is closed; ours is O_RDWR, so
+    // close the descriptor once the last request is flushed, not just the writing half.
+    const input = this.#input;
+    input?.end(() => input.destroy());
     await Promise.race([exited, sleep(this.#opts.closeGraceMs ?? 10_000)]);
     await this.#stop();
     this.#onExit(null);
@@ -384,37 +384,12 @@ export class HelperProcess implements HelperLink {
   }
 
   /**
-   * Releases FIFO opens still waiting for their other end, closes streams, removes the FIFOs.
-   *
-   * A stream opens its FIFO end on the threadpool, and that open blocks until the other end is
-   * open. For every end not opened yet we hold an O_RDWR descriptor (on a FIFO, Linux and macOS
-   * open it at once, and it is a reader and a writer) from before the FIFOs are removed until the
-   * streams closed: an open that started before the removal returns at once, one after it fails
-   * with ENOENT. (O_NONBLOCK counterparts were not enough: O_WRONLY|O_NONBLOCK fails with ENXIO
-   * while no reader is waiting yet, and a reader that entered open just after that blocked for
-   * ever — a lost pool thread and a process that could not exit.)
+   * Closes the FIFO sockets and removes the FIFOs. The FIFOs go first, while our ends (O_RDWR) are
+   * still open: an open of an end that started before the removal returns at once (it has both a
+   * reader and a writer), one after it fails with ENOENT. Nothing of ours waits on a FIFO.
    */
   #cleanup(): void {
-    const held: number[] = [];
-    for (const end of this.#fifos) {
-      if (!end.opened) {
-        try {
-          held.push(fs.openSync(end.path, fs.constants.O_RDWR));
-        } catch {
-          // the FIFO is gone already
-        }
-      }
-    }
     for (const r of this.#readers) r.close();
-    const closed = this.#fifos.map(
-      (end) =>
-        new Promise<void>((resolve) => {
-          if (end.stream.closed) resolve();
-          else end.stream.once("close", () => resolve());
-        }),
-    );
-    for (const end of this.#fifos) end.stream.destroy();
-    this.#input?.destroy();
     if (this.#fifoDir !== undefined) {
       const dir = this.#fifoDir;
       try {
@@ -426,16 +401,10 @@ export class HelperProcess implements HelperLink {
       } catch {
         // a test hook never stops the cleanup
       }
-      fs.rmSync(this.#fifoDir, { recursive: true, force: true });
+      fs.rmSync(dir, { recursive: true, force: true });
       this.#fifoDir = undefined;
     }
-    // Our ends close once every stream has (its pending open returned, or failed).
-    void Promise.all(closed).then(() => {
-      for (const fd of held) {
-        try {
-          fs.closeSync(fd);
-        } catch {}
-      }
-    });
+    for (const s of this.#fifoSockets) s.destroy();
+    this.#input?.destroy();
   }
 }

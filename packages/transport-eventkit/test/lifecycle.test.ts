@@ -178,6 +178,36 @@ describe("which executable a pid runs (CI on Linux)", () => {
   });
 });
 
+describe("FIFOs and the threadpool (R-001 live run, macOS 26.5.2)", () => {
+  it("two helpers at once: requests are still written and answered", async () => {
+    // A quiet FIFO read through an fs stream holds a threadpool thread; two helpers (out + err
+    // each) held all four, and the next request was never written.
+    const a = await HelperProcess.start({
+      appPath: "/fake.app",
+      launcher: FAKE_OPEN,
+      helperName: "node",
+    });
+    const b = await HelperProcess.start({
+      appPath: "/fake.app",
+      launcher: FAKE_OPEN,
+      helperName: "node",
+    });
+    try {
+      expect(await a.request("ping", {}, { timeoutMs: 3000 })).toMatchObject({
+        ok: true,
+        op: "ping",
+      });
+      expect(await b.request("ping", {}, { timeoutMs: 3000 })).toMatchObject({
+        ok: true,
+        op: "ping",
+      });
+    } finally {
+      await a.close();
+      await b.close();
+    }
+  }, 20_000);
+});
+
 describe("close and request timeouts (P2-4, timeout policy)", () => {
   it("forced close stops the helper itself, not only the launcher", async () => {
     process.env.FAKE_HELPER_MODE = "ignore-shutdown";
