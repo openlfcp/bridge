@@ -5,7 +5,10 @@
 // - helper.pid is written once the helper is ready, removed on stop;
 // - a ping every 30 s; no answer (the ping's own timeout, 10 s) or an unexpected exit → restart;
 // - more than 3 restarts within 5 min → unavailable: no more restarts, the host sets the hold
-//   helper_unavailable on the bindings of this transport (§7.5) until a person resumes.
+//   helper_unavailable on the bindings of this transport (§7.5) until a person resumes;
+// - stop() wins over a ping or restart in flight: each stop starts a new generation, work of an
+//   older one never launches a helper, and a helper whose start was in flight is closed before
+//   stop() resolves (review PR 9 P2-3).
 
 import { execFileSync } from "node:child_process";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -83,6 +86,10 @@ export class HelperSupervisor {
   #timer: unknown;
   #offExit: (() => void) | undefined;
   #busy: Promise<void> = Promise.resolve();
+  /** Bumped by stop(): work started under an older generation must not launch a helper. */
+  #gen = 0;
+  /** The launch in flight (including closing a helper that came up after stop). */
+  #launching: Promise<unknown> | undefined;
 
   constructor(options: SupervisorOptions) {
     this.#o = options;
@@ -98,8 +105,11 @@ export class HelperSupervisor {
 
   /** Stops an orphan from helper.pid (if ours), starts the helper, starts pinging. */
   async start(): Promise<void> {
+    const gen = this.#gen;
     await this.#stopOrphan();
-    await this.#launch();
+    if (gen !== this.#gen) return;
+    await this.#launch(gen);
+    if (gen !== this.#gen) return;
     const every = this.#o.pingEveryMs ?? 30_000;
     const h = (this.#o.setInterval ?? setInterval)(() => {
       void this.pingNow();
@@ -110,32 +120,39 @@ export class HelperSupervisor {
 
   /** One supervision round (the timer calls it; tests too). */
   pingNow(): Promise<void> {
+    const gen = this.#gen;
     this.#busy = this.#busy.then(async () => {
-      if (this.#state !== "running" || this.#helper === undefined) return;
+      const helper = this.#helper;
+      if (gen !== this.#gen || this.#state !== "running" || helper === undefined) return;
       try {
-        await this.#helper.ping();
+        await helper.ping();
       } catch {
-        await this.#restart("no answer to ping");
+        if (gen !== this.#gen || this.#helper !== helper) return;
+        await this.#restart("no answer to ping", gen);
       }
     });
     return this.#busy;
   }
 
   async stop(): Promise<void> {
+    this.#gen++;
     if (this.#timer !== undefined)
       (this.#o.clearInterval ?? clearInterval)(this.#timer as NodeJS.Timeout);
     this.#timer = undefined;
     this.#state = "stopped";
     this.#offExit?.();
-    await this.#helper?.close();
+    const helper = this.#helper;
     this.#helper = undefined;
+    await helper?.close();
+    // A start in flight finishes under the old generation and closes its helper itself.
+    await this.#launching;
     rmSync(this.#o.pidFile, { force: true });
   }
 
   /** A person resumed after helper_unavailable: try again with a fresh budget. */
   async resume(): Promise<void> {
     this.#restarts = [];
-    if (this.#state === "unavailable") await this.#launch();
+    if (this.#state === "unavailable") await this.#launch(this.#gen);
   }
 
   /**
@@ -166,19 +183,33 @@ export class HelperSupervisor {
     rmSync(this.#o.pidFile, { force: true });
   }
 
-  async #launch(): Promise<void> {
-    const helper = await this.#o.start();
-    this.#helper = helper;
-    this.#state = "running";
-    if (helper.pid !== undefined) writeFileSync(this.#o.pidFile, `${helper.pid}\n`);
-    this.#offExit = helper.onExit(() => {
-      if (this.#helper === helper && this.#state === "running") {
-        this.#busy = this.#busy.then(() => this.#restart("the helper exited"));
+  /** Starts a helper for generation `gen`; one that comes up after a stop is closed at once. */
+  #launch(gen: number): Promise<void> {
+    const run = (async () => {
+      const helper = await this.#o.start();
+      if (gen !== this.#gen) {
+        await helper.close().catch(() => {});
+        return;
       }
+      this.#helper = helper;
+      this.#state = "running";
+      if (helper.pid !== undefined) writeFileSync(this.#o.pidFile, `${helper.pid}\n`);
+      this.#offExit = helper.onExit(() => {
+        if (gen === this.#gen && this.#helper === helper && this.#state === "running") {
+          this.#busy = this.#busy.then(() => this.#restart("the helper exited", gen));
+        }
+      });
+    })();
+    const settled = run.catch(() => {});
+    this.#launching = settled;
+    void settled.then(() => {
+      if (this.#launching === settled) this.#launching = undefined;
     });
+    return run;
   }
 
-  async #restart(reason: string): Promise<void> {
+  async #restart(reason: string, gen: number): Promise<void> {
+    if (gen !== this.#gen) return;
     const now = (this.#o.now ?? Date.now)();
     const window = this.#o.restartWindowMs ?? 5 * 60_000;
     this.#restarts = [...this.#restarts.filter((t) => now - t < window), now];
@@ -186,6 +217,7 @@ export class HelperSupervisor {
     const old = this.#helper;
     this.#helper = undefined;
     await old?.close().catch(() => {});
+    if (gen !== this.#gen) return;
     rmSync(this.#o.pidFile, { force: true });
     if (this.#restarts.length > (this.#o.maxRestarts ?? 3)) {
       this.#state = "unavailable";
@@ -196,13 +228,14 @@ export class HelperSupervisor {
     }
     this.#state = "restarting";
     try {
-      await this.#launch();
-      if (this.#helper) this.#o.onRestart?.(reason, this.#helper);
+      await this.#launch(gen);
+      if (gen === this.#gen && this.#helper) this.#o.onRestart?.(reason, this.#helper);
     } catch (e) {
+      if (gen !== this.#gen) return;
       // A failed start counts as a restart too; the next ping round tries again.
       this.#state = "running";
       this.#helper = undefined;
-      await this.#restart(`start failed: ${(e as Error).message}`);
+      await this.#restart(`start failed: ${(e as Error).message}`, gen);
     }
   }
 }
