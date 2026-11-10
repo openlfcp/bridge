@@ -572,14 +572,20 @@ export class Bootstrap {
     return { client_id: key, state: "prepared", result_json: null };
   }
 
-  /** A new attempt with a new opKey: only after a person decided (the old outcome stays unknown). */
+  /**
+   * A new attempt with a new opKey: only after a person decided (the old outcome stays unknown).
+   * One transaction (review PR 9 P2-5): a crash leaves either the unknown row or the new attempt,
+   * never neither (which would restart at attempt 1, the old key).
+   */
   #nextAttempt(binding: string, step: string, oldKey: string): void {
     const n = Number(oldKey.split(":").pop() ?? "1") + 1;
-    this.#d.db
-      .prepare("DELETE FROM bootstrap_ops WHERE binding_id = ? AND step = ?")
-      .run(binding, step);
-    this.#newOp(binding, step, Number.isFinite(n) ? n : 2);
-    this.#setStep(binding, step as "list" | "marker");
+    this.#d.db.transaction(() => {
+      this.#d.db
+        .prepare("DELETE FROM bootstrap_ops WHERE binding_id = ? AND step = ?")
+        .run(binding, step);
+      this.#newOp(binding, step, Number.isFinite(n) ? n : 2);
+      this.#setStep(binding, step as "list" | "marker");
+    })();
   }
 
   #setOp(binding: string, step: string, state: OpRow["state"], result?: unknown): OpRow {
