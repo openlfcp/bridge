@@ -336,7 +336,7 @@ async function run(
         limit,
       }))
         env.out(
-          `${e.at}  ${e.level.padEnd(5)}  ${e.kind}${e.bindingId ? ` [${e.bindingId}]` : ""}  ${e.message}`,
+          `${e.ts}  ${e.level.padEnd(5)}  ${e.key}${e.bindingId ? ` [${e.bindingId}]` : ""}  ${e.text}`,
         );
       return EXIT.OK;
     }

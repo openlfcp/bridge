@@ -113,32 +113,31 @@ export class OwnershipGuard {
         break;
       case "foreign":
         if (this.holds.set(bindingId, "foreign_bridge", { instances: v.instances }))
-          this.journal.append(
-            "warn",
-            "ownership.foreign_bridge",
-            "Another bridge marks this section in your Reminders; this bridge stops writing (one bridge per Apple ID).",
-            { bindingId, data: { instances: v.instances } },
-          );
+          this.journal.append("warn", "ownership.foreign_bridge", {
+            bindingId,
+            params: {
+              text: "Another bridge marks this section in your Reminders; this bridge stops writing (one bridge per Apple ID).",
+              ...{ instances: v.instances },
+            },
+          });
         break;
       case "lost":
         this.holds.lift(bindingId, "foreign_bridge");
         if (this.holds.set(bindingId, "ownership_lost"))
-          this.journal.append(
-            "warn",
-            "ownership.lost",
-            "This bridge's marker is gone from Reminders; the bridge stops writing. If the Mac was replaced, finish the takeover; otherwise bind again.",
-            { bindingId },
-          );
+          this.journal.append("warn", "ownership.lost", {
+            bindingId,
+            params: {
+              text: "This bridge's marker is gone from Reminders; the bridge stops writing. If the Mac was replaced, finish the takeover; otherwise bind again.",
+            },
+          });
         break;
       case "ok":
       case "free":
         if (this.holds.lift(bindingId, "foreign_bridge"))
-          this.journal.append(
-            "info",
-            "ownership.foreign_gone",
-            "The other bridge's marker is gone.",
-            { bindingId },
-          );
+          this.journal.append("info", "ownership.foreign_gone", {
+            bindingId,
+            params: { text: "The other bridge's marker is gone." },
+          });
         if (!this.holds.has(bindingId, "ownership_lost")) this.#checked.add(bindingId);
         break;
     }
