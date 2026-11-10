@@ -1,6 +1,7 @@
 // Helper supervision (D-010 r4 §8.2): ping, restart, restart budget, orphan from helper.pid.
 
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -129,6 +130,37 @@ describe("HelperSupervisor", () => {
     } finally {
       orphan.kill();
       other.kill();
+    }
+  });
+  it("an orphan that ignores SIGTERM is killed before the replacement starts (review PR 9 P2-4)", async () => {
+    const orphan = spawn(
+      process.execPath,
+      ["-e", "process.on('SIGTERM',()=>{});console.log('ready');setInterval(()=>{},1000)"],
+      { stdio: ["ignore", "pipe", "ignore"] },
+    );
+    try {
+      await once(orphan.stdout, "data");
+      const dir = mkdtempSync(join(tmpdir(), "lfcp-sup-"));
+      const pidFile = join(dir, "helper.pid");
+      writeFileSync(pidFile, `${orphan.pid}\n`);
+      let orphanAliveAtStart: boolean | undefined;
+      const s = new HelperSupervisor({
+        start: async () => {
+          orphanAliveAtStart = orphan.exitCode === null && orphan.signalCode === null;
+          return new FakeHelper();
+        },
+        pidFile,
+        isOurs: (p) => p === orphan.pid,
+        orphanGraceMs: 300,
+        setInterval: () => ({}),
+        clearInterval: () => {},
+      });
+      await s.start();
+      expect(orphanAliveAtStart).toBe(false);
+      expect(orphan.signalCode).toBe("SIGKILL");
+      await s.stop();
+    } finally {
+      orphan.kill("SIGKILL");
     }
   });
 });
