@@ -83,9 +83,17 @@ APP="$OUT/$APP_NAME"
 # The identity must be there (read-only lookup) before anything is built or changed.
 find_args=(find-identity -v -p codesigning)
 [ -z "$keychain" ] || find_args+=("$keychain")
-if ! security "${find_args[@]}" | grep -F -- "$identity" >/dev/null; then
-  die "no valid code-signing identity \"$identity\"${keychain:+ in $keychain}"
+identities="$(security "${find_args[@]}")" || die "cannot list the code-signing identities"
+# The identity's line: `  1) <SHA-1> "<name>"`. A SHA-1 counts only when its name is a Developer ID
+# Application identity (review PR 14 P2-2); a name must be one exactly.
+if grep -Eq '^[0-9A-Fa-f]{40}$' <<<"$identity"; then
+  match="$(grep -i -- " $identity \"" <<<"$identities" | head -1 || true)"
+else
+  match="$(grep -F -- "\"$identity\"" <<<"$identities" | head -1 || true)"
 fi
+[ -n "$match" ] || die "no valid code-signing identity \"$identity\"${keychain:+ in $keychain}"
+grep -q '"Developer ID Application: ' <<<"$match" ||
+  die "\"$identity\" is not a Developer ID Application identity: ${match#*) }"
 
 if [ "$add_to_list" = 1 ]; then
   # Read and check the list before changing anything (review PR 14 P2-1): a failed or empty read
@@ -134,6 +142,8 @@ codesign -d --verbose=2 "$APP" 2>&1 | grep -E '^(Identifier|Authority|TeamIdenti
 details="$(codesign -d --verbose=2 "$APP" 2>&1)"
 grep -q "Identifier=$BUNDLE_ID" <<<"$details" || die "signed identifier is not $BUNDLE_ID"
 grep -q 'flags=.*runtime' <<<"$details" || die "the hardened runtime flag is missing"
+grep -q '^Authority=Developer ID Application: ' <<<"$details" ||
+  die "the app is not signed by a Developer ID Application identity: $(grep -m1 '^Authority=' <<<"$details" || echo 'no authority')"
 codesign -d --entitlements - "$APP" 2>/dev/null | grep -q 'com.apple.security.personal-information.calendars' ||
   die "the calendars entitlement is missing from the signature"
 

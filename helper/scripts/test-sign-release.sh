@@ -40,6 +40,7 @@ stub security '
 case "$1" in
   find-identity)
     [ -f "'"$T"'/have-identity" ] && echo "  1) 0123456789ABCDEF0123456789ABCDEF01234567 \"'"$ID"'\""
+    [ -f "'"$T"'/have-dev-identity" ] && echo "  2) FEDCBA9876543210FEDCBA9876543210FEDCBA98 \"Apple Development: Test Owner (ABCDE12345)\""
     ;;
   list-keychains)
     if [ "${4:-}" = "-s" ]; then
@@ -55,7 +56,8 @@ if [ "$1" = "-d" ] && [ "$2" = "--verbose=2" ]; then
   echo "Identifier=org.openlfcp.bridge.reminders" >&2
   if [ -f "'"$T"'/no-runtime" ]; then echo "CodeDirectory v=20500 size=1 flags=0x0(none)" >&2
   else echo "CodeDirectory v=20500 size=1 flags=0x10000(runtime)" >&2; fi
-  echo "Authority='"$ID"'" >&2
+  if [ -f "'"$T"'/dev-authority" ]; then echo "Authority=Apple Development: Test Owner (ABCDE12345)" >&2
+  else echo "Authority='"$ID"'" >&2; fi
 fi
 if [ "$1" = "-d" ] && [ "$2" = "--entitlements" ]; then
   echo "<key>com.apple.security.personal-information.calendars</key><true/>"
@@ -141,5 +143,17 @@ run --identity "$ID" --keychain "$KC" --add-to-search-list; rc=$?
 [ "$rc" != 0 ] && grep -q 'could not restore the keychain search list' "$T/stderr" && grep -q 'login.keychain-db' "$T/stderr" &&
   ok "a failed restore of the search list fails the run and prints the list to restore" || bad "restore failure ($rc)"
 rm "$T/restore-fails"
+
+# ---------- review PR 14 P2-2: only Developer ID Application ----------
+touch "$T/have-dev-identity"
+run --identity FEDCBA9876543210FEDCBA9876543210FEDCBA98; rc=$?
+[ "$rc" = 2 ] && ! called codesign && ok "the SHA-1 of an Apple Development identity is refused" || bad "dev SHA-1 ($rc)"
+run --identity 0123456789ABCDEF0123456789ABCDEF01234567; rc=$?
+[ "$rc" = 0 ] && ok "the SHA-1 of the Developer ID Application identity signs" || bad "devid SHA-1 ($rc)"
+rm "$T/have-dev-identity"
+touch "$T/dev-authority"
+run --identity "$ID"; rc=$?
+[ "$rc" = 2 ] && grep -q 'not signed by a Developer ID Application' "$T/stderr" && ok "a signature whose authority is not Developer ID is refused" || bad "authority ($rc)"
+rm "$T/dev-authority"
 
 if [ "$fails" = 0 ]; then echo "test-sign-release: all passed"; else echo "test-sign-release: $fails failed"; exit 1; fi
