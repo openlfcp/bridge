@@ -12,9 +12,12 @@ public final class Server {
     /// How long one request may run (respond). A store call that never returns would otherwise
     /// hold `queue` for good (R-001 live run 2).
     public let opTimeout: TimeInterval
-    /// Where respond runs a request; replaced when a request passes its deadline.
-    private var worker = DispatchQueue(label: "helper.worker.0")
-    private var workers = 0
+    /// Where respond runs requests.
+    private let worker = DispatchQueue(label: "helper.worker")
+    /// A request passed its deadline: its call may still be running on `worker` with this Server's
+    /// state (gate, allowlist, backend). Nothing else may run beside it (review #23 P1-2): every
+    /// later request is refused, and the executable exits so the host starts a new helper.
+    public private(set) var stalled = false
 
     // Write allowlist (second line of defense, D-010 §8.1). Empty until `hello`.
     private var allowListIds: Set<String> = []
@@ -79,11 +82,17 @@ public final class Server {
     // MARK: Requests
 
     /// Handles one request line within `opTimeout` (call it on `queue`, one at a time). Past the
-    /// deadline the answer is `eventkit_timeout` for that request, a `stalled` event tells the host
-    /// (it restarts the helper and journals it), and the next request runs on a new worker after
-    /// `backend.abandon()`. The stuck call is left to finish or not; nothing it returns is sent.
+    /// deadline the answer is `eventkit_timeout` for that request (its outcome is unknown), a
+    /// `stalled` event tells the host, and the server is `stalled`: every later request is answered
+    /// `helper_stalled` at once, without the backend. The stuck call is left as it is; the
+    /// executable exits, which ends it.
     public func respond(line: String) -> JSON {
         let t0 = Date()
+        let request = { (try? JSON.parse(line))?.objectValue }
+        if stalled {
+            let error = HelperError(.helperStalled, "the helper stalled on an earlier request and runs nothing more; it is restarting")
+            return ["id": request()?["id"] ?? .null, "ok": false, "error": error.json, "ms": .int(0)]
+        }
         let done = DispatchSemaphore(value: 0)
         let box = Box()
         worker.async {
@@ -91,16 +100,13 @@ public final class Server {
             done.signal()
         }
         if done.wait(timeout: .now() + opTimeout) == .success, let r = box.value { return r }
-        let request = (try? JSON.parse(line))?.objectValue
-        let op = request?["op"]?.stringValue ?? "?"
-        workers += 1
-        worker = DispatchQueue(label: "helper.worker.\(workers)")
-        backend.abandon()
+        stalled = true
+        let op = request()?["op"]?.stringValue ?? "?"
         emit(["event": "stalled", "op": .string(op), "timeoutS": .number(opTimeout), "ts": .number(Server.nowMs())])
         let error = HelperError(.eventkitTimeout,
                                 "\(op) did not finish within \(Int(opTimeout.rounded(.up))) s; its outcome is unknown",
                                 ["op": .string(op)])
-        return ["id": request?["id"] ?? .null, "ok": false, "error": error.json,
+        return ["id": request()?["id"] ?? .null, "ok": false, "error": error.json,
                 "ms": .int(Int(Date().timeIntervalSince(t0) * 1000))]
     }
 

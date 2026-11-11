@@ -9,6 +9,8 @@ public final class MemoryBackend: Backend {
     public let cas = "strong"
     /// Tests may turn the gate on to exercise it.
     public var requiresWriteGate = false
+    /// Tests: runs at the start of every create attempt, before the write guard.
+    public var beforeWriteGuard: (() -> Void)?
     public var onChange: (() -> Void)?
     public private(set) var authorization: Authorization
 
@@ -168,6 +170,7 @@ public final class MemoryBackend: Backend {
         // List, guard and the search for an existing record are part of every attempt: during a
         // retry pause the list may be renamed out of scope or the record may appear.
         let ((item, existing), retries) = try retry.run(isTransient: isReminderKitConflict, reset: {}) { () -> (ItemState, Bool) in
+            beforeWriteGuard?()
             try writeGuard(try self.list(id: list))
             if let it = try find(.url(linkUrl), lists: [list]).first { return (it, true) }
             try maybeFail("create")
@@ -221,6 +224,7 @@ public final class MemoryBackend: Backend {
     public func createMarker(list: String, markerUrl: String,
                              writeGuard: (ListInfo) throws -> Void) throws -> WriteResult {
         let ((item, existing), retries) = try retry.run(isTransient: isReminderKitConflict, reset: {}) { () -> (ItemState, Bool) in
+            beforeWriteGuard?()
             try writeGuard(try self.list(id: list))
             if let it = try find(.url(markerUrl), lists: [list]).first { return (it, true) }
             try maybeFail("marker")

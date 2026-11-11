@@ -50,12 +50,6 @@ public protocol Backend: AnyObject {
     func debug(_ name: String, _ body: [String: JSON]) throws -> JSON
 }
 
-public extension Backend {
-    /// After an operation passed its deadline: drop what the stuck call may still hold (EventKit:
-    /// the store) so the next request starts clean. The memory backend has nothing to drop.
-    func abandon() {}
-}
-
 public enum Marker {
     public static let title = "LFCP bridge · не удалять"
 }

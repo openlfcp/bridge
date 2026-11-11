@@ -20,10 +20,6 @@ final class EventKitBackend: Backend {
     private var observer: NSObjectProtocol?
     private static let gregorian = Calendar(identifier: .gregorian)
 
-    /// A request passed its deadline (Server.respond): the stuck call keeps the old store; the
-    /// next request gets a new one.
-    func abandon() { store = EKEventStore() }
-
     init(retry: RetryPolicy = .standard) {
         self.retry = retry
         // object: nil — the store is replaced after access is granted.
