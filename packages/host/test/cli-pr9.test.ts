@@ -117,11 +117,11 @@ describe("lfcp-bridge (PR 9 commands)", () => {
     expect([r.code, r.err]).toEqual([EXIT.NEEDS_PERSON, expect.stringContaining("list_exists")]);
   });
 
-  it("verify binds an 'LFCP Verify · …' list and says that apply comes with PR 8", async () => {
+  it("verify binds an 'LFCP Verify · …' list and says what comes next (dry-run, approve, run)", async () => {
     const m = await machine();
     const r = await m.call("verify", "--section", "Test");
     expect(r.out).toContain('"LFCP Verify · Test"');
-    expect(r.out).toContain("PR 8");
+    expect(r.out).toContain("lfcp-bridge approve");
   });
 
   it("stop blocks bind (exit 5); resume lifts it", async () => {
@@ -181,11 +181,15 @@ describe("lfcp-bridge (PR 9 commands)", () => {
     expect(state()).toBe(before);
   });
 
-  it("still answers 'not available' for commands after PR 9's part 1", async () => {
+  it("still answers 'not available' for commands of later PRs; run needs the machine's process", async () => {
     const m = await machine();
+    expect(await m.call("conflicts")).toMatchObject({
+      code: EXIT.USAGE,
+      err: "conflicts: not available in this build (D-010 PR 10)",
+    });
     expect(await m.call("run")).toMatchObject({
       code: EXIT.USAGE,
-      err: "run: not available in this build (D-010 PR 9 (after 8))",
+      err: "run: not available on this machine",
     });
   });
 
