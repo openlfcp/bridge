@@ -33,7 +33,7 @@ import { pairedSections } from "../lfcp/fallback/paired-sections.js";
 import { SectionHost, type SectionHostOptions } from "../lfcp/section-host.js";
 import { DatabaseKV } from "../runtime.js";
 import { HelperSupervisor } from "../supervisor.js";
-import { writesVerified } from "../verification.js";
+import { type HelperIdentity, writesVerified } from "../verification.js";
 import { BridgeProcess, type InstallationPorts } from "./process.js";
 
 /** The ports of every active installation; close() closes their storage. */
@@ -100,6 +100,25 @@ export function macOSVersion(): string {
 }
 
 /** The run process of this machine, started; stop() stops it all. */
+/**
+ * The EventKit transport for this helper build and macOS (review PR 9b #29): its capability
+ * writesVerified — what the executor's permissions read for a normal binding — is the config's
+ * verification record for exactly this helper and macOS (§7.6). The transport is made once the
+ * helper answered, when its version is known.
+ */
+export function eventKitTransportFor(
+  config: BridgeConfig,
+  helper: HelperIdentity,
+  o: { readonly appPath: string; readonly link: () => Promise<HelperLink> },
+): EventKitTransport {
+  return new EventKitTransport({
+    appPath: o.appPath,
+    writes: "off",
+    writesVerified: writesVerified(config, helper),
+    link: o.link,
+  });
+}
+
 export async function machineProcess(o: {
   readonly db: BridgeDatabase;
   readonly config: BridgeConfig;
@@ -110,15 +129,7 @@ export async function machineProcess(o: {
   const holds = new Holds(db);
   const appPath = config.helperPath ?? paths.helperApp;
   let current: HelperLink | undefined;
-  const transport = new EventKitTransport({
-    appPath,
-    writes: "off",
-    writesVerified: false,
-    link: async () => {
-      if (current === undefined) throw new Error("the helper is not running");
-      return current;
-    },
-  });
+  let transport: EventKitTransport | undefined;
   const lists = (
     db
       .prepare(
@@ -131,11 +142,15 @@ export async function machineProcess(o: {
     state: new DatabaseKV(db, "eventkit", config.bridgeInstanceId),
     scope: { listTitlePrefixes: [LIST_PREFIX, VERIFY_PREFIX], listIds: lists as never[] },
   };
+  const macOS = macOSVersion();
+  // The helper of the moment: a restart may bring another build (writesVerified follows it).
+  let helper: HelperIdentity = { helperVersion: "", macOS };
   const supervisor = new HelperSupervisor({
     pidFile: paths.helperPid,
     start: async () => {
       const link = await HelperProcess.start({ appPath });
       current = link;
+      helper = { helperVersion: link.ready.helperVersion, macOS };
       return {
         pid: link.ready.pid,
         ping: async () => {
@@ -147,7 +162,7 @@ export async function machineProcess(o: {
       };
     },
     onRestart: () => {
-      void transport.open(openCtx);
+      void transport?.open(openCtx);
     },
     onUnavailable: (reason) => {
       const bound = db
@@ -158,26 +173,54 @@ export async function machineProcess(o: {
           journal.append("error", "helper.unavailable", { bindingId: b.id, params: { reason } });
     },
   });
-  await supervisor.start();
-  await transport.open(openCtx);
-  const helper = { helperVersion: current?.ready.helperVersion ?? "", macOS: macOSVersion() };
-  const opened = await installationPorts(db);
-  const process = new BridgeProcess({
-    db,
-    transport,
-    installations: opened.ports,
-    instanceId: config.bridgeInstanceId,
-    writesVerified: () => writesVerified(config, helper),
-    stopped: () => stopState(paths.home) !== undefined,
-  });
-  await process.start();
+  let opened: Awaited<ReturnType<typeof installationPorts>> | undefined;
+  let process: BridgeProcess | undefined;
+  const release = async () => {
+    await transport?.close().catch(() => {});
+    await supervisor.stop().catch(() => {});
+    opened?.close();
+  };
+  try {
+    await supervisor.start();
+    transport = eventKitTransportFor(config, helper, {
+      appPath,
+      link: async () => {
+        if (current === undefined) throw new Error("the helper is not running");
+        return current;
+      },
+    });
+    await transport.open(openCtx);
+    opened = await installationPorts(db);
+    const started = new BridgeProcess({
+      db,
+      transport,
+      installations: opened.ports,
+      instanceId: config.bridgeInstanceId,
+      // The helper of the moment: another build after a restart is not verified by the old record.
+      writesVerified: () => writesVerified(config, helper),
+      stopped: () => stopState(paths.home) !== undefined,
+      // resume --accept helper_unavailable: the supervisor gets a fresh budget (review PR 9b #28).
+      onHoldsLifted: (reasons) => {
+        if (reasons.has("helper_unavailable")) void supervisor.resume();
+      },
+    });
+    process = started;
+    await started.start();
+  } catch (e) {
+    await process?.stop("failed to start").catch(() => {});
+    await release();
+    throw e;
+  }
+  const running = process;
   return {
-    process,
+    process: running,
+    // The helper and the storage are released whatever stop() says (review PR 9b #26).
     async stop(reason = "exit") {
-      await process.stop(reason);
-      await transport.close().catch(() => {});
-      await supervisor.stop();
-      opened.close();
+      try {
+        await running.stop(reason);
+      } finally {
+        await release();
+      }
     },
   };
 }
