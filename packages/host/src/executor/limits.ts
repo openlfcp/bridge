@@ -70,7 +70,8 @@ export interface PlannedWork {
 }
 
 export type Admission =
-  | { readonly ok: true }
+  /** accepted: the guards a person's acceptance let through this time (their pass's work is the new baseline). */
+  | { readonly ok: true; readonly accepted?: readonly HoldReason[] }
   | {
       readonly ok: false;
       readonly holds: readonly HoldReason[];
@@ -101,10 +102,30 @@ export class Limits {
    * Whether `planned` may be prepared for `bindingId`; when not, the holds
    * are set (and journaled) and nothing of the pass is to be prepared.
    */
-  admit(bindingId: string, planned: PlannedWork): Admission {
+  admit(
+    bindingId: string,
+    planned: PlannedWork,
+    /** Guards found outside the limits for this pass (the dry run's guard_count_drop). */
+    extra: readonly HoldReason[] = [],
+  ): Admission {
     const a = this.check(bindingId, planned);
-    if (!a.ok) this.#hold(bindingId, a.holds, a.counts);
-    return a;
+    const found = [...new Set([...(a.ok ? [] : a.holds), ...extra])];
+    const counts = a.ok ? {} : a.counts;
+    const h = new Holds(this.db, this.now);
+    // A pass that needs no acceptance ends the waiting ones: they were for an anomaly that the
+    // moved baseline now absorbs, not for the next one (review PR 9b #24).
+    if (found.length === 0) {
+      h.clearAccepted(bindingId);
+      return { ok: true };
+    }
+    // Accepted guards let this pass through only all together, and are used up with it at once.
+    const notAccepted = found.filter((reason) => !h.hasAccepted(bindingId, reason));
+    if (notAccepted.length === 0) {
+      h.clearAccepted(bindingId);
+      return { ok: true, accepted: found };
+    }
+    this.#hold(bindingId, notAccepted, counts);
+    return { ok: false, holds: notAccepted, counts };
   }
 
   /** What admit would answer, setting nothing: a dry-run shows the guards that would stop it. */
@@ -118,20 +139,27 @@ export class Limits {
       "SELECT count(*) AS n FROM links WHERE binding_id = ? AND state = 'linked'",
       bindingId,
     );
+    // After an accepted anomaly the window starts at its baseline (resume --accept, §7.5).
+    const h = new Holds(this.db, this.now);
+    const after = (reason: HoldReason) => {
+      const a = h.acceptedAt(bindingId, reason);
+      return a !== undefined && a > since ? a : since;
+    };
     const imported = one(
-      "SELECT count(*) AS n FROM intents WHERE binding_id = ? AND direction = 'to_lfcp' AND kind = 'create_task' AND created_at >= ?",
+      "SELECT count(*) AS n FROM intents WHERE binding_id = ? AND direction = 'to_lfcp' AND kind = 'create_task' AND created_at > ?",
       bindingId,
-      since,
+      after("guard_mass_import"),
     );
     const open = one(
       "SELECT count(*) AS n FROM intents WHERE binding_id = ? AND state IN ('prepared','effecting','applied')",
       bindingId,
     );
     const unlinked = one(
-      `SELECT count(*) AS n FROM journal WHERE binding_id = ? AND ts >= ?
-         AND key IN (${UNLINK_KEYS.map(() => "?").join(", ")})`,
+      `SELECT count(*) AS n FROM journal WHERE binding_id = ? AND ts > ?
+         AND key IN (${UNLINK_KEYS.map(() => "?").join(", ")})
+         AND coalesce(json_extract(params_json, '$.accepted'), 0) = 0`,
       bindingId,
-      since,
+      after("guard_mass_unlink"),
       ...UNLINK_KEYS,
     );
     const counts = {

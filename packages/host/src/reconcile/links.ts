@@ -97,7 +97,12 @@ export class LinkApplier {
   async apply(
     bindingId: string,
     plan: Plan,
-    o: { readonly executor?: Executor; readonly guards?: readonly string[] } = {},
+    o: {
+      readonly executor?: Executor;
+      readonly guards?: readonly string[];
+      /** The run of this pass's plan: an accepted count drop makes it the new baseline (#32). */
+      readonly runId?: string;
+    } = {},
   ): Promise<LinkApplyResult> {
     const db = this.#o.db;
     const b = db
@@ -134,25 +139,31 @@ export class LinkApplier {
       if (where?.kind === "elsewhere" || (t.kind === "apple_missing" && where?.kind === "absent"))
         unlinks++;
     }
-    const admitted = new Limits(db, undefined, this.#now).admit(bindingId, {
-      intents: plan.intents,
-      unlinks,
-    });
+    const admitted = new Limits(db, undefined, this.#now).admit(
+      bindingId,
+      { intents: plan.intents, unlinks },
+      o.guards?.includes("guard_count_drop") ? ["guard_count_drop"] : [],
+    );
     const stopped: HoldReason[] = admitted.ok ? [] : [...admitted.holds];
-    if (o.guards?.includes("guard_count_drop")) {
-      if (holds.set(bindingId, "guard_count_drop", { seen: new Date(this.#now()).toISOString() }))
-        this.#journal.append("error", "guard.limit", {
-          bindingId,
-          params: { holds: "guard_count_drop" },
-        });
-      stopped.push("guard_count_drop");
-    }
+    // An accepted anomaly: this pass's unlinks are journaled as accepted, its imports become the
+    // new baseline — the next pass is not stopped by the very work a person accepted.
+    const accepted = admitted.ok ? (admitted.accepted ?? []) : [];
+    if (accepted.includes("guard_count_drop") && o.runId !== undefined)
+      db.prepare(
+        "UPDATE runs SET stats_json = json_set(coalesce(stats_json, '{}'), '$.countDropAccepted', json('true')) WHERE id = ?",
+      ).run(o.runId);
     if (stopped.length > 0) return { kind: "held", holds: stopped };
 
     // 3. Apply: the link transitions, then the intents.
     const out: LinkOutcome[] = [];
     for (const t of plan.transitions) {
-      const result = this.#one(bindingId, b, t, located.get(t.taskId));
+      const result = this.#one(
+        bindingId,
+        b,
+        t,
+        located.get(t.taskId),
+        accepted.includes("guard_mass_unlink"),
+      );
       out.push({ taskId: t.taskId, transition: t.kind, result });
     }
     const prepared =
@@ -163,6 +174,10 @@ export class LinkApplier {
             { intents: plan.intents, unlinks: 0 },
             { admitted: true },
           ) ?? []);
+    if (accepted.includes("guard_mass_import"))
+      for (const i of prepared)
+        if (i.kind === "create_task")
+          holds.markAccepted(bindingId, "guard_mass_import", i.createdAt);
     return { kind: "applied", outcomes: out, prepared };
   }
 
@@ -179,6 +194,7 @@ export class LinkApplier {
     b: { resource_id: string; target_ref: string | null },
     t: Transition,
     where: Located | undefined,
+    accepted = false,
   ): string {
     const db = this.#o.db;
     const at = new Date(this.#now()).toISOString();
@@ -191,7 +207,11 @@ export class LinkApplier {
         )
         .run(state, reason, at, bindingId, t.taskId, ...from).changes === 1;
     const journal = (level: "info" | "warn", key: string, params: Record<string, unknown> = {}) =>
-      this.#journal.append(level, key, { bindingId, taskId: t.taskId, params });
+      this.#journal.append(level, key, {
+        bindingId,
+        taskId: t.taskId,
+        params: accepted ? { ...params, accepted: true } : params,
+      });
     const dropBases = (fields?: readonly string[]) =>
       fields === undefined
         ? db

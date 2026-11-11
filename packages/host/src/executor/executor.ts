@@ -33,11 +33,12 @@
 // kind, at prepare and again before any call; the effect §7.1 checks is the
 // one of the operation actually sent (review PR 7 #5).
 //
-// Effects are off in this PR (D-010 §11 PR 7): the executor gets as far as
-// the transport and writes nothing. `effects.enabled` writes to Apple only
-// through the fake transport, and to LFCP only through a port marked
-// `offlineTestPort` (tests, the crash suite); any other LFCP port stays
-// effects-off (review PR 7 #4). PR 9 opens it for verification bindings.
+// Effects: without `effects.enabled` the executor gets as far as the transport
+// and writes nothing. With it and no `permit`, it writes to Apple only through
+// the fake transport and to LFCP only through a port marked `offlineTestPort`
+// (tests, the crash suite; review PR 7 #4). The run process (PR 9b) passes
+// `permit`: the write gate of §7.6 / B16 — a verification binding, or
+// writesVerified for this helper build and macOS.
 
 import { randomUUID } from "node:crypto";
 import type {
@@ -127,7 +128,15 @@ export interface ExecutorOptions {
   readonly gates: Gates;
   readonly handler: IntentHandler;
   /** Off in this PR; on only with the fake transport. */
-  readonly effects?: { readonly enabled: boolean };
+  /**
+   * Effects. Without `permit`, only the fake transport and an offlineTestPort write (tests,
+   * the crash suite). With it (the run process, PR 9b), an effect runs when `permit` says so:
+   * the write gate of §7.6 / B16 — a verification binding, or writesVerified.
+   */
+  readonly effects?: {
+    readonly enabled: boolean;
+    readonly permit?: (intent: Intent) => boolean;
+  };
   readonly now?: () => number;
   /** The crash suite's hook: throws to stop at a boundary. */
   readonly crash?: (point: CrashPoint, intent: Intent) => void;
@@ -171,7 +180,11 @@ export class Executor {
   readonly #running = new Set<string>();
 
   constructor(options: ExecutorOptions) {
-    if (options.effects?.enabled === true && options.transport.id !== "fake")
+    if (
+      options.effects?.enabled === true &&
+      options.effects.permit === undefined &&
+      options.transport.id !== "fake"
+    )
       throw new Error(
         "effects are off in this build: they may run only on the fake transport (D-010 PR 7)",
       );
@@ -300,6 +313,28 @@ export class Executor {
   }
 
   /** A start (§5.2 step 2): every open intent, and the unknown outcomes the transport may settle now. */
+  /**
+   * The open intents of one binding, settled without sending anything (review PR 9b #31): a
+   * confirmed done (or a stored receipt) finalized, an applied one finalized, an unknown outcome
+   * quarantined (B19), a not_started one back to prepared — sent later by runDue, after the pass
+   * brought its link up to date, so #stale sees the Task leave the filter, go, or get locked.
+   */
+  async settle(bindingId: string): Promise<readonly Outcome[]> {
+    const out: Outcome[] = [];
+    for (const i of this.#intents.open()) {
+      if (i.bindingId !== bindingId) continue;
+      if (i.state === "effecting")
+        out.push(await this.#exclusive(i.id, () => this.#recover(i, { resend: false })));
+      else if (i.state === "applied")
+        out.push(await this.#exclusive(i.id, async () => this.#finalize(i)));
+    }
+    // Unknown outcomes the transport may have confirmed since (P2-1): finalize, never resend.
+    for (const i of this.#intents.unknownOutcomes())
+      if (i.bindingId === bindingId && i.direction === "to_apple")
+        out.push(await this.#exclusive(i.id, () => this.#settleUnknown(i)));
+    return out;
+  }
+
   async recoverAll(): Promise<readonly Outcome[]> {
     const out: Outcome[] = [];
     for (const i of this.#intents.open()) {
@@ -328,11 +363,15 @@ export class Executor {
   }
 
   /** Runs every prepared intent that is due. */
-  async runDue(): Promise<readonly Outcome[]> {
+  async runDue(
+    /** Only this binding's (the run process: after its own plan and transitions, review PR 9b #31). */
+    bindingId?: string,
+  ): Promise<readonly Outcome[]> {
     const now = new Date(this.#now()).toISOString();
     const out: Outcome[] = [];
     for (const i of this.#intents.open())
-      if (i.state === "prepared" && (i.nextAt === null || i.nextAt <= now))
+      if (bindingId !== undefined && i.bindingId !== bindingId) continue;
+      else if (i.state === "prepared" && (i.nextAt === null || i.nextAt <= now))
         out.push(await this.run(i.id));
     return out;
   }
@@ -487,6 +526,7 @@ export class Executor {
   /** Effects of this intent's direction are on: Apple via the fake transport, LFCP via the offline test port. */
   #effectsOn(i: Intent): boolean {
     if (this.#o.effects?.enabled !== true) return false;
+    if (this.#o.effects.permit !== undefined) return this.#o.effects.permit(i);
     return i.direction === "to_apple"
       ? this.#o.transport.id === "fake"
       : OFFLINE_TEST_PORTS.has(this.#o.lfcp);
@@ -630,7 +670,8 @@ export class Executor {
 
   // ------------------------------------------------------------------ recovery (§5.7)
 
-  async #recover(i: Intent): Promise<Outcome> {
+  async #recover(i: Intent, o: { readonly resend?: boolean } = {}): Promise<Outcome> {
+    const resend = o.resend ?? true;
     if (i.direction === "to_lfcp") {
       const p = i.payload as { readonly resource: string };
       const receipt = await this.#o.lfcp.receipt(resourceId(fromHex(p.resource)), i.operationId);
@@ -640,6 +681,7 @@ export class Executor {
       }
       // Not stored: run it again; its basis is checked again inside stage.
       this.#intents.retry(i.id, this.#now(), { recovered: "not_started" });
+      if (!resend) return { kind: "retry", reason: "not_started" };
       return this.#execute(this.#intents.get(i.id) as Intent);
     }
     const r = await this.#o.transport.recover(i.id);
@@ -650,6 +692,7 @@ export class Executor {
     }
     if (r.state === "not_started") {
       this.#intents.retry(i.id, this.#now(), { recovered: "not_started" });
+      if (!resend) return { kind: "retry", reason: "not_started" };
       return this.#execute(this.#intents.get(i.id) as Intent);
     }
     return this.#unknown(i, r.stage);

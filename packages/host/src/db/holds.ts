@@ -87,6 +87,68 @@ export class Holds {
   }
 
   /** The holds of `binding`, by reason. */
+  /**
+   * `resume --accept <hold>` (§7.5): lifts the hold and accepts the anomaly that set it — the next
+   * pass that would set it again goes through once instead (Limits.admit, the count drop). True
+   * when the hold was set.
+   */
+  accept(binding: string, reason: HoldReason): boolean {
+    check(reason);
+    // Only a hold that is set can be accepted: no permission is kept for an anomaly to come
+    // (review PR 9b #24).
+    const lifted = this.lift(binding, reason);
+    if (!lifted) return false;
+    this.db
+      .prepare(
+        "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+      )
+      .run(`hold_accepted:${binding}:${reason}`, iso(this.now()));
+    this.markAccepted(binding, reason, iso(this.now()));
+    return true;
+  }
+
+  /** An acceptance of `reason` on `binding` waits (not used up). */
+  hasAccepted(binding: string, reason: HoldReason): boolean {
+    return (
+      this.db
+        .prepare("SELECT 1 AS x FROM meta WHERE key = ?")
+        .get(`hold_accepted:${binding}:${reason}`) !== undefined
+    );
+  }
+
+  /** Drops every waiting acceptance of `binding`: a pass that needed none of them ends them. */
+  clearAccepted(binding: string): void {
+    this.db.prepare("DELETE FROM meta WHERE key LIKE ?").run(`hold_accepted:${binding}:%`);
+  }
+
+  /**
+   * Since when an accepted anomaly of `reason` is the new baseline: the guards count only what
+   * came after it (the unlinks of the window, the imports, the count drop's previous pass).
+   */
+  acceptedAt(binding: string, reason: HoldReason): string | undefined {
+    const r = this.db
+      .prepare("SELECT value FROM meta WHERE key = ?")
+      .get(`hold_accepted_at:${binding}:${reason}`) as { value: string } | undefined;
+    return r?.value;
+  }
+
+  /** Moves the baseline of an accepted `reason` to `at` (the accepted pass's own work included). */
+  markAccepted(binding: string, reason: HoldReason, at: string): void {
+    this.db
+      .prepare(
+        "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = max(value, excluded.value)",
+      )
+      .run(`hold_accepted_at:${binding}:${reason}`, at);
+  }
+
+  /** An acceptance of `reason` on `binding` waits: it is used up by this call (true). */
+  takeAccepted(binding: string, reason: HoldReason): boolean {
+    return (
+      this.db.prepare("DELETE FROM meta WHERE key = ?").run(`hold_accepted:${binding}:${reason}`)
+        .changes === 1
+    );
+  }
+
   of(binding: string): readonly Hold[] {
     const rows = this.db
       .prepare(

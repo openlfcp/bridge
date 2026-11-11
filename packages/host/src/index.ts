@@ -19,3 +19,4 @@ export { EXIT, type ExitCode } from "./exit.js";
 export * from "./lfcp/index.js";
 export * from "./migration.js";
 export * from "./reconcile/index.js";
+export * from "./run/index.js";

@@ -10,6 +10,7 @@ import { doctor, worst } from "./doctor.js";
 import { EXIT, type ExitCode } from "./exit.js";
 import { installLaunchAgent, uninstallLaunchAgent } from "./launchd.js";
 import { MigrationError, type MigrationRow, Migrations } from "./migration.js";
+import { bumpControl } from "./run/process.js";
 import { machineRuntime, type Runtime } from "./runtime.js";
 
 export interface CommandInfo {
@@ -269,6 +270,7 @@ async function run(
     }
     case "stop":
       mkdirSync(rt.paths.home, { recursive: true });
+      bumpControl(rt.db);
       stop(
         rt.paths.home,
         typeof opts.get("reason") === "string" ? String(opts.get("reason")) : "lfcp-bridge stop",
@@ -276,6 +278,7 @@ async function run(
       env.out("STOP written: no effect runs until `lfcp-bridge resume`");
       return EXIT.OK;
     case "resume": {
+      bumpControl(rt.db);
       const accept = opts.get("accept");
       if (typeof accept === "string") {
         const binding = opts.get("binding");
@@ -285,8 +288,8 @@ async function run(
             `lfcp-bridge resume --accept <${HOLD_REASONS.join("|")}> --binding <id>`,
           );
         env.out(
-          rt.holds.lift(binding, accept as HoldReason)
-            ? `hold ${accept} lifted on ${binding}`
+          rt.holds.accept(binding, accept as HoldReason)
+            ? `hold ${accept} lifted and accepted on ${binding}: the next pass goes through`
             : `no hold ${accept} on ${binding}`,
         );
         return EXIT.OK;

@@ -1,3 +1,4 @@
+export { recordDecisions } from "./bases.js";
 export { bridgeHandler, currentLfcp, type HandlerOptions } from "./handler.js";
 export {
   LinkApplier,

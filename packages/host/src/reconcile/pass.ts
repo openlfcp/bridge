@@ -138,10 +138,21 @@ export class Pass {
 
   /** A full pass without effects: the plan, its conflicts and the guards it would trip, stored as a dry run. */
   async dryRun(bindingId: string): Promise<DryRunResult> {
+    return this.plan(bindingId, "dry");
+  }
+
+  /**
+   * A pass's plan, recorded as a run of `kind`: "dry" (a dry run, what approve reads) or "apply"
+   * (the run process plans to apply it; PR 9b).
+   */
+  async plan(bindingId: string, kind: "dry" | "apply"): Promise<DryRunResult> {
     const runId = randomUUID();
     const started = new Date(this.#now()).toISOString();
     const refused = (reason: DryRunRefusal, detail?: string): DryRunResult => {
-      this.#record(runId, bindingId, started, reason, { reason, ...(detail ? { detail } : {}) });
+      this.#record(kind, runId, bindingId, started, reason, {
+        reason,
+        ...(detail ? { detail } : {}),
+      });
       return { kind: "refused", runId, reason, ...(detail === undefined ? {} : { detail }) };
     };
     const db = this.#o.db;
@@ -283,7 +294,7 @@ export class Pass {
       guards.push("guard_count_drop");
     for (const h of p.holds) guards.push(h);
     const guardCounts = admission.ok ? {} : admission.counts;
-    this.#record(runId, b.id, started, "planned", { ...p.counts, guards }, p);
+    this.#record(kind, runId, b.id, started, "planned", { ...p.counts, guards }, p);
     return { kind: "planned", runId, plan: p, guards, guardCounts };
   }
 
@@ -297,21 +308,26 @@ export class Pass {
   #previousCounts(bindingId: string): { linkedApple: number; linkedLfcp: number } | undefined {
     const rows = this.#o.db
       .prepare(
-        "SELECT stats_json FROM runs WHERE binding_id = ? AND kind IN ('dry','apply') AND outcome = 'planned' ORDER BY started_at DESC, rowid DESC",
+        "SELECT stats_json, started_at FROM runs WHERE binding_id = ? AND kind IN ('dry','apply') AND outcome = 'planned' ORDER BY started_at DESC, rowid DESC",
       )
-      .iterate(bindingId) as IterableIterator<{ stats_json: string | null }>;
+      .iterate(bindingId) as IterableIterator<{ stats_json: string | null; started_at: string }>;
+
     for (const r of rows) {
       const s = parse(r.stats_json) as
         | { linkedApple?: unknown; linkedLfcp?: unknown; guards?: unknown }
         | undefined;
       if (typeof s?.linkedApple !== "number" || typeof s.linkedLfcp !== "number") continue;
-      if (Array.isArray(s.guards) && s.guards.includes("guard_count_drop")) continue;
+      // A run that showed the drop is a baseline only if it is the very pass a person's accept let
+      // through (review PR 9b #32); a later dry run never is, whatever was accepted before.
+      const flagged = Array.isArray(s.guards) && s.guards.includes("guard_count_drop");
+      if (flagged && (s as { countDropAccepted?: unknown }).countDropAccepted !== true) continue;
       return { linkedApple: s.linkedApple, linkedLfcp: s.linkedLfcp };
     }
     return undefined;
   }
 
   #record(
+    kind: "dry" | "apply",
     runId: string,
     bindingId: string,
     started: string,
@@ -322,10 +338,11 @@ export class Pass {
     this.#o.db
       .prepare(
         `INSERT INTO runs (id, kind, binding_id, started_at, ended_at, outcome, stats_json, plan_json)
-         VALUES (?, 'dry', ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         runId,
+        kind,
         bindingId,
         started,
         new Date(this.#now()).toISOString(),
