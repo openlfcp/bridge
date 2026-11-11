@@ -119,6 +119,41 @@ export function eventKitTransportFor(
   });
 }
 
+/**
+ * The helper came back — the supervisor restarted it, or a person's resume gave it a fresh
+ * budget (review PR 9b #33): the transport is opened on the new helper (scope and write mode as
+ * they were), then `after` (a full pass: ownership, the open intents settled, the effects). One
+ * at a time; a failure is journaled and does not block the next one.
+ */
+export function helperReconnector(o: {
+  readonly supervisor: { resume(): Promise<void> };
+  readonly reopen: () => Promise<unknown>;
+  readonly after?: () => Promise<unknown>;
+  readonly journal?: Journal;
+}): { restarted(): Promise<void>; resume(): Promise<void> } {
+  let chain: Promise<void> = Promise.resolve();
+  const step = (work: () => Promise<void>) => {
+    chain = chain.then(work).catch((e) => {
+      o.journal?.append("error", "helper.reconnect_failed", {
+        params: { error: e instanceof Error ? e.message : String(e) },
+      });
+    });
+    return chain;
+  };
+  const reconnect = async () => {
+    await o.reopen();
+    await o.after?.();
+  };
+  return {
+    restarted: () => step(reconnect),
+    resume: () =>
+      step(async () => {
+        await o.supervisor.resume();
+        await reconnect();
+      }),
+  };
+}
+
 export async function machineProcess(o: {
   readonly db: BridgeDatabase;
   readonly config: BridgeConfig;
@@ -148,7 +183,14 @@ export async function machineProcess(o: {
   const supervisor = new HelperSupervisor({
     pidFile: paths.helperPid,
     start: async () => {
-      const link = await HelperProcess.start({ appPath });
+      // onUnmatched (transport-eventkit #18 on main): a helper line that answers nothing goes to
+      // the journal. Passed as a variable: on a base without the option it is simply unused.
+      const options = {
+        appPath,
+        onUnmatched: (line: string) =>
+          journal.append("warn", "helper.unmatched", { params: { line: line.slice(0, 200) } }),
+      };
+      const link = await HelperProcess.start(options);
       current = link;
       helper = { helperVersion: link.ready.helperVersion, macOS };
       return {
@@ -162,7 +204,7 @@ export async function machineProcess(o: {
       };
     },
     onRestart: () => {
-      void transport?.open(openCtx);
+      void reconnector.restarted();
     },
     onUnavailable: (reason) => {
       const bound = db
@@ -175,6 +217,15 @@ export async function machineProcess(o: {
   });
   let opened: Awaited<ReturnType<typeof installationPorts>> | undefined;
   let process: BridgeProcess | undefined;
+  const reconnector = helperReconnector({
+    supervisor,
+    reopen: async () => {
+      if (transport === undefined) throw new Error("no transport yet");
+      return transport.open(openCtx);
+    },
+    after: async () => process?.passAll(),
+    journal,
+  });
   const release = async () => {
     await transport?.close().catch(() => {});
     await supervisor.stop().catch(() => {});
@@ -201,7 +252,7 @@ export async function machineProcess(o: {
       stopped: () => stopState(paths.home) !== undefined,
       // resume --accept helper_unavailable: the supervisor gets a fresh budget (review PR 9b #28).
       onHoldsLifted: (reasons) => {
-        if (reasons.has("helper_unavailable")) void supervisor.resume();
+        if (reasons.has("helper_unavailable")) void reconnector.resume();
       },
     });
     process = started;
