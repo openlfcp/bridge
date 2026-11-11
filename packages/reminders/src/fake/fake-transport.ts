@@ -105,7 +105,31 @@ export class FakeStore {
 
   /** Every write notifies every transport, own writes included (like EKEventStoreChanged). */
   changed(itemIds: readonly string[]): void {
-    for (const cb of [...this.#listeners]) setTimeout(() => cb(itemIds), 0);
+    for (const cb of [...this.#listeners]) {
+      this.#undelivered++;
+      setTimeout(() => {
+        try {
+          cb(itemIds);
+        } finally {
+          this.#undelivered--;
+          if (this.#undelivered === 0) for (const w of this.#settledWaiters.splice(0)) w();
+        }
+      }, 0);
+    }
+  }
+
+  #undelivered = 0;
+  #settledWaiters: (() => void)[] = [];
+
+  /** Change notifications queued but not delivered yet (tests). */
+  get undelivered(): number {
+    return this.#undelivered;
+  }
+
+  /** Resolves once every change notification queued so far has been delivered (tests). */
+  settled(): Promise<void> {
+    if (this.#undelivered === 0) return Promise.resolve();
+    return new Promise((r) => this.#settledWaiters.push(r));
   }
 
   view(it: StoredItem): AppleItem {
