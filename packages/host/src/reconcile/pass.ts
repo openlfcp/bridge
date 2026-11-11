@@ -33,7 +33,7 @@ import {
 } from "@openlfcp/bridge-reminders/adapter";
 import { fromHex, type PrincipalId, resourceId } from "@openlfcp/core";
 import type { BridgeDatabase } from "../db/database.js";
-import { type HoldReason, Holds } from "../db/holds.js";
+import type { HoldReason } from "../db/holds.js";
 import { Limits } from "../executor/limits.js";
 import { sectionEnd } from "../lfcp/fallback/section-end.js";
 import { importTaskFactory } from "./import-task.js";
@@ -311,15 +311,16 @@ export class Pass {
         "SELECT stats_json, started_at FROM runs WHERE binding_id = ? AND kind IN ('dry','apply') AND outcome = 'planned' ORDER BY started_at DESC, rowid DESC",
       )
       .iterate(bindingId) as IterableIterator<{ stats_json: string | null; started_at: string }>;
-    // A drop a person accepted (resume --accept): the passes after it are the new baseline.
-    const accepted = new Holds(this.#o.db, this.#now).acceptedAt(bindingId, "guard_count_drop");
+
     for (const r of rows) {
       const s = parse(r.stats_json) as
         | { linkedApple?: unknown; linkedLfcp?: unknown; guards?: unknown }
         | undefined;
       if (typeof s?.linkedApple !== "number" || typeof s.linkedLfcp !== "number") continue;
+      // A run that showed the drop is a baseline only if it is the very pass a person's accept let
+      // through (review PR 9b #32); a later dry run never is, whatever was accepted before.
       const flagged = Array.isArray(s.guards) && s.guards.includes("guard_count_drop");
-      if (flagged && !(accepted !== undefined && r.started_at >= accepted)) continue;
+      if (flagged && (s as { countDropAccepted?: unknown }).countDropAccepted !== true) continue;
       return { linkedApple: s.linkedApple, linkedLfcp: s.linkedLfcp };
     }
     return undefined;

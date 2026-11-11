@@ -313,6 +313,28 @@ export class Executor {
   }
 
   /** A start (§5.2 step 2): every open intent, and the unknown outcomes the transport may settle now. */
+  /**
+   * The open intents of one binding, settled without sending anything (review PR 9b #31): a
+   * confirmed done (or a stored receipt) finalized, an applied one finalized, an unknown outcome
+   * quarantined (B19), a not_started one back to prepared — sent later by runDue, after the pass
+   * brought its link up to date, so #stale sees the Task leave the filter, go, or get locked.
+   */
+  async settle(bindingId: string): Promise<readonly Outcome[]> {
+    const out: Outcome[] = [];
+    for (const i of this.#intents.open()) {
+      if (i.bindingId !== bindingId) continue;
+      if (i.state === "effecting")
+        out.push(await this.#exclusive(i.id, () => this.#recover(i, { resend: false })));
+      else if (i.state === "applied")
+        out.push(await this.#exclusive(i.id, async () => this.#finalize(i)));
+    }
+    // Unknown outcomes the transport may have confirmed since (P2-1): finalize, never resend.
+    for (const i of this.#intents.unknownOutcomes())
+      if (i.bindingId === bindingId && i.direction === "to_apple")
+        out.push(await this.#exclusive(i.id, () => this.#settleUnknown(i)));
+    return out;
+  }
+
   async recoverAll(): Promise<readonly Outcome[]> {
     const out: Outcome[] = [];
     for (const i of this.#intents.open()) {
@@ -644,7 +666,8 @@ export class Executor {
 
   // ------------------------------------------------------------------ recovery (§5.7)
 
-  async #recover(i: Intent): Promise<Outcome> {
+  async #recover(i: Intent, o: { readonly resend?: boolean } = {}): Promise<Outcome> {
+    const resend = o.resend ?? true;
     if (i.direction === "to_lfcp") {
       const p = i.payload as { readonly resource: string };
       const receipt = await this.#o.lfcp.receipt(resourceId(fromHex(p.resource)), i.operationId);
@@ -654,6 +677,7 @@ export class Executor {
       }
       // Not stored: run it again; its basis is checked again inside stage.
       this.#intents.retry(i.id, this.#now(), { recovered: "not_started" });
+      if (!resend) return { kind: "retry", reason: "not_started" };
       return this.#execute(this.#intents.get(i.id) as Intent);
     }
     const r = await this.#o.transport.recover(i.id);
@@ -664,6 +688,7 @@ export class Executor {
     }
     if (r.state === "not_started") {
       this.#intents.retry(i.id, this.#now(), { recovered: "not_started" });
+      if (!resend) return { kind: "retry", reason: "not_started" };
       return this.#execute(this.#intents.get(i.id) as Intent);
     }
     return this.#unknown(i, r.stage);

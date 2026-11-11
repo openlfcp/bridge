@@ -5,7 +5,7 @@
 
 import { receiptOf } from "@openlfcp/client";
 import { toHex } from "@openlfcp/core";
-import { principalRef, setTitle, unassign } from "@openlfcp/shared-objects";
+import { deleteTask, principalRef, setDue, setTitle, unassign } from "@openlfcp/shared-objects";
 import { afterEach, describe, expect, it } from "vitest";
 import { BridgeProcess, bumpControl, Holds } from "../src/index.js";
 import { markerUrl } from "../src/ownership.js";
@@ -435,5 +435,114 @@ describe("review PR 9b", () => {
     await sleep(60);
     await proc.idle();
     expect(lifted).toContain("helper_unavailable");
+  });
+});
+
+describe("review PR 9b r2", () => {
+  /** The next apply dies before anything is sent: the intent stays effecting, the transport says not_started. */
+  const loseBeforeSend = () => {
+    const apply = b.t.apply.bind(b.t);
+    b.t.apply = async () => {
+      b.t.apply = apply;
+      throw new Error("helper gone before sending");
+    };
+  };
+  const latestUpdate = () =>
+    b.db
+      .prepare(
+        "SELECT state, state_reason FROM intents WHERE kind = 'update' ORDER BY id DESC LIMIT 1",
+      )
+      .get() as { state: string; state_reason: string | null };
+
+  it("#31 not_started after the Task left the filter: not resent before the link is up to date — superseded", async () => {
+    b = await bridge({ filter: "mine" });
+    const task = await b.task("A");
+    const proc = processOf();
+    await proc.start();
+    await b.edit(setTitle(b.now(task.id), "B"));
+    loseBeforeSend();
+    expect(await proc.pass("b")).toMatchObject({ outcomes: [{ kind: "lost" }] });
+    expect(latestUpdate().state).toBe("effecting");
+    await b.edit(unassign(b.now(task.id), b.root));
+    await proc.pass("b");
+    expect(linkOf(task.id)?.state).toBe("out_of_filter");
+    expect(latestUpdate()).toEqual({ state: "superseded", state_reason: "link_out_of_filter" });
+    expect(reminders()[0]?.title).toBe("A");
+  });
+
+  it("#31 …the Task deleted: superseded (task_gone), the reminder as it was", async () => {
+    b = await bridge();
+    const task = await b.task("A");
+    const proc = processOf();
+    await proc.start();
+    await b.edit(setTitle(b.now(task.id), "B"));
+    loseBeforeSend();
+    await proc.pass("b");
+    await b.edit(deleteTask(b.now(task.id)));
+    await proc.pass("b");
+    expect(latestUpdate()).toEqual({ state: "superseded", state_reason: "link_task_gone" });
+    expect(reminders()[0]?.title).toBe("A");
+  });
+
+  it("#31 …a recurrence put on the reminder: the due update is superseded (status_locked)", async () => {
+    b = await bridge();
+    const task = await b.task("A", { due: "2026-11-12" });
+    const proc = processOf();
+    await proc.start();
+    await b.edit(setDue(b.now(task.id), "2026-11-20"));
+    loseBeforeSend();
+    await proc.pass("b");
+    b.person.edit(reminders()[0]?.ref as { id: string }, { recurrence: true });
+    await proc.pass("b");
+    expect(latestUpdate()).toEqual({ state: "superseded", state_reason: "status_locked" });
+    expect(reminders()[0]?.due?.date).toBe("2026-11-12");
+  });
+
+  it("#31 a pass settles only its own binding's open intents", async () => {
+    b = await bridge();
+    await b.task("A");
+    const proc = processOf();
+    await proc.start();
+    const at = new Date().toISOString();
+    const other = b.person.createList("LFCP · Other");
+    b.db
+      .prepare(
+        `INSERT INTO bindings (id, installation_id, resource_id, adapter, transport, target_ref, state, created_at)
+         VALUES ('c', 'i', ?, 'apple-reminders', 'fake', ?, 'removed', ?)`,
+      )
+      .run("dd".repeat(32), other.id, at);
+    b.db
+      .prepare(
+        `INSERT INTO intents (id, binding_id, task_id, installation_id, direction, kind, fields_json, basis_json,
+           payload_json, operation_id, state, attempts, created_at) VALUES ('X', 'c', 'T', 'i', 'to_apple', 'update', '["title"]', '{}', '{}', 'brg1:X', 'effecting', 1, ?)`,
+      )
+      .run(at);
+    await proc.pass("b");
+    expect(b.db.prepare("SELECT state FROM intents WHERE id = 'X'").get()).toEqual({
+      state: "effecting",
+    });
+  });
+
+  it("#32 an old count-drop acceptance does not make a later dry run the baseline: the guard stays", async () => {
+    b = await bridge();
+    await b.task("A");
+    await b.sync();
+    await b.sync();
+    const long = new Date(Date.now() - 3 * 3600_000).toISOString();
+    const later = new Date().toISOString();
+    b.db
+      .prepare("INSERT INTO meta (key, value) VALUES ('hold_accepted_at:b:guard_count_drop', ?)")
+      .run(long);
+    b.db
+      .prepare(
+        "INSERT INTO runs (id, kind, binding_id, started_at, ended_at, outcome, stats_json) VALUES ('base', 'apply', 'b', ?, ?, 'planned', ?)",
+      )
+      .run(later, later, JSON.stringify({ linkedApple: 10, linkedLfcp: 10, guards: [] }));
+    await sleep(5);
+    const first = await b.pass.dryRun("b");
+    const second = await b.pass.dryRun("b");
+    if (first.kind !== "planned" || second.kind !== "planned") throw new Error("not planned");
+    expect(first.guards).toContain("guard_count_drop");
+    expect(second.guards).toContain("guard_count_drop");
   });
 });

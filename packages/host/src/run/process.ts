@@ -230,7 +230,8 @@ export class BridgeProcess {
     this.#subscribe();
     for (const i of this.#installations.values()) i.host.start();
     await this.#ownership.checkAll();
-    await this.#executor.recoverAll();
+    // §5.7 at the start, without sending: the passes below send what is still wanted (#31).
+    for (const b of this.#bindings()) await this.#executor.settle(b.id);
     await this.#writeMode();
     this.#ready = true;
     await this.passAll();
@@ -342,8 +343,10 @@ export class BridgeProcess {
     // §6.5: ownership on every pass, before any transition or effect (review PR 9b #23); an
     // incomplete search leaves the binding unchecked, so the executor writes nothing.
     await this.#ownership.check(b.id, b.resource_id);
-    // An answer lost while running (B19): recover it now, not at the next start (review PR 9b #27).
-    if (this.#o.transport.status().state === "ok") await this.#executor.recoverAll();
+    // An answer lost while running (B19): settled now, not at the next start (review PR 9b #27) —
+    // this binding's only, and without sending: a not_started intent goes after the plan and the
+    // link transitions, which may supersede it (review PR 9b #31).
+    if (this.#o.transport.status().state === "ok") await this.#executor.settle(b.id);
     const apply = b.state === "active" && this.#writable(b.id);
     const pass = new Pass({
       db: this.#o.db,
@@ -365,6 +368,7 @@ export class BridgeProcess {
     const applied = await this.#links.apply(b.id, r.plan, {
       executor: this.#executor,
       guards: r.guards,
+      runId: r.runId,
     });
     if (applied.kind === "held") return { kind: "held", runId: r.runId, holds: applied.holds };
     const recorded = recordDecisions(this.#o.db, r.plan, this.#now);

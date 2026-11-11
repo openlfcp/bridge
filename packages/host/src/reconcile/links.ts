@@ -97,7 +97,12 @@ export class LinkApplier {
   async apply(
     bindingId: string,
     plan: Plan,
-    o: { readonly executor?: Executor; readonly guards?: readonly string[] } = {},
+    o: {
+      readonly executor?: Executor;
+      readonly guards?: readonly string[];
+      /** The run of this pass's plan: an accepted count drop makes it the new baseline (#32). */
+      readonly runId?: string;
+    } = {},
   ): Promise<LinkApplyResult> {
     const db = this.#o.db;
     const b = db
@@ -143,6 +148,10 @@ export class LinkApplier {
     // An accepted anomaly: this pass's unlinks are journaled as accepted, its imports become the
     // new baseline — the next pass is not stopped by the very work a person accepted.
     const accepted = admitted.ok ? (admitted.accepted ?? []) : [];
+    if (accepted.includes("guard_count_drop") && o.runId !== undefined)
+      db.prepare(
+        "UPDATE runs SET stats_json = json_set(coalesce(stats_json, '{}'), '$.countDropAccepted', json('true')) WHERE id = ?",
+      ).run(o.runId);
     if (stopped.length > 0) return { kind: "held", holds: stopped };
 
     // 3. Apply: the link transitions, then the intents.
