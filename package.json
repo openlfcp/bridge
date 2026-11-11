@@ -24,13 +24,13 @@
   },
   "pnpm": {
     "overrides": {
-      "@openlfcp/client": "0.5.2",
-      "@openlfcp/core": "0.5.2",
-      "@openlfcp/crypto": "0.5.2",
-      "@openlfcp/shared-objects": "0.5.2",
-      "@openlfcp/storage": "0.5.2",
-      "@openlfcp/storage-node": "0.5.2",
-      "@openlfcp/wire": "0.5.2"
+      "@openlfcp/client": "0.6.0",
+      "@openlfcp/core": "0.6.0",
+      "@openlfcp/crypto": "0.6.0",
+      "@openlfcp/shared-objects": "0.6.0",
+      "@openlfcp/storage": "0.6.0",
+      "@openlfcp/storage-node": "0.6.0",
+      "@openlfcp/wire": "0.6.0"
     }
   }
 }
