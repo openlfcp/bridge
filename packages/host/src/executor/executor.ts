@@ -363,11 +363,15 @@ export class Executor {
   }
 
   /** Runs every prepared intent that is due. */
-  async runDue(): Promise<readonly Outcome[]> {
+  async runDue(
+    /** Only this binding's (the run process: after its own plan and transitions, review PR 9b #31). */
+    bindingId?: string,
+  ): Promise<readonly Outcome[]> {
     const now = new Date(this.#now()).toISOString();
     const out: Outcome[] = [];
     for (const i of this.#intents.open())
-      if (i.state === "prepared" && (i.nextAt === null || i.nextAt <= now))
+      if (bindingId !== undefined && i.bindingId !== bindingId) continue;
+      else if (i.state === "prepared" && (i.nextAt === null || i.nextAt <= now))
         out.push(await this.run(i.id));
     return out;
   }

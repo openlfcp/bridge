@@ -374,8 +374,8 @@ export class BridgeProcess {
     const recorded = recordDecisions(this.#o.db, r.plan, this.#now);
     const outcomes: Outcome[] = [];
     for (const i of applied.prepared) outcomes.push(await this.#executor.run(i.id));
-    // Retries that came due (their own bindings' gates are checked by the executor).
-    for (const o of await this.#executor.runDue()) outcomes.push(o);
+    // This binding's queue only: another binding's waits for its own plan and transitions.
+    for (const o of await this.#executor.runDue(b.id)) outcomes.push(o);
     return { kind: "applied", runId: r.runId, outcomes, recorded };
   }
 

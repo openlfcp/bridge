@@ -546,3 +546,90 @@ describe("review PR 9b r2", () => {
     expect(second.guards).toContain("guard_count_drop");
   });
 });
+
+describe("review PR 9b r3 #31: a pass sends only its own binding's queue", () => {
+  /** A second active binding 'c' on another section, read from another harness's replica. */
+  async function twoBindings(stopped: { on: boolean }) {
+    b = await bridge({ filter: "mine" });
+    const other = await bridge();
+    b.t.onChange = () => () => {};
+    const list = b.person.createList("LFCP · Other");
+    b.db
+      .prepare(
+        "INSERT INTO bindings (id, installation_id, resource_id, adapter, transport, target_ref, state, created_at) VALUES ('c', 'i', ?, 'apple-reminders', 'fake', ?, 'active', ?)",
+      )
+      .run(toHex(other.R), list.id, new Date().toISOString());
+    b.person.create(list.id, "marker", {
+      url: markerUrl(INSTANCE, toHex(other.R)),
+      completed: true,
+    });
+    const task = await b.task("A");
+    const proc = processOf({
+      stopped: () => stopped.on,
+      host: (key, target) => {
+        if (key === "isOpen") return () => true;
+        if (key === "replica")
+          return (r: typeof b.R) =>
+            toHex(r) === toHex(other.R) ? other.host.replica(r) : target.replica(r);
+        return undefined;
+      },
+    });
+    return { other, task, proc };
+  }
+
+  it("the reviewer's case: b's prepared update (held by STOP) is not sent by c's pass after b's Task left the filter", async () => {
+    const stopped = { on: false };
+    const { other, task, proc } = await twoBindings(stopped);
+    try {
+      await proc.start();
+      stopped.on = true;
+      await b.edit(setTitle(b.now(task.id), "B"));
+      await proc.pass("b");
+      expect(b.db.prepare("SELECT state FROM intents WHERE kind = 'update'").get()).toEqual({
+        state: "prepared",
+      });
+      await b.edit(unassign(b.now(task.id), b.root));
+      stopped.on = false;
+      await proc.pass("c");
+      expect(reminders()[0]?.title).toBe("A");
+      // b's own pass brings its link up to date first: the update is superseded, nothing written.
+      await proc.pass("b");
+      expect(linkOf(task.id)?.state).toBe("out_of_filter");
+      expect(
+        b.db.prepare("SELECT state, state_reason FROM intents WHERE kind = 'update'").get(),
+      ).toEqual({
+        state: "superseded",
+        state_reason: "link_out_of_filter",
+      });
+      expect(reminders()[0]?.title).toBe("A");
+    } finally {
+      await other.close();
+    }
+  });
+
+  it("…and a not_started retry of b (after a lost answer) is not sent by c's pass either", async () => {
+    const stopped = { on: false };
+    const { other, task, proc } = await twoBindings(stopped);
+    try {
+      await proc.start();
+      await b.edit(setTitle(b.now(task.id), "B"));
+      const apply = b.t.apply.bind(b.t);
+      b.t.apply = async () => {
+        b.t.apply = apply;
+        throw new Error("helper gone before sending");
+      };
+      await proc.pass("b");
+      await b.edit(unassign(b.now(task.id), b.root));
+      // b's settle (from its next start or pass) would make it prepared again; here: put it back as settle does.
+      b.db
+        .prepare(
+          "UPDATE intents SET state = 'prepared' WHERE kind = 'update' AND state = 'effecting'",
+        )
+        .run();
+      await proc.pass("c");
+      expect(reminders()[0]?.title).toBe("A");
+    } finally {
+      await other.close();
+    }
+  });
+});
