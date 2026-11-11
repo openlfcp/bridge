@@ -301,6 +301,7 @@ export class EventKitTransport implements RemindersTransport {
       if (prior?.stage === "done" && "list" in prior.result) return prior.result.list;
       this.#put(op.opKey, { stage: "sent", kind: "create_list", at: new Date().toISOString() });
       const r = await this.#req("lists.create", { title: op.title, opKey: op.opKey }); // lost → stays "sent"
+      lostIfTimedOut(r);
       if (!r.ok) {
         this.#put(op.opKey, { stage: "failed", code: r.error.code });
         if (r.error.code === "list_exists") throw new ListExistsError(op.title);
@@ -325,6 +326,7 @@ export class EventKitTransport implements RemindersTransport {
       this.#put(op.opKey, { stage: "sent", kind: op.kind, at: new Date().toISOString() });
       // A lost answer (helper gone, timeout) rejects here and leaves the stage at "sent".
       const r = await this.#req(name, body);
+      lostIfTimedOut(r);
       const result = mapWriteResponse(op.opKey, r);
       if (result.ok) this.#put(op.opKey, { stage: "done", result });
       else this.#put(op.opKey, { stage: "failed", code: result.code });
@@ -340,6 +342,16 @@ export class EventKitTransport implements RemindersTransport {
     if (s.stage === "done") return { state: "done", result: s.result };
     return { state: "unknown", stage: "sent", opKind: s.kind };
   }
+}
+
+/**
+ * eventkit_timeout: the helper stopped waiting on a store call that may still complete (it then
+ * starts over on a new store). That is a lost answer, not a refusal: the stage stays "sent", so
+ * recover says unknown and the executor quarantines it, never resends it.
+ */
+function lostIfTimedOut(r: WireResponse): void {
+  if (!r.ok && r.error.code === "eventkit_timeout")
+    throw new HelperLostError(`the helper gave up on the operation: ${r.error.message}`);
 }
 
 function request(op: AppleOp): [string, Record<string, unknown>] {
