@@ -4,7 +4,8 @@
 //   silent           never sends ready, exits on stdin EOF;
 //   old-protocol     ready with protocol 1;
 //   ignore-shutdown  answers, but ignores shutdown and stdin EOF (must be killed);
-//   slow             answers op "slow" after 1.5 s.
+//   slow             answers op "slow" after 1.5 s;
+//   no-id            answers the first request with a line without id, then normally.
 import fs from "node:fs";
 import { createInterface } from "node:readline";
 
@@ -32,6 +33,11 @@ createInterface({ input })
   .on("line", (l) => {
     const m = JSON.parse(l);
     if (m.op === "shutdown" && mode === "ignore-shutdown") return;
+    if (mode === "no-id" && !globalThis.answeredWithoutId) {
+      globalThis.answeredWithoutId = true;
+      send({ ok: false, error: { code: "internal", message: "no id" } });
+      return;
+    }
     const reply = () => send({ id: m.id, ok: true, op: m.op });
     if (m.op === "slow" && mode === "slow") setTimeout(reply, 1500);
     else reply();
