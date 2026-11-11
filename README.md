@@ -4,8 +4,36 @@ Bridge between LFCP shared sections and Apple apps, running as one more device o
 person (MVP 0.5: Apple Reminders). Design: D-010 (`design-b-010.md`, MVP 0.5 workbook);
 the map of this repository: [docs/NAVIGATOR.md](docs/NAVIGATOR.md).
 
-**Status: under construction (MVP 0.5, stage 1).** Every command of `lfcp-bridge` answers
-"not available in this build" until the pull request that brings it.
+> **Experimental.** MVP 0.5 is for people who build it from source and read the runbook first.
+> It writes to your Reminders only after a verification run on your Mac, and a person decides
+> every unknown outcome. Expect changes to commands and to the database between versions (each
+> with a way back: [the runbook](docs/guides/running-the-bridge.md#roll-back)).
+
+**Status: under construction.** The long-running process (`run`), pairing and `approve` come with
+PR 9b. Until then those commands answer "not available in this build", and `lfcp-bridge status`
+lists them.
+
+How to install, update, recover and disconnect:
+[docs/guides/running-the-bridge.md](docs/guides/running-the-bridge.md).
+
+## Limits of the MVP
+
+- **One bridge per Apple ID.** Each bound list carries an ownership marker that *detects* a second
+  bridge (it then stops, hold `foreign_bridge`); nothing locks. Moving to another Mac is a
+  procedure: [replacing the Mac](docs/guides/replacing-the-mac.md).
+- **It never deletes reminders** and never moves or deletes alarms. Tasks that leave the filter stay
+  in the list; an alarm left on an old date is a warning.
+- **Writes to Reminders only after the verification run**, per helper version and macOS. Until then
+  bindings only dry-run.
+- **No guessing.** A write whose outcome is unknown is never repeated by itself: it goes to
+  quarantine for a person. Neither is a list taken over by its title (no `--adopt-list`): the
+  bridge binds only lists it creates.
+- **A personal time or alarm wins** over clearing the due date: that becomes a conflict, not a
+  write. A reminder you made recurring locks the Task's status and dates.
+- **Adding a section (N8) only from quiescence:** no open work, nothing waiting for a person. Work
+  that appears during the pairing aborts it.
+- **Not in the MVP:** relinking unlinked Tasks, automatic deletion, tags, scheduled dates,
+  assignment from Reminders.
 
 ## Layout
 
