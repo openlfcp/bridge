@@ -42,6 +42,8 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 | `src/reconcile/import-task.ts` | a new reminder's Task (§6.2): its id stable for the reminder (UUIDv7 from a hash of section, binding and the reminder's externalId or id), no assignee | 11 |
 | `src/reconcile/bases.ts` | the decisions that write no side (§5.5): "bases" (equivalent sides) and "shadow", recorded by an applied pass, `intent_id` NULL | 9b |
 | `src/run/process.ts` | **the run process**: start (Safe Mode, sections, ownership, recovery, write mode, a full pass), one pass at a time per binding (plan → write gate B16/§7.6 → LinkApplier → decisions → intents), triggers (remote nodes, rebuild, LIVE back, the change hint; debounce 400 ms / 3 s; wake; 15 min), delivery, stop | 9b |
+| `src/run/machine.ts` | the process on the machine: installations (storage-node state, a SectionHost on the paired coordinator, an AccessTracker with revocationStatus, G4 root), the EventKit transport over the supervised helper (restart → reopen; > 3 in 5 min → helper_unavailable), writesVerified | 9b |
+| `src/run/cli.ts` | `run` (run.lock, until SIGTERM / SIGINT), `dry-run`, `approve` (a planned dry run ≤ 1 h old, ownership not lost, strict 24 h), `pair` (storage-node pair), `sections` | 9b |
 | `src/lfcp/fallback/section-end.ts` | **FALLBACK for sdk-ts G9**: the section's end (after the last node at depth 0) for an import | 11 |
 
 ## Adapter (`packages/reminders/src/adapter/`, PR 8)
@@ -85,6 +87,7 @@ once sdk-ts releases it; until then the host keeps its own fallbacks in `src/lfc
 | Document | What |
 |---|---|
 | `docs/devel/testing/helper-live-checklist.md` | the owner's live EventKit check of the helper (TCC, `live-check.mjs`, `sign-dev.sh`), linked to the R-001 live run |
+| `docs/devel/testing/verification-run.md` | the owner's first live run of the bridge (R-023): pair, verify, dry-run, approve, run, the checklist on iPhone and in Obsidian |
 
 ## Guides
 
