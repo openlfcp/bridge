@@ -1,8 +1,11 @@
 // The run process on the real machine (D-010 r4 §2, PR 9b): what `lfcp-bridge run` opens.
 //
-// - every active installation: its storage-node state (openNodeInstallation, G3), a SectionHost
-//   on its coordinator (the URL of its paired sections, G1), an AccessTracker (§5.3, §5.9) whose
-//   revocation check is the SDK's revocationStatus, the person's root (G4) and its Principal;
+// - every active installation: its storage-node state (the SDK's openNodeInstallation, with its
+//   idle-session keep-alive and 429 upgrade probe), the Resource rows of its paired sections
+//   (storePairedResources, for an installation paired before the SDK stored them), a SectionHost
+//   on its coordinator (the URL of its paired sections, pairedResources), an AccessTracker (§5.3,
+//   §5.9) whose revocation check is the SDK's revocationStatus, the person's root
+//   (deviceIdentity) and its Principal;
 // - the EventKit transport over the helper, supervised (PR 9, §8.2): helper.pid, an orphan
 //   stopped, a ping (access.status) every 30 s, a restart reopens the transport; more than 3
 //   restarts within 5 min → hold helper_unavailable on every binding until a person resumes;
@@ -17,9 +20,16 @@ import {
   type HelperLink,
   HelperProcess,
 } from "@openlfcp/bridge-transport-eventkit";
-import { receiptOf, revocationStatus } from "@openlfcp/client";
+import {
+  deviceIdentity,
+  pairedResources,
+  receiptOf,
+  revocationStatus,
+  storePairedResources,
+} from "@openlfcp/client";
 import { fromHex, type ResourceId, resourceId } from "@openlfcp/core";
 import { principalRef } from "@openlfcp/shared-objects";
+import { openNodeInstallation } from "@openlfcp/storage-node";
 import { LIST_PREFIX, VERIFY_PREFIX } from "../bootstrap.js";
 import type { BridgeConfig, BridgePaths } from "../config.js";
 import type { BridgeDatabase } from "../db/database.js";
@@ -27,9 +37,6 @@ import { Holds } from "../db/holds.js";
 import { Journal } from "../db/journal.js";
 import { stopState } from "../db/stop.js";
 import { AccessTracker, metaAccessStore } from "../lfcp/access.js";
-import { deviceRoot } from "../lfcp/fallback/device-root.js";
-import { openNodeInstallation } from "../lfcp/fallback/node-installation.js";
-import { pairedSections } from "../lfcp/fallback/paired-sections.js";
 import { SectionHost, type SectionHostOptions } from "../lfcp/section-host.js";
 import { DatabaseKV } from "../runtime.js";
 import { HelperSupervisor } from "../supervisor.js";
@@ -50,7 +57,10 @@ export async function installationPorts(
   for (const r of rows) {
     const node = await openNodeInstallation(r.dir);
     closers.push(() => node.close());
-    const url = (await pairedSections(node.storage))[0]?.url;
+    // Idempotent: the rows of the ready paired sections an older pairing did not store.
+    await storePairedResources(node);
+    // The coordinator of the paired sections, whether or not each is ready (as before 0.6.0).
+    const url = (await pairedResources(node))[0]?.url;
     if (url === undefined) continue;
     const host = new SectionHost({
       url,
@@ -69,7 +79,7 @@ export async function installationPorts(
       now,
     });
     const me = node.installation.signer.descriptor.principalId;
-    const root = await deviceRoot(node.storage, me);
+    const root = (await deviceIdentity(node))?.root;
     ports.push({
       id: r.id,
       host,

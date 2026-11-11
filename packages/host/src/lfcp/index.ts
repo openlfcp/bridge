@@ -18,12 +18,6 @@ export {
   UnguardedCommitError,
 } from "./commit-guard.js";
 export { type CurrentLfcp, type Delivery, type DeliveryOptions, deliver } from "./delivery.js";
-export { deviceRoot } from "./fallback/device-root.js";
-export {
-  type NodeInstallation,
-  openNodeInstallation,
-} from "./fallback/node-installation.js";
-export { type PairedSection, pairedSections } from "./fallback/paired-sections.js";
 export { type LiveChange, type LiveReset, LiveTracker } from "./live.js";
 export { LIVENESS, type LivenessOptions, LivenessProbe, tapMessages } from "./liveness.js";
 export {

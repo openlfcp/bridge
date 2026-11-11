@@ -4,15 +4,22 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { OperationJournal, receiptOf } from "@openlfcp/client";
-import { toHex } from "@openlfcp/core";
+import { type PairedResource, receiptOf } from "@openlfcp/client";
+import { generateResourceId } from "@openlfcp/core";
 import { SECTIONS_PROFILE_ID } from "@openlfcp/shared-objects/sections";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { bridgePaths, loadConfig } from "../src/config.js";
-import { EXIT, Holds, Journal, main, openNodeInstallation } from "../src/index.js";
+import { EXIT, Holds, Journal, main } from "../src/index.js";
 import { pairResumeCommand, takeRunLock } from "../src/run/cli.js";
 import type { Runtime } from "../src/runtime.js";
 import { type Bridge, bridge } from "./support/bridge.js";
+
+// The SDK's pairedResources (its readiness is its own, tested in sdk-ts): what `sections` shows.
+const paired = vi.hoisted(() => ({ list: [] as PairedResource[] }));
+vi.mock("@openlfcp/client", async (original) => ({
+  ...(await original<typeof import("@openlfcp/client")>()),
+  pairedResources: async () => paired.list,
+}));
 
 let b: Bridge;
 let home: string;
@@ -168,41 +175,27 @@ describe("run", () => {
 });
 
 describe("sections and pair", () => {
-  it("sections lists each installation's paired sections and which are bound", async () => {
+  it("sections lists each installation's paired sections, which are not ready and which are bound", async () => {
     b = await bridge();
     const rt = runtime();
     const dir = join((await rt()).paths.installations, "i1");
-    const node = await openNodeInstallation(dir);
-    const journal = new OperationJournal(node.storage);
-    await journal.begin({
-      id: "pairing-request.1",
-      kind: "pairing-request",
-      createdAt: 1,
-      intent: {
-        candidates: [
-          {
-            resource: toHex(b.R),
-            url: "ws://127.0.0.1:9/v1/ws",
-            profile: SECTIONS_PROFILE_ID,
-            name: "Inbox",
-          },
-          {
-            resource: "cc".repeat(32),
-            url: "ws://127.0.0.1:9/v1/ws",
-            profile: SECTIONS_PROFILE_ID,
-            name: "Work",
-          },
-        ],
+    const url = "ws://127.0.0.1:9/v1/ws";
+    paired.list = [
+      { resource: b.R, name: "Inbox", profile: SECTIONS_PROFILE_ID, url, ready: true },
+      {
+        resource: generateResourceId(),
+        name: "Work",
+        profile: SECTIONS_PROFILE_ID,
+        url,
+        ready: false,
       },
-    });
-    await journal.setStatus("pairing-request.1", "done");
-    node.close();
+    ];
     b.db.prepare("UPDATE installations SET dir = ?, label = 'Mac'").run(dir);
     const r = await call(rt, "sections");
     expect(r.code).toBe(EXIT.OK);
     expect(r.out).toContain("installation i (Mac)");
-    expect(r.out).toMatch(/Inbox .*bound: b active/);
-    expect(r.out).toMatch(/Work .*\(not stored yet\)/);
+    expect(r.out).toMatch(/^ {2}Inbox {2}[0-9a-f]{12}… {2}bound: b active$/m);
+    expect(r.out).toMatch(/Work .*\(not ready\)$/m);
   });
 
   it("pair without a label or a section is a usage error", async () => {

@@ -66,7 +66,7 @@ export interface InstallationPorts {
     /** Answers as they come (an AccessTracker): the process sets or lifts access_refused (§5.9). */
     onChange?(listener: (c: AccessChange) => void): () => void;
   };
-  /** The person's root as a PrincipalRef, for the filter (G4). */
+  /** The person's root as a PrincipalRef, for the filter (deviceIdentity). */
   readonly me?: string;
   /** This installation's Principal: created_by of imported Tasks. */
   readonly createdBy?: PrincipalId;

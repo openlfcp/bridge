@@ -315,4 +315,20 @@ describe("AccessTracker, review PR 3b", () => {
     await t.settled();
     expect([t.accessCheckedNow(R), t.answerNow(R)]).toEqual([true, "allowed"]);
   });
+
+  it('SDK 0.6.0: canWrite "revoked" is asked of revocationStatus; a proven revocation is revoked', async () => {
+    const src = source();
+    src.access = denied("revoked");
+    const { t } = tracker(src, "revocation-proven");
+    src.goLive(R);
+    await t.settled();
+    expect(t.answerNow(R)).toBe("revoked");
+    expect(metaAccessStore(db, "i1").get(R)?.answer).toBe("revoked");
+    // Permanent (N5): a later "allowed" does not replace it.
+    src.access = allowed;
+    src.newGeneration();
+    src.goLive(R);
+    await t.settled();
+    expect([t.accessCheckedNow(R), t.answerNow(R)]).toEqual([false, "revoked"]);
+  });
 });

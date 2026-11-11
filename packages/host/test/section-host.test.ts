@@ -1,6 +1,6 @@
 // SectionHost offline (D-010 §5.8, PR 3a): a commit is stored with its
 // receipt and queued without a server, so the guard's rules are tested
-// here, on the real SDK 0.5.2 commit path. Remote changes are merged into
+// here, on the real SDK 0.6.0 commit path. Remote changes are merged into
 // the section's profile as the applier does after LFCP accepted a unit.
 
 import { receiptOf } from "@openlfcp/client";

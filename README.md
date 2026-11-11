@@ -60,7 +60,7 @@ pnpm typecheck    # tsc -b, and the tests' types
 pnpm test         # vitest
 ```
 
-The LFCP SDK comes from npm at exact versions (`@openlfcp/*` 0.5.2, pinned for transitive
+The LFCP SDK comes from npm at exact versions (`@openlfcp/*` 0.6.0, pinned for transitive
 dependencies too by `pnpm.overrides`).
 
 ## License

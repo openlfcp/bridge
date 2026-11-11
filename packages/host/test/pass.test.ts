@@ -1,5 +1,5 @@
 // The dry-run pass (D-010 §5.5, §11 PR 8) on a real section replica (an
-// offline SectionHost) and the fake transport, and the G4 fallback.
+// offline SectionHost) and the fake transport.
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,14 +7,12 @@ import { join } from "node:path";
 import { type ListInfo, type ListRef, localDate } from "@openlfcp/bridge-reminders";
 import { taskLink } from "@openlfcp/bridge-reminders/adapter";
 import { FakePerson, FakeStore, FakeTransport } from "@openlfcp/bridge-reminders/fake";
-import { OperationJournal } from "@openlfcp/client";
-import { generateObjectId, type PrincipalId, toHex } from "@openlfcp/core";
+import { generateObjectId, toHex } from "@openlfcp/core";
 import { createTask, principalRef } from "@openlfcp/shared-objects";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   type BridgeDatabase,
   bridgeInstanceId,
-  deviceRoot,
   Executor,
   type Intent,
   openBridgeDatabase,
@@ -233,30 +231,5 @@ describe("dry-run (§5.5, PR 8: dry-run only)", () => {
     expect(next.plan.transitions).toEqual([
       { taskId: s.tasks[0]?.id, kind: "link_orphan", item: made[0]?.ref },
     ]);
-  });
-});
-
-describe("fallback G4: deviceRoot", () => {
-  it("the root of this installation's finished pairing request; not another device's, not an unfinished one", async () => {
-    const m = memory();
-    const device = installation().signer.descriptor.principalId;
-    const other = installation().signer.descriptor.principalId;
-    const journal = new OperationJournal(m.storage);
-    const begin = (id: string, asked: PrincipalId, createdAt: number) =>
-      journal.begin({
-        id,
-        kind: "pairing-request",
-        createdAt,
-        intent: { root: toHex(root), device: toHex(asked), candidates: [] },
-      });
-    await begin("pairing-request.1", device, 1);
-    expect(await deviceRoot(m.storage, device)).toBeUndefined();
-    await journal.setStatus("pairing-request.1", "done");
-    expect(toHex((await deviceRoot(m.storage, device)) as PrincipalId)).toBe(toHex(root));
-    await begin("pairing-request.2", other, 2);
-    await journal.setStatus("pairing-request.2", "done");
-    expect(await deviceRoot(m.storage, other)).toBeDefined();
-    expect(toHex((await deviceRoot(m.storage, device)) as PrincipalId)).toBe(toHex(root));
-    expect(await deviceRoot(memory().storage, device)).toBeUndefined();
   });
 });

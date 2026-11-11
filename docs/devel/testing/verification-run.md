@@ -48,7 +48,7 @@ pbpaste | lfcp-bridge pair --label "Mac bridge" --section Verify
 lfcp-bridge sections
 ```
 
-В списке есть `Verify`, без `(not stored yet)`.
+В списке есть `Verify`, без `(not ready)`.
 
 ## 2. Привязка, dry-run, approve
 

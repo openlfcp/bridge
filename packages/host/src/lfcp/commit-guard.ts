@@ -3,7 +3,7 @@
 // SyncClient.commit runs in its serial queue: it answers an existing receipt
 // first, then calls the Resource's CommitBinding.stage(intents) with the very
 // array it was given — synchronously, before anything is written — and a
-// throwing stage writes nothing (sdk-ts 0.5.2 sync-client.ts #commit;
+// throwing stage writes nothing (sdk-ts 0.6.0 sync-client.ts #commit;
 // client.CommitBinding: "Throws to refuse it"). Received units are merged in
 // the same queue, so between the check in stage and the stage itself no
 // remote change can land.

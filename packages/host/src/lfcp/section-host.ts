@@ -33,6 +33,7 @@ import {
   SyncClient,
   type SyncEvent,
   startSyncDriver,
+  type UpgradeProbe,
   type WebSocketFactory,
   type WriteAccess,
 } from "@openlfcp/client";
@@ -45,6 +46,7 @@ import {
   SharedSectionsDataProfile,
 } from "@openlfcp/shared-objects/sections";
 import type { LfcpStorage, SecretStore } from "@openlfcp/storage";
+import { nodeUpgradeProbe } from "@openlfcp/storage-node";
 import type { Signer } from "@openlfcp/wire";
 import { type BasisCheck, type GuardedBinding, guardCommitBinding } from "./commit-guard.js";
 import { type LiveChange, LiveTracker } from "./live.js";
@@ -75,6 +77,11 @@ export interface SectionHostOptions {
   readonly liveness?: LivenessOptions;
   readonly antiEntropyMs?: number;
   readonly webSocket?: WebSocketFactory;
+  /**
+   * Learns an upgrade refused with HTTP 429 (I18), which Node's WebSocket does not report: the
+   * next attempt then waits at least its Retry-After (default the SDK's nodeUpgradeProbe).
+   */
+  readonly upgradeProbe?: UpgradeProbe;
   /** Checkpoints at most this often (default 2 s, as the plugin). */
   readonly checkpointIntervalMs?: number;
 }
@@ -172,6 +179,7 @@ export class SectionHost {
       reconnect: this.#reconnect.policy,
       ...(options.antiEntropyMs === undefined ? {} : { antiEntropyMs: options.antiEntropyMs }),
       webSocket: this.#probe.factory,
+      upgradeProbe: options.upgradeProbe ?? nodeUpgradeProbe(),
       // No snapshotPolicy: the bridge never publishes a Snapshot.
     });
     this.#client.on((e) => {

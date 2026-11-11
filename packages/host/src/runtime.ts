@@ -1,20 +1,20 @@
 // What the CLI commands of PR 9 use, assembled for the real machine: paths and config (§2.2),
 // bridge.sqlite, the EventKit transport over the helper app with its durable stages in
-// transport_state, and section names resolved through the pairing journal (G1 fallback).
+// transport_state, and section names resolved through the paired sections (pairedResources).
 // Tests pass their own Runtime.
 
 import { execFileSync } from "node:child_process";
 import type { DurableKV } from "@openlfcp/bridge-reminders/transport";
 import { EventKitTransport } from "@openlfcp/bridge-transport-eventkit";
+import { pairedResources } from "@openlfcp/client";
 import { toHex } from "@openlfcp/core";
+import { openNodeInstallation } from "@openlfcp/storage-node";
 import { type BootstrapTransport, LIST_PREFIX, VERIFY_PREFIX } from "./bootstrap.js";
 import { type BridgeConfig, type BridgePaths, bridgePaths, loadConfig } from "./config.js";
 import { type BridgeDatabase, openBridgeDatabase } from "./db/database.js";
 import { Holds } from "./db/holds.js";
 import { Journal } from "./db/journal.js";
 import { type Launchctl, launchctl } from "./launchd.js";
-import { openNodeInstallation } from "./lfcp/fallback/node-installation.js";
-import { pairedSections } from "./lfcp/fallback/paired-sections.js";
 import type { MigrationPorts } from "./migration.js";
 import { installationPorts, machineProcess } from "./run/machine.js";
 import type { InstallationPorts } from "./run/process.js";
@@ -139,7 +139,7 @@ export async function machineRuntime(env: NodeJS.ProcessEnv = process.env): Prom
       for (const i of installations) {
         const node = await openNodeInstallation(i.dir);
         try {
-          const found = (await pairedSections(node.storage)).find((s) => s.name === name);
+          const found = (await pairedResources(node)).find((s) => s.name === name);
           if (found !== undefined)
             return { installationId: i.id, resourceId: toHex(found.resource), title: name };
         } finally {

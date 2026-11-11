@@ -32,10 +32,10 @@ import {
   plan,
 } from "@openlfcp/bridge-reminders/adapter";
 import { fromHex, type PrincipalId, resourceId } from "@openlfcp/core";
+import { sectionEnd } from "@openlfcp/shared-objects/sections";
 import type { BridgeDatabase } from "../db/database.js";
 import type { HoldReason } from "../db/holds.js";
 import { Limits } from "../executor/limits.js";
-import { sectionEnd } from "../lfcp/fallback/section-end.js";
 import { importTaskFactory } from "./import-task.js";
 import { type LfcpReader, sectionView } from "./section-view.js";
 
@@ -43,7 +43,7 @@ export interface PassOptions {
   readonly db: BridgeDatabase;
   readonly transport: RemindersTransport;
   readonly lfcp: LfcpReader;
-  /** The person's root as a PrincipalRef (G4): who "me" is for the filter; undefined when not known. */
+  /** The person's root as a PrincipalRef (deviceIdentity): who "me" is for the filter; undefined when not known. */
   readonly me: (installationId: string) => Promise<string | undefined>;
   /**
    * The installation's Principal, the `created_by` of a Task imported from a new reminder
@@ -172,7 +172,11 @@ export class Pass {
     const R = resourceId(fromHex(b.resource_id));
     const lfcp = sectionView(this.#o.lfcp, R);
     const replica = this.#o.lfcp.replica(R);
-    const end = replica === undefined ? undefined : sectionEnd(replica);
+    const sectionId = replica?.validate().sectionId;
+    const end =
+      replica === undefined || sectionId === undefined
+        ? undefined
+        : sectionEnd(replica.snapshot(), sectionId);
     const createdBy = await this.#o.createdBy?.(b.installation_id);
     if (lfcp === undefined) return refused("section_closed");
 
