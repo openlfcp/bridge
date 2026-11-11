@@ -46,11 +46,11 @@ final class Rig {
     private var nextId = 0
     static let zone = TimeZone(identifier: "Europe/Paris")!
 
-    init(authorization: Authorization = .fullAccess, hello: Bool = true) {
+    init(authorization: Authorization = .fullAccess, hello: Bool = true, opTimeout: TimeInterval = 30) {
         backend = MemoryBackend(authorization: authorization,
                                 retry: RetryPolicy(delays: [0, 0, 0, 0], sleep: { _ in }), zone: Rig.zone)
         var sink: ((JSON) -> Void)!
-        server = Server(backend: backend, coalesce: 0.05) { e in sink(e) }
+        server = Server(backend: backend, coalesce: 0.05, opTimeout: opTimeout) { e in sink(e) }
         // weak: coalesced events may arrive after the test released the rig.
         sink = { [weak self] e in guard let self = self else { return }; self.lock.lock(); self._events.append(e); self.lock.unlock() }
         if hello { _ = ok(["op": "hello", "allowListTitlePrefixes": ["LFCP · "]]) }
@@ -65,6 +65,15 @@ final class Rig {
         if r["v"] == nil { r["v"] = 2 }
         r["id"] = .int(nextId)
         return server.handle(line: JSON.object(r).serialized())
+    }
+
+    /// Like send, through the deadline the executable uses (Server.respond).
+    func respond(_ req: [String: JSON]) -> JSON {
+        nextId += 1
+        var r = req
+        if r["v"] == nil { r["v"] = 2 }
+        r["id"] = .int(nextId)
+        return server.respond(line: JSON.object(r).serialized())
     }
 
     func ok(_ req: [String: JSON], file: String = #file, line: Int = #line) -> JSON {

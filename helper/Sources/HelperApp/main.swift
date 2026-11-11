@@ -5,13 +5,13 @@ import HelperCore
 #endif
 
 // lfcp-reminders-helper — the Swift side of the bridge's EventKit transport (D-010 r4 §8).
-//   serve [--protocol 2] [--backend eventkit|memory] [--host-pid N]   stdio JSON-lines
+//   serve [--protocol 2] [--backend eventkit|memory] [--host-pid N] [--op-timeout S]   stdio JSON-lines
 //   status                                                             authorization + process info (never prompts)
 //   --version
 setvbuf(stdout, nil, _IOLBF, 0)
 
 let usage = """
-usage: lfcp-reminders-helper serve [--protocol 2] [--backend eventkit|memory] [--host-pid N]
+usage: lfcp-reminders-helper serve [--protocol 2] [--backend eventkit|memory] [--host-pid N] [--op-timeout S]
        lfcp-reminders-helper status
        lfcp-reminders-helper --version
 """
@@ -61,7 +61,8 @@ case "serve":
     _ = NSApplication.shared
     NSApp.setActivationPolicy(.accessory)
 
-    let server = Server(backend: backend) { out.emit($0) }
+    let opTimeout = option("op-timeout").flatMap(Double.init) ?? 30
+    let server = Server(backend: backend, opTimeout: opTimeout) { out.emit($0) }
     let watch = hostPid.flatMap { HostWatch(pid: $0) { logErr("host exited; stopping"); exit(0) } }
     let system = SystemEvents { server.systemEvent($0) }
 
@@ -71,8 +72,13 @@ case "serve":
         while let line = readLine(strippingNewline: true) {
             if line.trimmingCharacters(in: .whitespaces).isEmpty { continue }
             server.queue.async {
-                out.emit(server.handle(line: line))
+                out.emit(server.respond(line: line))
                 if server.shutdownRequested { exit(0) }
+                // Stalled: a call may still run with this process's state. Answer what is queued
+                // (helper_stalled), then exit: the host starts a new helper (review #23 P1-2).
+                if server.stalled {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { exit(3) }
+                }
             }
         }
         server.queue.async { exit(0) }   // stdin closed: finish queued requests, then exit

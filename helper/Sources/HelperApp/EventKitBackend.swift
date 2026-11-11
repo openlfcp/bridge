@@ -182,6 +182,9 @@ final class EventKitBackend: Backend {
         } catch let e as HelperError {
             throw e
         } catch {
+            // A save EventKit refused leaves the refused object among the store's unsaved changes;
+            // revert to the saved state so no later save or fetch meets it (R-001 live run 2).
+            store.reset()
             let ns = error as NSError
             let code: ErrorCode = ns.domain == EKErrorDomain ? .eventkitError : .internalError
             throw HelperError(code, ns.localizedDescription, ["native": nativeJSON(error)])

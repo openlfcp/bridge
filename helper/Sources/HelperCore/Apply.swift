@@ -131,6 +131,8 @@ public struct RetryPolicy {
             } catch {
                 if error is HelperError || !isTransient(error) { throw error }
                 guard attempt < delays.count else {
+                    // The last refused attempt is reverted too, like every one before it.
+                    reset()
                     throw HelperError(.storeConflict, "Reminders database stayed busy (reminderkit -3002) after \(attempt) retries",
                                       ["retries": .int(attempt), "native": nativeJSON(error)])
                 }

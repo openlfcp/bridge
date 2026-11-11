@@ -3,8 +3,8 @@
 
 import { describe, expect, it } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
-import { permits } from "../src/index.js";
-import { eventKitTransportFor } from "../src/run/machine.js";
+import { Journal, openBridgeDatabase, permits } from "../src/index.js";
+import { eventKitTransportFor, helperStallHandler } from "../src/run/machine.js";
 
 const config = (v?: { helperVersion: string; macOS: string }): BridgeConfig => ({
   bridgeInstanceId: "x",
@@ -166,5 +166,26 @@ describe("review PR 9b r2 #33: the helper back after resume → the transport on
     fail = false;
     await r.restarted();
     expect(errors).toEqual(["helper.reconnect_failed"]);
+  });
+});
+
+describe("R-001 live run 2: a helper that stalled on a store call", () => {
+  it("is journaled and restarted; other events are ignored", async () => {
+    const db = openBridgeDatabase(":memory:");
+    const journal = new Journal(db);
+    const restarts: string[] = [];
+    const onEvent = helperStallHandler({
+      journal,
+      restart: async (reason) => {
+        restarts.push(reason);
+      },
+    });
+    onEvent({ event: "changed", seq: 1 });
+    onEvent({ event: "stalled", op: "items.snapshot", timeoutS: 30 });
+    await new Promise((r) => setImmediate(r));
+    expect(restarts).toEqual(["the helper stalled on items.snapshot"]);
+    const entries = journal.list();
+    expect(entries.map((e) => [e.level, e.key])).toEqual([["error", "helper.stalled"]]);
+    expect(entries[0]?.text).toMatch(/items\.snapshot.*30 s.*restarting/i);
   });
 });

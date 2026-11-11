@@ -223,4 +223,47 @@ describe("HelperSupervisor", () => {
       child.kill("SIGKILL");
     }
   });
+
+  it("restartNow restarts the helper that stalled, within the restart budget (R-001 live run 2)", async () => {
+    const r = rig();
+    await r.s.start();
+    const stalled = r.s.helper;
+    await r.s.restartNow("stalled: items.snapshot", stalled);
+    expect(r.helpers).toHaveLength(2);
+    expect(r.helpers[0]?.closed).toBe(true);
+    expect(r.s.state).toBe("running");
+    // A late report about the helper that was already replaced restarts nothing.
+    await r.s.restartNow("stalled again", stalled);
+    expect(r.helpers).toHaveLength(2);
+    // Each stall counts: more than 3 within 5 minutes and the helper is unavailable.
+    for (let i = 0; i < 3; i++) await r.s.restartNow("stalled", r.s.helper);
+    expect(r.s.state).toBe("unavailable");
+    expect(r.unavailable[0]).toMatch(/stalled/);
+  });
+
+  for (const pingOutcome of ["answers", "fails"] as const) {
+    it(`a stall and the exit of the same helper, queued behind a ping that ${pingOutcome}, restart it once (review #23 r2 P2-1)`, async () => {
+      const r = rig();
+      await r.s.start();
+      const a = r.helpers[0] as FakeHelper;
+      let settle: (ok: boolean) => void = () => {};
+      a.ping = () =>
+        new Promise<void>((res, rej) => {
+          settle = (ok) => (ok ? res() : rej(new Error("no answer")));
+        });
+      const round = r.s.pingNow(); // holds the queue
+      await new Promise((res) => setImmediate(res));
+      const stall = r.s.restartNow("the helper stalled on items.snapshot", a);
+      a.crash(); // its exit, queued too
+      settle(pingOutcome === "answers");
+      await round;
+      await stall;
+      await r.s.pingNow(); // whatever else was queued
+      expect(r.helpers).toHaveLength(2);
+      expect(r.helpers[0]?.closed).toBe(true);
+      expect(r.helpers[1]?.closed).toBe(false);
+      expect(r.s.helper).toBe(r.helpers[1]);
+      expect(r.s.state).toBe("running");
+    });
+  }
 });

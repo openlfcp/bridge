@@ -253,6 +253,38 @@ describe("stages and recover", () => {
     expect(await t.recover("u")).toEqual({ state: "unknown", stage: "sent", opKind: "update" });
   });
 
+  it("eventkit_timeout is a lost answer, not a refusal: the outcome stays unknown (R-001 live run 2)", async () => {
+    // The helper gave up waiting on a store call that may still complete: nothing says EventKit
+    // wrote nothing, so this is not "failed" (which recover reads as not_started).
+    const { t } = await open((op) =>
+      op === "hello"
+        ? okBody(1, {})
+        : {
+            id: 2,
+            ok: false,
+            error: { code: "eventkit_timeout", message: "did not finish", retryable: false },
+          },
+    );
+    await expect(
+      t.apply({
+        opKey: "k",
+        kind: "update",
+        ref: { id: "R1" },
+        set: { title: "b" },
+        expect: { rev: "r1" },
+      }),
+    ).rejects.toBeInstanceOf(HelperLostError);
+    expect(await t.recover("k")).toEqual({ state: "unknown", stage: "sent", opKind: "update" });
+    await expect(t.createList({ opKey: "l", title: "LFCP · Work" })).rejects.toBeInstanceOf(
+      HelperLostError,
+    );
+    expect(await t.recover("l")).toEqual({
+      state: "unknown",
+      stage: "sent",
+      opKind: "create_list",
+    });
+  });
+
   it("an unknown outcome is frozen: a retry with the same opKey is refused, not resent (review PR 6, P1-1)", async () => {
     // The helper applies every write; the first answer of each is lost. It keeps no opKey journal,
     // so a resend would answer list_exists / conflict_changed and erase the evidence.

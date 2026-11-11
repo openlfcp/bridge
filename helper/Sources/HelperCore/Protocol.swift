@@ -2,7 +2,7 @@ import Foundation
 
 public enum HelperInfo {
     public static let protocolVersion = 2
-    public static let version = "0.3.0"
+    public static let version = "0.3.1"
 }
 
 /// Stable machine-readable error codes (D-010 r4 §8.1).
@@ -26,11 +26,17 @@ public enum ErrorCode: String {
     case storeConflict = "store_conflict"         // com.apple.reminderkit -3002 after retries
     case eventkitError = "eventkit_error"
     case timeout
+    /// A store operation did not finish within the helper's deadline; for a write the outcome is
+    /// unknown, so it is not retryable (R-001 live run 2: an EventKit fetch that never returned).
+    case eventkitTimeout = "eventkit_timeout"
+    /// The helper stalled on an earlier request and runs nothing more (it exits; the host starts a
+    /// new one). This request was not executed, so it may be sent again to the new helper.
+    case helperStalled = "helper_stalled"
     case internalError = "internal"
 
     public var retryable: Bool {
         switch self {
-        case .conflictChanged, .storeConflict, .timeout, .tccTimeout: return true
+        case .conflictChanged, .storeConflict, .timeout, .tccTimeout, .helperStalled: return true
         default: return false
         }
     }

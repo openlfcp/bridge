@@ -72,6 +72,22 @@ func registerRetryTests() {
         try expectEqual(log, ["body", "sleep 0.1", "reset", "body", "sleep 0.2", "reset", "body"])
     }
 
+    test("retry exhausted: the store is reset after the last refused attempt too (review #23 P2-1)") {
+        var resets = 0
+        var calls = 0
+        let policy = RetryPolicy(delays: [0, 0], sleep: { _ in })
+        let conflict = NSError(domain: "com.apple.reminderkit", code: -3002)
+        do {
+            _ = try policy.run(isTransient: isReminderKitConflict, reset: { resets += 1 }) { () -> Int in
+                calls += 1
+                throw conflict
+            }
+            try expect(false, "should have thrown")
+        } catch let e as HelperError { try expectEqual(e.code, .storeConflict) }
+        try expectEqual(calls, 3)
+        try expectEqual(resets, 3, "a reset after every refused attempt, the last one included")
+    }
+
     test("retry policy: helper errors and non-transient errors are not retried") {
         var sleeps = 0
         let policy = RetryPolicy(delays: [0, 0], sleep: { _ in sleeps += 1 })

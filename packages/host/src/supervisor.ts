@@ -124,6 +124,21 @@ export class HelperSupervisor {
     return this.#busy;
   }
 
+  /**
+   * Restarts the helper now, for `reason` (the helper reported a stalled store call, R-001 live
+   * run 2). Counts toward the restart budget like any restart. With `helper`, only that helper is
+   * restarted: a late report about one already replaced restarts nothing.
+   */
+  restartNow(reason: string, helper?: SupervisedHelper): Promise<void> {
+    const gen = this.#gen;
+    this.#busy = this.#busy.then(async () => {
+      if (gen !== this.#gen || this.#state !== "running" || this.#helper === undefined) return;
+      if (helper !== undefined && this.#helper !== helper) return;
+      await this.#restart(reason, gen);
+    });
+    return this.#busy;
+  }
+
   async stop(): Promise<void> {
     this.#gen++;
     if (this.#timer !== undefined)
@@ -184,10 +199,13 @@ export class HelperSupervisor {
       this.#helper = helper;
       this.#state = "running";
       if (helper.pid !== undefined) writeFileSync(this.#o.pidFile, `${helper.pid}\n`);
+      // Through restartNow: whether this helper is still the one running is checked when the
+      // queued restart runs, not when the exit is noticed. A ping or stall handled meanwhile may
+      // have replaced it, and the new helper must not be restarted for the old one's exit
+      // (review #23 r2 P2-1): one incident, one restart.
       this.#offExit = helper.onExit(() => {
-        if (gen === this.#gen && this.#helper === helper && this.#state === "running") {
-          this.#busy = this.#busy.then(() => this.#restart("the helper exited", gen));
-        }
+        if (gen === this.#gen && this.#helper === helper && this.#state === "running")
+          void this.restartNow("the helper exited", helper);
       });
     })();
     const settled = run.catch(() => {});
