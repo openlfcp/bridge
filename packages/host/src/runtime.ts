@@ -16,6 +16,8 @@ import { type Launchctl, launchctl } from "./launchd.js";
 import { openNodeInstallation } from "./lfcp/fallback/node-installation.js";
 import { pairedSections } from "./lfcp/fallback/paired-sections.js";
 import type { MigrationPorts } from "./migration.js";
+import { installationPorts, machineProcess } from "./run/machine.js";
+import type { InstallationPorts } from "./run/process.js";
 
 export interface ResolvedSection {
   readonly installationId: string;
@@ -42,6 +44,13 @@ export interface Runtime {
    * `sections add` and `migrate resume` say so; `migrate status` and `abort` work without it.
    */
   readonly migrationPorts?: () => Promise<MigrationPorts>;
+  /** The installations' ports (SectionHost, access, who it is) for dry-run (PR 9b). */
+  readonly openInstallations?: () => Promise<{
+    readonly ports: readonly InstallationPorts[];
+    close(): void;
+  }>;
+  /** Starts the run process (PR 9b); its stop stops it all. */
+  readonly startProcess?: () => Promise<{ stop(reason?: string): Promise<void> }>;
   close(): Promise<void>;
 }
 
@@ -139,6 +148,8 @@ export async function machineRuntime(env: NodeJS.ProcessEnv = process.env): Prom
       }
       return undefined;
     },
+    openInstallations: () => installationPorts(db),
+    startProcess: async () => machineProcess({ db, config, paths }),
     verifySignature: (app) => {
       try {
         // codesign --verify exits non-zero on a broken signature.
