@@ -607,6 +607,42 @@ describe("review PR 9b r3 #31: a pass sends only its own binding's queue", () =>
     }
   });
 
+  it("…and with b's and c's passes in parallel, b's update waits for b's own transitions", async () => {
+    const stopped = { on: false };
+    const { other, task, proc } = await twoBindings(stopped);
+    try {
+      await proc.start();
+      stopped.on = true;
+      await b.edit(setTitle(b.now(task.id), "B"));
+      await proc.pass("b");
+      await b.edit(unassign(b.now(task.id), b.root));
+      stopped.on = false;
+      // c's pass reaches its sending first: b's snapshot is held back until c is done.
+      const snapshot = b.t.snapshot.bind(b.t);
+      let release = () => {};
+      const cDone = new Promise<void>((r) => {
+        release = r;
+      });
+      b.t.snapshot = async (l) => {
+        if (l === b.list.id) await cDone;
+        return snapshot(l);
+      };
+      const passB = proc.pass("b");
+      await proc.pass("c");
+      release();
+      await passB;
+      expect(reminders()[0]?.title).toBe("A");
+      expect(
+        b.db.prepare("SELECT state, state_reason FROM intents WHERE kind = 'update'").get(),
+      ).toEqual({
+        state: "superseded",
+        state_reason: "link_out_of_filter",
+      });
+    } finally {
+      await other.close();
+    }
+  });
+
   it("…and a not_started retry of b (after a lost answer) is not sent by c's pass either", async () => {
     const stopped = { on: false };
     const { other, task, proc } = await twoBindings(stopped);
