@@ -223,4 +223,21 @@ describe("HelperSupervisor", () => {
       child.kill("SIGKILL");
     }
   });
+
+  it("restartNow restarts the helper that stalled, within the restart budget (R-001 live run 2)", async () => {
+    const r = rig();
+    await r.s.start();
+    const stalled = r.s.helper;
+    await r.s.restartNow("stalled: items.snapshot", stalled);
+    expect(r.helpers).toHaveLength(2);
+    expect(r.helpers[0]?.closed).toBe(true);
+    expect(r.s.state).toBe("running");
+    // A late report about the helper that was already replaced restarts nothing.
+    await r.s.restartNow("stalled again", stalled);
+    expect(r.helpers).toHaveLength(2);
+    // Each stall counts: more than 3 within 5 minutes and the helper is unavailable.
+    for (let i = 0; i < 3; i++) await r.s.restartNow("stalled", r.s.helper);
+    expect(r.s.state).toBe("unavailable");
+    expect(r.unavailable[0]).toMatch(/stalled/);
+  });
 });

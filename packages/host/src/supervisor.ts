@@ -124,6 +124,21 @@ export class HelperSupervisor {
     return this.#busy;
   }
 
+  /**
+   * Restarts the helper now, for `reason` (the helper reported a stalled store call, R-001 live
+   * run 2). Counts toward the restart budget like any restart. With `helper`, only that helper is
+   * restarted: a late report about one already replaced restarts nothing.
+   */
+  restartNow(reason: string, helper?: SupervisedHelper): Promise<void> {
+    const gen = this.#gen;
+    this.#busy = this.#busy.then(async () => {
+      if (gen !== this.#gen || this.#state !== "running" || this.#helper === undefined) return;
+      if (helper !== undefined && this.#helper !== helper) return;
+      await this.#restart(reason, gen);
+    });
+    return this.#busy;
+  }
+
   async stop(): Promise<void> {
     this.#gen++;
     if (this.#timer !== undefined)

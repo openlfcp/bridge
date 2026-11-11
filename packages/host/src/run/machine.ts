@@ -16,6 +16,7 @@ import {
   EventKitTransport,
   type HelperLink,
   HelperProcess,
+  type WireEvent,
 } from "@openlfcp/bridge-transport-eventkit";
 import { receiptOf, revocationStatus } from "@openlfcp/client";
 import { fromHex, type ResourceId, resourceId } from "@openlfcp/core";
@@ -154,6 +155,29 @@ export function helperReconnector(o: {
   };
 }
 
+/**
+ * The helper's "stalled" event (a store call passed the helper's deadline; it answered
+ * eventkit_timeout and went on with a new store, R-001 live run 2): journal it and restart the
+ * helper, so nothing of the stuck call stays around. Other events are not this handler's.
+ */
+export function helperStallHandler(o: {
+  readonly journal: Journal;
+  readonly restart: (reason: string) => Promise<void>;
+}): (e: WireEvent) => void {
+  return (e) => {
+    if (e.event !== "stalled") return;
+    const op = typeof e.op === "string" ? e.op : "a store call";
+    const after = typeof e.timeoutS === "number" ? ` after ${e.timeoutS} s` : "";
+    o.journal.append("error", "helper.stalled", {
+      params: {
+        op,
+        text: `The Reminders helper gave up on ${op}${after}: its outcome is unknown. Restarting the helper.`,
+      },
+    });
+    void o.restart(`the helper stalled on ${op}`).catch(() => {});
+  };
+}
+
 export async function machineProcess(o: {
   readonly db: BridgeDatabase;
   readonly config: BridgeConfig;
@@ -193,15 +217,22 @@ export async function machineProcess(o: {
       const link = await HelperProcess.start(options);
       current = link;
       helper = { helperVersion: link.ready.helperVersion, macOS };
-      return {
+      const supervised = {
         pid: link.ready.pid,
         ping: async () => {
           const r = await link.request("access.status", {}, { timeoutMs: 10_000 });
           if (r.ok !== true) throw new Error("no answer");
         },
         close: () => link.close(),
-        onExit: (cb) => link.onExit(cb),
+        onExit: (cb: (code: number | null) => void) => link.onExit(cb),
       };
+      link.onEvent(
+        helperStallHandler({
+          journal,
+          restart: (reason) => supervisor.restartNow(reason, supervised),
+        }),
+      );
+      return supervised;
     },
     onRestart: () => {
       void reconnector.restarted();
