@@ -56,6 +56,8 @@ export interface HelperProcessOptions {
   readonly appPath: string;
   readonly launch?: "open" | "direct";
   readonly backend?: "eventkit" | "memory";
+  /** The helper's deadline for one store call, seconds (serve --op-timeout; the helper's default is 30). */
+  readonly opTimeoutS?: number;
   readonly readyTimeoutMs?: number;
   readonly requestTimeoutMs?: number;
   /** The LaunchServices launcher; tests substitute a stand-in. Default ["open"]. */
@@ -173,6 +175,7 @@ export class HelperProcess implements HelperLink {
       opts.backend ?? "eventkit",
       "--host-pid",
       String(process.pid),
+      ...(opts.opTimeoutS === undefined ? [] : ["--op-timeout", String(opts.opTimeoutS)]),
     ];
     let out: Readable;
     let err: Readable;

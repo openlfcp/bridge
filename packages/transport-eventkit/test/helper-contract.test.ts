@@ -165,6 +165,39 @@ if (available) {
       await t.close();
     }, 30_000);
   });
+
+  describe("a store call past the helper's deadline (R-001 live run 2, review #23)", () => {
+    it("answers eventkit_timeout, refuses the next request, then the helper exits", async () => {
+      const link = await HelperProcess.start({
+        appPath: APP,
+        launch: "direct",
+        backend: "memory",
+        opTimeoutS: 0.3,
+      });
+      started.push(link);
+      const events: string[] = [];
+      link.onEvent((e) => events.push(e.event));
+      const exited = new Promise<number | null>((r) => link.onExit(r));
+      const hung = await link.request("debug.hang", { seconds: 30 }, { timeoutMs: 5000 });
+      expect(hung).toMatchObject({
+        ok: false,
+        error: { code: "eventkit_timeout", retryable: false },
+      });
+      const next = await link.request("lists.list", {}, { timeoutMs: 5000 }).catch((e) => e);
+      // Either refused at once, or the helper is already gone: it never runs on the stalled one.
+      if (!(next instanceof HelperLostError))
+        expect(next).toMatchObject({
+          ok: false,
+          error: { code: "helper_stalled", retryable: true },
+        });
+      expect(events).toContain("stalled");
+      const code = await Promise.race([
+        exited,
+        new Promise((r) => setTimeout(() => r("alive"), 5000)),
+      ]);
+      expect(code).not.toBe("alive");
+    }, 30_000);
+  });
 } else if (process.env.REQUIRE_HELPER === "1") {
   // The helper-protocol CI job must run these tests, not skip them.
   describe("helper contract", () => {
