@@ -269,6 +269,20 @@ export async function sectionsCommand(rt: Runtime, env: RunCliEnvironment): Prom
   return EXIT.OK;
 }
 
+/** A shell word in single quotes: nothing expands in it, `!` included (zsh, bash). */
+const quoted = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
+
+/** The command that resumes a pairing waiting for approval, ready to paste (review PR 9b #30). */
+export function pairResumeCommand(
+  label: string,
+  installation: string,
+  sections: readonly string[],
+): string {
+  return `pbpaste | lfcp-bridge pair --label ${quoted(label)} --installation ${installation} ${sections
+    .map((x) => `--section ${quoted(x)}`)
+    .join(" ")}`;
+}
+
 export async function pairCommand(
   rt: Runtime,
   o: {
@@ -302,7 +316,7 @@ export async function pairCommand(
   );
   if (code === PAIR_EXIT.WAITING) {
     env.out(
-      `not approved yet; run again: lfcp-bridge pair --label ${o.label} --installation ${id} --section …`,
+      `not approved yet; approve it on the managing device, then run again:\n  ${pairResumeCommand(o.label, id, o.sections)}`,
     );
     return EXIT.NEEDS_PERSON;
   }
