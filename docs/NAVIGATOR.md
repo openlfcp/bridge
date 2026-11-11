@@ -20,19 +20,17 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 |---|---|---|
 | `src/cli.ts`, `src/commands.ts`, `src/exit.ts` | the command table and exit codes; later commands answer "not available in this build" | 1 |
 | `src/db/` | `bridge.sqlite` on better-sqlite3 (WAL, synchronous=FULL, foreign keys): `schema.ts` (migrations over `user_version`, each with its `down`), `database.ts` (open, `migrateTo`, newer schema refused), `holds.ts` (a set per binding), `journal.ts`, `stop.ts` (the STOP file) | 2 |
-| `src/lfcp/section-host.ts` | SectionHost: one SyncClient per coordinator; restore/rebuild of checkpoints, applier, snapshot binding (load only, never publish), sync driver, outbound; `commitGuarded` is the only commit; `onNodesChanged`; `isLive` / `generation` | 3a |
+| `src/lfcp/section-host.ts` | SectionHost: one SyncClient per coordinator (with the SDK's 429 upgrade probe); restore/rebuild of checkpoints, applier, snapshot binding (load only, never publish), sync driver, outbound; `commitGuarded` is the only commit; `onNodesChanged`; `isLive` / `generation` | 3a |
 | `src/lfcp/commit-guard.ts` | the atomic basis check (§5.8): a wrapper of `CommitBinding.stage` with a guard registry by array object; unguarded stage → `UnguardedCommitError`, failed check → `BasisChangedError` | 3a |
 | `src/lfcp/live.ts` | `lfcp_live` (§5.3, R2-13): LIVE now, in the current generation of the connection; reset on disconnect, wake, rebuild | 3a |
-| `src/lfcp/fallback/` | **SDK gap fallbacks**, one file each, marked `FALLBACK for sdk-ts G…`: `node-installation.ts` (G3), `paired-sections.ts` (G1). Removed by the chore that moves to the sdk-ts release with 504 | 3a |
 | `src/lfcp/liveness.ts`, `reconnect.ts` | a PING after 15 s of silence, dead after 5 s more → drop and reconnect; backoff 1 s → 15 s ±20 %, restartable; `SectionHost.wake()` (drop, reconnect, new generation) and `networkBack()` | 3b |
-| `src/lfcp/access.ts` | `access_checked_now` (an answer in the current generation: allowed or read-only), `offline_commit_allowed` (the last answer kept in `meta`); a refusal → `revocationStatus` (the §8.6 write barrier) → refused / revoked for good; hold `access_refused` | 3b |
+| `src/lfcp/access.ts` | `access_checked_now` (an answer in the current generation: allowed or read-only), `offline_commit_allowed` (the last answer kept in `meta`); a refusal or `canWrite` "revoked" → `revocationStatus` (the §8.6 write barrier) → refused / revoked for good; hold `access_refused` | 3b |
 | `src/lfcp/delivery.ts` | §5.9: batch status → intent; no-op receipt delivered at once; rejected and partial by the field's generation (`bases.intent_id`), conflicts `lfcp_rejected` / `lfcp_partial`; blocked → hold `access_refused` | 3b |
 | `src/executor/permissions.ts` | **the one table** of what an effect needs, for normal / verification / bootstrap / unbind (§7.1, r3 P2-4): `permits(context)` | 7 |
 | `src/executor/intents.ts` | intents in `bridge.sqlite` (§5.6): ULID ids, `brg1:<id>`, one open intent per Task and direction, the state steps | 7 |
 | `src/executor/executor.ts` | prepare (after the limits) → §7.1 → `effecting` → one call → result → finalize; recovery §5.7 (`unknown_outcome` quarantine, which also holds the Task's fields in both directions until resolved; every unknown outcome is quarantined, nothing inferred from the item — B19; an opKey with an unknown outcome is never sent again — `OutcomeUnknownError` → quarantine, a new opKey only after a person; `OperationInFlightError` and a second runner in this process → `in_flight`, not repeated); an intent is checked against its binding and its payload against its kind before any call; **effects off** (Apple only through the fake transport, LFCP only through `offlineTestPort`) | 7 |
 | `src/executor/limits.ts`, `safe-mode.ts`, `transport-state.ts` | sliding-window limits with prepared intents counted (§7.2); runs and Safe Mode (§7.3); the transport's DurableKV in `transport_state` | 7 |
 | `src/reconcile/pass.ts`, `section-view.ts` | a pass of one binding (§5.5): the section's Tasks from the replica, the list's snapshot, links / bases / open intents / conflicts → the adapter's plan; guards §7.2 checked without setting them; **dry-run only**: the plan is stored in `runs` (kind `dry`), `apply` answers `dry_run_only` | 8 |
-| `src/lfcp/fallback/device-root.ts` | **FALLBACK for sdk-ts G4**: the person's root (who "me" is for the filter) from the finished pairing request | 8 |
 | `src/reconcile/handler.ts` | the adapter's part of the executor (§5.6, §5.8): finalize by direction (R2-1: to_apple — LFCP base from the basis, Apple base from `written`; create also links; to_lfcp — LFCP base from the stored intents applied, Apple base from the basis), B14 journal, the basis check inside stage; `currentLfcp` for delivery (§5.9) | 10 |
 | `src/bootstrap.ts`, `src/ownership.ts` | bind: scan → list → marker (§6.5, B16/B17), unknown outcomes resolved by a person; the ownership check (foreign_bridge, ownership_lost) | 9 |
 | `src/supervisor.ts` | the helper process: ping 30 s, restart, 3 in 5 min → helper_unavailable, orphan from helper.pid | 9 |
@@ -42,9 +40,8 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 | `src/reconcile/import-task.ts` | a new reminder's Task (§6.2): its id stable for the reminder (UUIDv7 from a hash of section, binding and the reminder's externalId or id), no assignee | 11 |
 | `src/reconcile/bases.ts` | the decisions that write no side (§5.5): "bases" (equivalent sides) and "shadow", recorded by an applied pass, `intent_id` NULL | 9b |
 | `src/run/process.ts` | **the run process**: start (Safe Mode, sections, ownership, recovery, write mode, a full pass), one pass at a time per binding (plan → write gate B16/§7.6 → LinkApplier → decisions → intents), triggers (remote nodes, rebuild, LIVE back, the change hint; debounce 400 ms / 3 s; wake; 15 min), delivery, stop | 9b |
-| `src/run/machine.ts` | the process on the machine: installations (storage-node state, a SectionHost on the paired coordinator, an AccessTracker with revocationStatus, G4 root), the EventKit transport over the supervised helper (restart → reopen; > 3 in 5 min → helper_unavailable), writesVerified | 9b |
-| `src/run/cli.ts` | `run` (run.lock, until SIGTERM / SIGINT), `dry-run`, `approve` (a planned dry run ≤ 1 h old, ownership not lost, strict 24 h), `pair` (storage-node pair), `sections` | 9b |
-| `src/lfcp/fallback/section-end.ts` | **FALLBACK for sdk-ts G9**: the section's end (after the last node at depth 0) for an import | 11 |
+| `src/run/machine.ts` | the process on the machine: installations (the SDK's `openNodeInstallation` with its defaults, `storePairedResources`, a SectionHost on the coordinator of `pairedResources`, an AccessTracker with revocationStatus, the root from `deviceIdentity`), the EventKit transport over the supervised helper (restart → reopen; > 3 in 5 min → helper_unavailable), writesVerified | 9b |
+| `src/run/cli.ts` | `run` (run.lock, until SIGTERM / SIGINT), `dry-run`, `approve` (a planned dry run ≤ 1 h old, ownership not lost, strict 24 h), `pair` (storage-node pair), `sections` (`pairedResources`; "(not ready)" when the SDK says it is not usable here) | 9b |
 
 ## Adapter (`packages/reminders/src/adapter/`, PR 8)
 
@@ -62,9 +59,10 @@ Pure: no I/O, no host; the host gives it a view and gets a plan.
 
 ## The SDK
 
-`@openlfcp/*` from npm at 0.5.2, exact versions. The bridge API of sdk-ts (pairedResources,
-deviceIdentity, openNodeInstallation, sectionEnd, connection reuse) comes in a separate chore
-once sdk-ts releases it; until then the host keeps its own fallbacks in `src/lfcp/`.
+`@openlfcp/*` from npm at 0.6.0, exact versions (with `pnpm.overrides`). The host uses the
+SDK's bridge API directly, with no fallbacks of its own: `openNodeInstallation`
+(storage-node: identity sessions kept alive 60 s, the 429 upgrade probe), `pairedResources`,
+`storePairedResources` and `deviceIdentity` (client), `sectionEnd` (shared-objects/sections).
 
 ## Live tests
 

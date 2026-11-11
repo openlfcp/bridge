@@ -86,7 +86,7 @@ export interface PassBinding {
 
 export interface PassView {
   readonly binding: PassBinding;
-  /** The person's root as a PrincipalRef (G4); needed by the filters default and mine. */
+  /** The person's root as a PrincipalRef (deviceIdentity); needed by the filters default and mine. */
   readonly me?: string;
   /** The section's Tasks (deleted ones too), from the replica. */
   readonly tasks: readonly LfcpTask[];
@@ -105,7 +105,7 @@ export interface PassView {
   /** The zone Apple's completion dates are read in. */
   readonly timeZone: string;
   /**
-   * Where a new Task goes: the section's end (`sectionEnd`, G9); without it nothing is imported
+   * Where a new Task goes: the section's end (`sectionEnd` of the SDK's sections profile); without it nothing is imported
    * (§6.2). Its parent is the section, `after` the last node at depth 0.
    */
   readonly sectionEnd?: { readonly parent: string; readonly after: string | null };

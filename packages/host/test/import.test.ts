@@ -1,6 +1,6 @@
 // New reminders → Tasks (D-010 §6.2, R2-9, PR 11): e2e E4 of r2 §10.3 on a
 // real section replica and the fake account. The new Task goes to the
-// section's end (G9) through commitGuarded, its id is stable for the
+// section's end (sectionEnd) through commitGuarded, its id is stable for the
 // reminder, the link is pending_lfcp_create until finalize; restore_url
 // puts our link on the reminder, a person's URL is never touched; the
 // import limit (r2 §7.2) and import_ambiguous (R2-9 (4)) stop imports.

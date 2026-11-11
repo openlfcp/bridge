@@ -14,12 +14,10 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Plan } from "@openlfcp/bridge-reminders/adapter";
+import { deviceIdentity, pairedResources } from "@openlfcp/client";
 import { fromHex, resourceId, toHex } from "@openlfcp/core";
-import { PAIR_EXIT, pair } from "@openlfcp/storage-node";
+import { openNodeInstallation, PAIR_EXIT, pair } from "@openlfcp/storage-node";
 import { EXIT, type ExitCode } from "../exit.js";
-import { deviceRoot } from "../lfcp/fallback/device-root.js";
-import { openNodeInstallation } from "../lfcp/fallback/node-installation.js";
-import { pairedSections } from "../lfcp/fallback/paired-sections.js";
 import { Pass } from "../reconcile/pass.js";
 import type { Runtime } from "../runtime.js";
 import { seedInstanceId } from "./process.js";
@@ -253,13 +251,13 @@ export async function sectionsCommand(rt: Runtime, env: RunCliEnvironment): Prom
     const node = await openNodeInstallation(r.dir);
     try {
       env.out(`installation ${r.id} (${r.label})`);
-      for (const s of await pairedSections(node.storage)) {
+      for (const s of await pairedResources(node)) {
         const hex = toHex(s.resource);
         const bound = rt.db
           .prepare("SELECT id, state FROM bindings WHERE resource_id = ? AND state <> 'removed'")
           .get(hex) as { id: string; state: string } | undefined;
         env.out(
-          `  ${s.name ?? "(no name)"}  ${hex.slice(0, 12)}…${s.chainStored ? "" : "  (not stored yet)"}${bound ? `  bound: ${bound.id} ${bound.state}` : ""}`,
+          `  ${s.name ?? "(no name)"}  ${hex.slice(0, 12)}…${s.ready ? "" : "  (not ready)"}${bound ? `  bound: ${bound.id} ${bound.state}` : ""}`,
         );
       }
     } finally {
@@ -324,7 +322,7 @@ export async function pairCommand(
   const node = await openNodeInstallation(dir);
   try {
     const principal = node.installation.signer.descriptor.principalId;
-    const root = await deviceRoot(node.storage, principal);
+    const root = (await deviceIdentity(node))?.root;
     rt.db
       .prepare(
         `INSERT INTO installations (id, dir, principal, root, label, created_at) VALUES (?, ?, ?, ?, ?, ?)

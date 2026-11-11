@@ -1,6 +1,6 @@
 // The binding's filter (D-010 §6.1, r2 §6.1, QB10). `me` is the person's
-// root as a PrincipalRef: `deviceIdentity(storage).root` (sdk-ts G4); the
-// host passes it in (until 504, from its fallback).
+// root as a PrincipalRef: `deviceIdentity({ storage, installation }).root`
+// of @openlfcp/client; the host passes it in.
 //
 // | mode      | in the filter when                                          |
 // |-----------|-------------------------------------------------------------|

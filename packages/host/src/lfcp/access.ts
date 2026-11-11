@@ -16,11 +16,12 @@
 // `access_refused` on R's bindings; an "allowed" or "read-only" answer
 // lifts it. Everything is per installation (its Principal): the kept
 // answer, the holds (bindings of that installation only) and the tracker
-// (one per SectionHost, whose generations it follows). A revoked capability
-// (`canWrite` reason "revoked": a grant no longer active) is a refusal, not
-// a revocation of the device: only revocationStatus proves that (N5).
+// (one per SectionHost, whose generations it follows). `canWrite` reason
+// "revoked" (SDK 0.6.0) is a grant no longer active in the chain or this
+// device's revocation proven here: a refusal, then revocationStatus decides
+// as for a server refusal — only it proves a revocation of the device (N5).
 // (The identity barrier of the plugin, LFCP-04-406, is for SDKs
-// before identity; the SDK 0.5.2 the bridge uses is identity-aware, so the
+// before identity; the SDK the bridge uses is identity-aware, so the
 // barrier here is the write barrier of §8.6.)
 
 import type { SyncEvent, WriteAccess } from "@openlfcp/client";
@@ -219,6 +220,12 @@ export class AccessTracker {
       // Counts only if nothing happened to the access since it started, in this generation.
       if (this.#version.get(toHex(resource)) !== version) return;
       if (generation !== this.#o.source.generation) return;
+      // "revoked" (SDK 0.6.0): a grant no longer active in the chain, or this device's revocation
+      // proven here (the write barrier). A refusal either way; revocationStatus says which.
+      if (access.reason === "revoked") {
+        void this.refused(resource, "revoked");
+        return;
+      }
       this.#answer(resource, fromWriteAccess(access), access.reason ?? undefined);
     });
   }
