@@ -71,7 +71,7 @@ case "serve":
         while let line = readLine(strippingNewline: true) {
             if line.trimmingCharacters(in: .whitespaces).isEmpty { continue }
             server.queue.async {
-                out.emit(server.handle(line: line))
+                out.emit(server.respond(line: line))
                 if server.shutdownRequested { exit(0) }
             }
         }

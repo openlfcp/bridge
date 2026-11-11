@@ -9,6 +9,12 @@ public final class Server {
     private let coalesce: TimeInterval
     private let eventQueue = DispatchQueue(label: "helper.events")
     public let queue = DispatchQueue(label: "helper.requests")
+    /// How long one request may run (respond). A store call that never returns would otherwise
+    /// hold `queue` for good (R-001 live run 2).
+    public let opTimeout: TimeInterval
+    /// Where respond runs a request; replaced when a request passes its deadline.
+    private var worker = DispatchQueue(label: "helper.worker.0")
+    private var workers = 0
 
     // Write allowlist (second line of defense, D-010 §8.1). Empty until `hello`.
     private var allowListIds: Set<String> = []
@@ -23,9 +29,11 @@ public final class Server {
     private var lastAuthorization: Authorization
     public private(set) var shutdownRequested = false
 
-    public init(backend: Backend, coalesce: TimeInterval = 0.2, emit: @escaping (JSON) -> Void) {
+    public init(backend: Backend, coalesce: TimeInterval = 0.2, opTimeout: TimeInterval = 30,
+                emit: @escaping (JSON) -> Void) {
         self.backend = backend
         self.coalesce = coalesce
+        self.opTimeout = opTimeout
         self.emit = emit
         self.lastAuthorization = backend.authorization
         backend.onChange = { [weak self] in self?.noteChange() }
@@ -69,6 +77,34 @@ public final class Server {
     }
 
     // MARK: Requests
+
+    /// Handles one request line within `opTimeout` (call it on `queue`, one at a time). Past the
+    /// deadline the answer is `eventkit_timeout` for that request, a `stalled` event tells the host
+    /// (it restarts the helper and journals it), and the next request runs on a new worker after
+    /// `backend.abandon()`. The stuck call is left to finish or not; nothing it returns is sent.
+    public func respond(line: String) -> JSON {
+        let t0 = Date()
+        let done = DispatchSemaphore(value: 0)
+        let box = Box()
+        worker.async {
+            box.value = self.handle(line: line)
+            done.signal()
+        }
+        if done.wait(timeout: .now() + opTimeout) == .success, let r = box.value { return r }
+        let request = (try? JSON.parse(line))?.objectValue
+        let op = request?["op"]?.stringValue ?? "?"
+        workers += 1
+        worker = DispatchQueue(label: "helper.worker.\(workers)")
+        backend.abandon()
+        emit(["event": "stalled", "op": .string(op), "timeoutS": .number(opTimeout), "ts": .number(Server.nowMs())])
+        let error = HelperError(.eventkitTimeout,
+                                "\(op) did not finish within \(Int(opTimeout.rounded(.up))) s; its outcome is unknown",
+                                ["op": .string(op)])
+        return ["id": request?["id"] ?? .null, "ok": false, "error": error.json,
+                "ms": .int(Int(Date().timeIntervalSince(t0) * 1000))]
+    }
+
+    private final class Box { var value: JSON? }
 
     /// Handles one request line and returns the response (one JSON object).
     public func handle(line: String) -> JSON {

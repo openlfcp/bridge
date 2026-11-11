@@ -255,6 +255,11 @@ public final class MemoryBackend: Backend {
 
     public func debug(_ name: String, _ body: [String: JSON]) throws -> JSON {
         switch name {
+        case "hang":
+            // A store call that takes this long (seconds): tests of the request deadline.
+            Thread.sleep(forTimeInterval: body["seconds"]?.numberValue ?? 3600)
+            return ["slept": true]
+
         case "setAuthorization":
             guard let s = body["authorization"]?.stringValue, let a = Authorization(rawValue: s) else {
                 throw invalid("authorization must be one of notDetermined, restricted, denied, fullAccess, writeOnly")
