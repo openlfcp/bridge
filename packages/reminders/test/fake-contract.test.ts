@@ -134,3 +134,20 @@ describe("fake transport faults", () => {
     expect(hints[0]).toEqual({ coarse: true });
   });
 });
+
+describe("fake store notifications", () => {
+  it("settled() resolves once every queued change notification has been delivered", async () => {
+    const store = new FakeStore();
+    const seen: (readonly string[])[] = [];
+    store.subscribe((ids) => seen.push(ids));
+    store.subscribe((ids) => seen.push(ids));
+    store.changed(["R1"]);
+    store.changed(["R2"]);
+    expect(store.undelivered).toBe(4);
+    expect(seen).toHaveLength(0);
+    await store.settled();
+    expect(store.undelivered).toBe(0);
+    expect(seen).toHaveLength(4);
+    await store.settled(); // nothing queued: at once
+  });
+});

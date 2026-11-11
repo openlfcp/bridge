@@ -76,6 +76,14 @@ function processOf(
   return p;
 }
 const reminders = () => b.reminders(b.list.id).filter((r) => !r.completed);
+/** No change notification undelivered and no pass scheduled or running. */
+async function quiet(proc: BridgeProcess): Promise<void> {
+  do {
+    await b.store.settled();
+    await proc.idle();
+  } while (b.store.undelivered > 0);
+}
+
 const runsOf = (kind: string) =>
   (b.db.prepare("SELECT count(*) AS n FROM runs WHERE kind = ?").get(kind) as { n: number }).n;
 
@@ -159,6 +167,11 @@ describe("triggers, one pass at a time, decisions", () => {
     await b.task("Buy milk");
     const proc = processOf();
     await proc.start();
+    // The start's own writes to Reminders notify the transport asynchronously (like
+    // EKEventStoreChanged), and the process schedules a pass for each hint. Counted from here
+    // without waiting, a hint delivered late (a loaded machine) added a third pass. Quiet first:
+    // every notification delivered, every pass it scheduled done.
+    await quiet(proc);
     let inFlight = 0;
     let most = 0;
     const snapshot = b.t.snapshot.bind(b.t);
