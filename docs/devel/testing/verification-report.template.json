@@ -1,0 +1,85 @@
+{
+  "helperVersion": "",
+  "macOS": "",
+  "checks": [
+    {
+      "name": "1 Obsidian: new task with a date → a reminder on iPhone, date without time",
+      "ok": false,
+      "note": ""
+    },
+    { "name": "2 Obsidian: rename → the reminder is renamed", "ok": false, "note": "" },
+    { "name": "3 iPhone: rename → the task is renamed", "ok": false, "note": "" },
+    {
+      "name": "4 iPhone: time, alarm, note → the task's date unchanged; they stay on iPhone",
+      "ok": false,
+      "note": ""
+    },
+    { "name": "5 iPhone: date moved → the task's date moved", "ok": false, "note": "" },
+    {
+      "name": "6 Obsidian: rename again → time, alarm and note of step 4 kept",
+      "ok": false,
+      "note": ""
+    },
+    { "name": "7 iPhone: priority high → the task's priority high", "ok": false, "note": "" },
+    { "name": "8 iPhone: completed → the task done with today's date", "ok": false, "note": "" },
+    { "name": "9 Obsidian: reopened → the reminder not completed", "ok": false, "note": "" },
+    {
+      "name": "10 iPhone: a new reminder → a task at the end of the section, linked",
+      "ok": false,
+      "note": ""
+    },
+    {
+      "name": "11 the bridge's link survives a person's edits of the reminder",
+      "ok": false,
+      "note": ""
+    },
+    {
+      "name": "12 Obsidian: cancelled → the reminder completed, the task stays cancelled",
+      "ok": false,
+      "note": ""
+    },
+    {
+      "name": "13 iPhone: reminder deleted → the task stays, unlinked, not recreated",
+      "ok": false,
+      "note": ""
+    },
+    {
+      "name": "14 iPhone: reminder moved to another list → guard_mass_unlink hold",
+      "ok": false,
+      "note": ""
+    },
+    {
+      "name": "15 resume --accept guard_mass_unlink → unlinked moved_out",
+      "ok": false,
+      "note": ""
+    },
+    {
+      "name": "16 Obsidian: task deleted → hold, accept → the reminder stays",
+      "ok": false,
+      "note": ""
+    },
+    { "name": "17 stop → no sync", "ok": false, "note": "" },
+    { "name": "18 resume → the rename goes", "ok": false, "note": "" },
+    {
+      "name": "19 Obsidian: 4 tasks deleted at once → holds, accept → the reminders stay",
+      "ok": false,
+      "note": ""
+    },
+    { "name": "20 Ctrl-C and run again → works", "ok": false, "note": "" },
+    {
+      "name": "21 due removed on one side, changed on the other → the outcome of the checklist",
+      "ok": false,
+      "note": ""
+    },
+    {
+      "name": "22 lost answer: helper killed during a write → restarted, no duplicate, no loss",
+      "ok": false,
+      "note": ""
+    },
+    {
+      "name": "23 a repeating reminder in the list → the bridge keeps working",
+      "ok": false,
+      "note": ""
+    }
+  ]
+}

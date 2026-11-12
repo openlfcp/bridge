@@ -148,6 +148,11 @@ export class EventKitTransport implements RemindersTransport {
     return this.#status;
   }
 
+  /** The running helper's version (its `ready`); undefined while it is not running. */
+  get helperVersion(): string | undefined {
+    return this.#link?.ready.helperVersion;
+  }
+
   /**
    * Asks for full Reminders access (the system dialog of the helper app). Only on a person's
    * explicit command (doctor --request-access, bind): never in the background (§8.2).

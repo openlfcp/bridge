@@ -17,8 +17,9 @@ import { Holds } from "./db/holds.js";
 import { Journal } from "./db/journal.js";
 import { type Launchctl, launchctl } from "./launchd.js";
 import type { MigrationPorts } from "./migration.js";
-import { installationPorts, machineProcess } from "./run/machine.js";
+import { installationPorts, machineProcess, macOSVersion } from "./run/machine.js";
 import type { InstallationPorts } from "./run/process.js";
+import type { HelperIdentity } from "./verification.js";
 
 export interface ResolvedSection {
   readonly installationId: string;
@@ -39,6 +40,11 @@ export interface Runtime {
   readonly node: string;
   readonly cli: string;
   readonly verifySignature?: (app: string) => boolean;
+  /**
+   * The helper that runs here and its macOS, as the run process compares them with writesVerified
+   * (§7.6): the helper's version from its `ready`, macOS from sw_vers. undefined without a helper.
+   */
+  readonly helperIdentity?: () => Promise<HelperIdentity | undefined>;
   /**
    * What N8 needs from the machine: pairing, the new installation's connection, the old one's
    * close and revocationStatus. Undefined until the run process exists (PR 9 after 8): then
@@ -161,6 +167,21 @@ export async function machineRuntime(env: NodeJS.ProcessEnv = process.env): Prom
       } catch {
         return false;
       }
+    },
+    async helperIdentity() {
+      // Started as for any command (writes off); its ready names the build, as for `run`.
+      const t = new EventKitTransport({
+        appPath: config.helperPath ?? paths.helperApp,
+        writes: "off",
+      });
+      transports.push(t);
+      await t.open({
+        installationKey: config.bridgeInstanceId,
+        state: new DatabaseKV(db, "eventkit", config.bridgeInstanceId),
+        scope: { listTitlePrefixes: [], listIds: [] },
+      });
+      const helperVersion = t.helperVersion;
+      return helperVersion === undefined ? undefined : { helperVersion, macOS: macOSVersion() };
     },
     async close() {
       for (const t of transports) await t.close().catch(() => {});
