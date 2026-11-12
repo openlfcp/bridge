@@ -322,4 +322,29 @@ describe("review #28", () => {
     await b.sync();
     expect(everywhere("Call Bob")).toHaveLength(1);
   });
+
+  it("r2: several matches → link <reminder> <intent> ignores the others; the next passes keep the link, no new quarantine", async () => {
+    const { task, intent, made } = await unknownCreate();
+    // A second reminder in the bound list carries the Task's link too.
+    const copy = b.person.create(b.list.id, "Call Bob (copy)", { url: made.linkUrl as string });
+    const r = await call("quarantine", "redo", intent);
+    expect([r.code, r.err]).toEqual([
+      EXIT.NEEDS_PERSON,
+      expect.stringContaining("several reminders carry this Task's link"),
+    ]);
+    const l = await call("quarantine", "link", made.ref.id, intent);
+    expect(l.code).toBe(EXIT.OK);
+    expect(l.out).toContain("1 other(s) ignored");
+    await b.sync();
+    await b.sync();
+    expect(b.link(task.id)?.state).toBe("linked");
+    expect(b.linkOf(made.ref.id)?.task_id).toBe(task.id);
+    expect(b.linkOf(copy.ref.id)).toBeUndefined();
+    expect((await call("quarantine")).out).toBe("nothing in quarantine");
+    // The Task's edits go to the chosen one only.
+    await b.edit(setTitle(b.now(task.id), "Call Bob today"));
+    await b.sync();
+    const titles = Object.fromEntries(reminders().map((x) => [x.ref.id, x.title]));
+    expect(titles).toEqual({ [made.ref.id]: "Call Bob today", [copy.ref.id]: "Call Bob (copy)" });
+  });
 });
