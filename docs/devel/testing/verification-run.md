@@ -14,13 +14,17 @@
 
 ## 0. Подготовка
 
-В Obsidian создай **тестовую** секцию `Verify` (пустую). Дальше всё делаем только с ней.
+В Obsidian создай **тестовую** секцию `Verify` (пустую) и сделай её **общей** (shared): до `pair` она должна быть
+в roster, иначе `pair` ответит `Not in the roster, or ambiguous: Verify`. Дальше всё делаем только с ней.
+
+`lfcp-bridge` здесь — функция оболочки, а не alias: alias, заданный во вставленном в zsh блоке, в этом же блоке ещё
+не действует.
 
 ```sh
 cd ~/dev/openlfcp-work/mvp-0.5/bridge
 pnpm install --frozen-lockfile
 pnpm build
-alias lfcp-bridge="node $PWD/packages/host/dist/cli.js"
+lfcp-bridge() { node "$HOME/dev/openlfcp-work/mvp-0.5/bridge/packages/host/dist/cli.js" "$@"; }
 lfcp-bridge --version
 lfcp-bridge doctor --request-access
 ```
@@ -30,14 +34,15 @@ lfcp-bridge doctor --request-access
 
 ## 1. Pairing (мост — служебное устройство, B-001)
 
-В Obsidian: плагин LFCP → устройства → добавить служебное устройство → доступ к секции `Verify` → **скопировать
-ссылку**. Затем на Mac:
+В Obsidian: `Cmd+P` → **Shared Tasks: Add my other device…** → **Copy link**. Окно не закрывай. (В настройках
+плагина пункта «устройства» нет.) Затем на Mac:
 
 ```sh
 pbpaste | lfcp-bridge pair --label "Mac bridge" --section Verify
 ```
 
-1. Команда печатает отпечаток; сравни его с экраном Obsidian и подтверди там.
+1. Команда печатает отпечаток. В том же окне Obsidian нажми **Review**, сравни отпечаток с напечатанным и подтверди,
+   оставив доступ только к `Verify`.
 2. Ответ `paired: installation …` — готово.
 3. Ответ `not approved yet` — подтверди в Obsidian, скопируй ссылку ещё раз и выполни команду, которую напечатал
    этот ответ: она полная, с `--installation`, кавычками и твоей секцией.
@@ -81,7 +86,7 @@ lfcp-bridge run
 Оставь окно открытым: процесс работает, пока не нажмёшь Ctrl-C. Во втором окне Terminal:
 
 ```sh
-alias lfcp-bridge="node $HOME/dev/openlfcp-work/mvp-0.5/bridge/packages/host/dist/cli.js"
+lfcp-bridge() { node "$HOME/dev/openlfcp-work/mvp-0.5/bridge/packages/host/dist/cli.js" "$@"; }
 lfcp-bridge log --limit 30
 ```
 
