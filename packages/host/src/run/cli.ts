@@ -11,7 +11,16 @@
 // | `sections`                           | the paired sections of every installation, bound or not    |
 
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { join } from "node:path";
 import type { Plan } from "@openlfcp/bridge-reminders/adapter";
 import { deviceIdentity, OperationJournal, pairedResources } from "@openlfcp/client";
@@ -322,11 +331,57 @@ export async function pairCommand(
   }
   const id = o.installation ?? randomUUID();
   const dir = join(rt.paths.installations, id);
+  // One pairing of an installation at a time (review #25): installations/<id>.lock, made with
+  // "wx" before the directory is claimed and held until this command returns. A second pair of
+  // the same installation is refused without touching the directory.
+  const lock = takePairLock(rt.paths.installations, id);
+  if (lock === undefined) {
+    env.err(
+      `a pairing of installation ${id} is already running; if no lfcp-bridge pair is running, remove ${join(rt.paths.installations, `${id}.lock`)} and run again`,
+    );
+    return EXIT.USAGE;
+  }
+  try {
+    return await pairUnderLock(rt, { ...o, label: o.label }, id, dir, env);
+  } finally {
+    lock();
+  }
+}
+
+/**
+ * installations/<id>.lock, created exclusively; its release removes it. undefined when it exists:
+ * another pair of this installation holds it (or one that died left it, for a person to remove).
+ */
+export function takePairLock(installations: string, id: string): (() => void) | undefined {
+  mkdirSync(installations, { recursive: true, mode: 0o700 });
+  const path = join(installations, `${id}.lock`);
+  let fd: number;
+  try {
+    fd = openSync(path, "wx", 0o600);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") return undefined;
+    throw e;
+  }
+  try {
+    writeSync(fd, `${process.pid}\n`);
+  } finally {
+    closeSync(fd);
+  }
+  return () => rmSync(path, { force: true });
+}
+
+async function pairUnderLock(
+  rt: Runtime,
+  o: { readonly label: string; readonly sections: readonly string[]; readonly wait?: number },
+  id: string,
+  dir: string,
+  env: RunCliEnvironment,
+): Promise<ExitCode> {
   // A pairing that is neither done nor waiting leaves nothing behind (R-023): the directory this
-  // run claimed, keys included, goes. The claim is atomic (a non-recursive mkdir: EEXIST is
-  // someone else's — an --installation that existed, a concurrent pair), and even a claimed
-  // directory stays once a pairing request is recorded in it: a concurrent pair on the same
-  // --installation may have made one there, and its WAITING state is not ours to remove.
+  // run claimed, keys included, goes. The lock keeps any other pair of this installation out;
+  // as defence the claim is atomic too (a non-recursive mkdir: EEXIST is someone else's, an
+  // --installation that existed), and a claimed directory with a pairing request recorded in
+  // it is kept.
   const created = claimDirectory(rt.paths.installations, dir);
   const discard = async () => {
     if (created && !(await hasPairingRequest(dir))) rmSync(dir, { recursive: true, force: true });
