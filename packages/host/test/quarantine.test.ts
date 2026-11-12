@@ -147,7 +147,7 @@ describe("quarantine: an unknown outcome (§5.7, B19)", () => {
     b.person.edit(r0.ref, { title: "Buy milk" }); // as if the write never landed
     const r = await call("quarantine", "redo", intent);
     expect(r.code).toBe(EXIT.OK);
-    expect(r.out).toContain("redo: the next pass plans title again from LFCP");
+    expect(r.out).toContain("redo: the next pass writes title again from LFCP");
     expect(intentState(intent).state).toBe("quarantined"); // terminal; its decision is recorded
     expect(openConflicts()).toBe(0);
     const next = await b.sync();
@@ -248,5 +248,78 @@ describe("quarantine: the hold import_ambiguous (§6.2)", () => {
       /^b {2}b {2}import_ambiguous {2}since \S+ {2}\(pending imports: none\)$/m,
     );
     expect(r.out).toContain("    → lfcp-bridge resume --accept import_ambiguous --binding b");
+  });
+});
+
+describe("review #28", () => {
+  it("P2-a: redo writes LFCP even when LFCP went back to the base meanwhile (not Reminders' value into LFCP)", async () => {
+    // A/A → rename to B in LFCP; the answer is lost (the write happened: the reminder is B).
+    const { task, intent } = await unknownOutcome();
+    expect(reminders().map((x) => x.title)).toEqual(["Buy bread"]);
+    // During the quarantine the person changes LFCP back to A.
+    await b.edit(setTitle(b.now(task.id), "Buy milk"));
+    expect((await call("quarantine", "redo", intent)).code).toBe(EXIT.OK);
+    await b.sync();
+    // "Write it again from LFCP": Reminders gets A; LFCP keeps A (B must not come back into it).
+    expect(b.now(task.id).title).toBe("Buy milk");
+    expect(reminders().map((x) => x.title)).toEqual(["Buy milk"]);
+  });
+
+  /** "Call Bob": its create's answer is lost (the reminder was made), then quarantined. */
+  async function unknownCreate(): Promise<{ task: Task; intent: string; made: AppleItem }> {
+    b = await bridge();
+    b.t.faults.loseNextResponse = 1;
+    const task = await b.task("Call Bob");
+    const s = await b.sync();
+    expect(s.outcomes).toEqual([{ kind: "lost" }]);
+    await b.e.settle("b");
+    const intent = (s.prepared[0] as { id: string }).id;
+    expect(intentState(intent)).toEqual({ state: "quarantined", state_reason: "unknown_outcome" });
+    const made = reminders()[0] as AppleItem;
+    expect(made.title).toBe("Call Bob");
+    return { task, intent, made };
+  }
+  const everywhere = (title: string) => b.reminders().filter((x) => x.title === title);
+
+  for (const choice of ["accept", "redo"] as const)
+    it(`P2-b: ${choice} of an unknown create whose reminder was moved to another list links it, never a second one`, async () => {
+      const { task, intent, made } = await unknownCreate();
+      const other = b.person.createList("Elsewhere");
+      b.person.edit(made.ref, { moveTo: other.id });
+      const r = await call("quarantine", choice, intent);
+      expect(r.code).toBe(EXIT.OK);
+      expect(r.out).toContain('the create happened — linked to "Call Bob"');
+      await b.sync();
+      await b.sync();
+      expect(everywhere("Call Bob")).toHaveLength(1);
+      expect(b.link(task.id)?.state).not.toBe("pending_apple_create");
+      expect((await call("quarantine")).out).toBe("nothing in quarantine");
+    });
+
+  it("P2-b: an incomplete search refuses and says to pick the reminder; link <reminder> <intent> does", async () => {
+    const { task, intent, made } = await unknownCreate();
+    const find = b.t.find.bind(b.t);
+    b.t.find = async () => ({ items: [], complete: false });
+    const r = await call("quarantine", "redo", intent);
+    expect(r.code).toBe(EXIT.NEEDS_PERSON);
+    expect(r.err).toContain(`lfcp-bridge quarantine link <reminder> ${intent}`);
+    expect(intentState(intent).state).toBe("quarantined");
+    b.t.find = find;
+    const l = await call("quarantine", "link", made.ref.id, intent);
+    expect(l.code).toBe(EXIT.OK);
+    await b.sync();
+    expect(b.link(task.id)?.state).toBe("linked");
+    expect(everywhere("Call Bob")).toHaveLength(1);
+  });
+
+  it("P2-b: a create that made nothing (found nowhere) is released: the next pass makes it once", async () => {
+    const { intent, made } = await unknownCreate();
+    b.store.items.delete(made.ref.id); // as if the create never landed
+    expect((await call("quarantine", "redo", intent)).out).toContain(
+      "finds the reminder by its link",
+    );
+    await b.sync();
+    await b.sync();
+    expect(everywhere("Call Bob")).toHaveLength(1);
   });
 });

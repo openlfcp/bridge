@@ -245,7 +245,7 @@ async function recordCommand(
 const QUARANTINE_USAGE = `lfcp-bridge quarantine [list] [--binding <binding>]
        lfcp-bridge quarantine accept <intent>     the write happened: take Reminders as it is
        lfcp-bridge quarantine redo <intent>       write it again from LFCP
-       lfcp-bridge quarantine link <reminder> <task>
+       lfcp-bridge quarantine link <reminder> <task>     (or <intent>: the reminder an unknown create made)
        lfcp-bridge quarantine ignore <reminder> <task>`;
 
 /** `quarantine` (D-010 §2.1, §5.4, §5.7): what waits for a person, and their decisions. */
@@ -256,7 +256,8 @@ async function quarantineCommand(
   env: CliEnvironment,
 ): Promise<ExitCode> {
   const [sub = "list", a, b] = positional;
-  const o = { journal: rt.journal };
+  // Reminders is opened only when a decision needs it (an unknown create looks for its reminder).
+  const o = { journal: rt.journal, transport: () => rt.openTransport() };
   const done = (r: Resolution): ExitCode => {
     if (r.kind === "refused") {
       env.err(`quarantine ${sub} refused: ${r.text}`);
@@ -308,7 +309,7 @@ async function quarantineCommand(
     case "accept":
       if (a === undefined) return usage(env, QUARANTINE_USAGE);
       return done(
-        acceptOutcome(rt.db, a, {
+        await acceptOutcome(rt.db, a, {
           ...o,
           handler: bridgeHandler({ timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }),
         }),
@@ -316,7 +317,7 @@ async function quarantineCommand(
     case "redo":
     case "drop":
       if (a === undefined) return usage(env, QUARANTINE_USAGE);
-      return done(redoOutcome(rt.db, a, o));
+      return done(await redoOutcome(rt.db, a, o));
     case "link":
     case "ignore": {
       if (a === undefined || b === undefined) return usage(env, QUARANTINE_USAGE);
