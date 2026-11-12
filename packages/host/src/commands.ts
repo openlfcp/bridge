@@ -2,8 +2,9 @@
 // each (§11). Until then a command answers "not available in this build"
 // (exit 2), and `status` lists it the same way.
 
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { type BindOutcome, Bootstrap } from "./bootstrap.js";
+import { loadConfig, saveConfig } from "./config.js";
 import { HOLD_REASONS, type HoldReason } from "./db/holds.js";
 import { resume, stop, stopState } from "./db/stop.js";
 import { doctor, worst } from "./doctor.js";
@@ -19,6 +20,7 @@ import {
 } from "./run/cli.js";
 import { bumpControl } from "./run/process.js";
 import { machineRuntime, type Runtime } from "./runtime.js";
+import { decideRecord, parseVerificationReport } from "./verification.js";
 
 export interface CommandInfo {
   readonly name: string;
@@ -59,7 +61,12 @@ export const COMMANDS: readonly CommandInfo[] = Object.freeze([
   { name: "conflicts", summary: "field conflicts", pr: "10" },
   { name: "quarantine", summary: "ambiguous matches and unknown outcomes", pr: "12" },
   { name: "refused", summary: "refused intents", pr: "7" },
-  { name: "verify", summary: "the verification run of the owner", pr: "9", ready: true },
+  {
+    name: "verify",
+    summary: "the verification run of the owner; --record <report.json> sets writesVerified",
+    pr: "9",
+    ready: true,
+  },
   {
     name: "sections add",
     summary: "N8: a section for a new installation",
@@ -172,6 +179,51 @@ function bindResult(r: BindOutcome, env: CliEnvironment): ExitCode {
   }
 }
 
+/**
+ * `verify --record <report.json>` (§7.6): a green verification report sets writesVerified for the
+ * helper that runs here and this macOS. Refused, config unchanged: a red or empty report, no
+ * verification binding, no helper, or a report made with another helper or macOS.
+ */
+async function recordCommand(
+  rt: Runtime,
+  file: string | true | undefined,
+  env: CliEnvironment,
+): Promise<ExitCode> {
+  if (typeof file !== "string") return usage(env, "lfcp-bridge verify --record <report.json>");
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (e) {
+    env.err(`cannot read ${file}: ${(e as Error).message}`);
+    return EXIT.NOT_FOUND;
+  }
+  const report = parseVerificationReport(text);
+  if (typeof report === "string") {
+    env.err(`${file}: ${report} (docs/devel/testing/verification-report.template.json)`);
+    return EXIT.USAGE;
+  }
+  const binding = rt.db
+    .prepare("SELECT 1 FROM bindings WHERE verification = 1 AND state <> 'removed' LIMIT 1")
+    .get();
+  const decision = decideRecord(loadConfig(rt.paths.config), report, {
+    running: await rt.helperIdentity?.(),
+    verificationBinding: binding !== undefined,
+  });
+  if (decision.kind === "refused") {
+    env.err(
+      `verify --record refused (${decision.reason}): ${decision.detail}; writesVerified unchanged`,
+    );
+    return EXIT.NEEDS_PERSON;
+  }
+  saveConfig(rt.paths.config, decision.config);
+  const r = decision.record;
+  env.out(`writesVerified: helper ${r.helperVersion} on macOS ${r.macOS}, recorded ${r.at}`);
+  env.out(
+    "normal bindings may now write with this helper on this macOS; another helper build or macOS resets it",
+  );
+  return EXIT.OK;
+}
+
 async function run(
   name: string,
   args: readonly string[],
@@ -209,6 +261,8 @@ async function run(
     }
     case "bind":
     case "verify": {
+      if (name === "verify" && opts.has("record"))
+        return recordCommand(rt, opts.get("record"), env);
       const transport = await rt.openTransport();
       const boot = new Bootstrap({
         db: rt.db,
@@ -286,8 +340,9 @@ async function run(
     case "status": {
       const s = stopState(rt.paths.home);
       env.out(`STOP: ${s === undefined ? "no" : `yes${s.at ? ` (since ${s.at})` : ""}`}`);
+      const wv = rt.config.writesVerified;
       env.out(
-        `writesVerified: ${rt.config.writesVerified ? `${rt.config.writesVerified.helperVersion} on macOS ${rt.config.writesVerified.macOS}` : "no (dry run only)"}`,
+        `writesVerified: ${wv ? `helper ${wv.helperVersion} on macOS ${wv.macOS} (recorded ${wv.at}; another helper or macOS resets it)` : "no (dry run only; lfcp-bridge verify --record <report.json>)"}`,
       );
       const rows = rt.db
         .prepare(

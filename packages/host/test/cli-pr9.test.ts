@@ -1,6 +1,6 @@
 // The commands of PR 9 through `main` with a test runtime (fake transport, temp home, no launchctl).
 
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakePerson, FakeStore, FakeTransport } from "@openlfcp/bridge-reminders/fake";
@@ -45,7 +45,7 @@ function gated(t: FakeTransport): FakeTransport & {
   return g;
 }
 
-async function machine(ports?: MigrationPorts) {
+async function machine(ports?: MigrationPorts, extra: Partial<Runtime> = {}) {
   const home = mkdtempSync(join(tmpdir(), "lfcp-cli-"));
   const paths = {
     ...bridgePaths({ LFCP_BRIDGE_HOME: home, LFCP_BRIDGE_LOGS: join(home, "logs") }, home),
@@ -57,12 +57,12 @@ async function machine(ports?: MigrationPorts) {
   const store = new FakeStore();
   const kv = new MemoryKV();
   const ctl: string[][] = [];
-  const config = loadConfig(paths.config);
   let transport: FakeTransport | undefined;
   const rt = (): Runtime => ({
     paths,
     db,
-    config,
+    // Read by every command, as on the machine (verify --record writes it).
+    config: loadConfig(paths.config),
     journal: new Journal(db),
     holds: new Holds(db),
     async openTransport() {
@@ -82,6 +82,7 @@ async function machine(ports?: MigrationPorts) {
     node: "/usr/local/bin/node",
     cli: "/opt/bridge/cli.js",
     ...(ports === undefined ? {} : { migrationPorts: async () => ports }),
+    ...extra,
     async close() {},
   });
   const call = async (...argv: string[]) => {
@@ -242,5 +243,110 @@ describe("lfcp-bridge (PR 9 commands)", () => {
     expect(await m.call("sections", "add", "Home")).toMatchObject({ code: EXIT.USAGE });
     expect((await m.call("migrate", "status")).out).toBe("no migrations");
     expect((await m.call("migrate", "abort")).code).toBe(EXIT.NOT_FOUND);
+  });
+});
+
+describe("verify --record (§7.6): the owner's report sets writesVerified", () => {
+  const HELPER = { helperVersion: "0.3.1", macOS: "26.5.2" };
+  const green = (over: Record<string, unknown> = {}) => ({
+    ...HELPER,
+    checks: [
+      { name: "1 a task → a reminder", ok: true, note: "" },
+      { name: "2 rename in Obsidian", ok: true, note: "" },
+    ],
+    ...over,
+  });
+  async function verified(o: { running?: typeof HELPER; bind?: boolean } = {}) {
+    const m = await machine(undefined, { helperIdentity: async () => o.running });
+    if (o.bind !== false) expect((await m.call("verify", "--section", "Test")).code).toBe(EXIT.OK);
+    const record = async (report: unknown) => {
+      const file = join(m.paths.home, "report.json");
+      writeFileSync(file, typeof report === "string" ? report : JSON.stringify(report));
+      return m.call("verify", "--record", file);
+    };
+    const config = () => readFileSync(m.paths.config, "utf8");
+    return { m, record, config };
+  }
+
+  it("a green report records the running helper and macOS; status shows it", async () => {
+    const { m, record } = await verified({ running: HELPER });
+    const r = await record(green());
+    expect(r.code).toBe(EXIT.OK);
+    expect(r.out).toContain("writesVerified: helper 0.3.1 on macOS 26.5.2, recorded ");
+    expect(loadConfig(m.paths.config).writesVerified).toMatchObject(HELPER);
+    expect((await m.call("status")).out).toMatch(
+      /writesVerified: helper 0\.3\.1 on macOS 26\.5\.2 \(recorded \d{4}-/,
+    );
+  });
+
+  it("a red check or no checks: refused, exit 3, config unchanged", async () => {
+    const { record, config } = await verified({ running: HELPER });
+    const before = config();
+    const red = await record(
+      green({
+        checks: [
+          { name: "1 a task → a reminder", ok: true, note: "" },
+          { name: "22 lost answer", ok: false, note: "duplicate" },
+        ],
+      }),
+    );
+    expect([red.code, red.err]).toEqual([
+      EXIT.NEEDS_PERSON,
+      expect.stringContaining("not ok: 22 lost answer"),
+    ]);
+    const empty = await record(green({ checks: [] }));
+    expect([empty.code, empty.err]).toEqual([
+      EXIT.NEEDS_PERSON,
+      expect.stringContaining("no checks"),
+    ]);
+    expect(config()).toBe(before);
+  });
+
+  it("a report of another helper build or macOS than the running one is refused", async () => {
+    const { record, config } = await verified({
+      running: { helperVersion: "0.3.2", macOS: "26.5.2" },
+    });
+    const before = config();
+    const r = await record(green());
+    expect([r.code, r.err]).toEqual([
+      EXIT.NEEDS_PERSON,
+      expect.stringContaining("helper_mismatch"),
+    ]);
+    expect(r.err).toContain("this machine runs helper 0.3.2 on macOS 26.5.2");
+    expect(config()).toBe(before);
+  });
+
+  it("refused without a verification binding, or without a running helper", async () => {
+    const unbound = await verified({ running: HELPER, bind: false });
+    expect((await unbound.record(green())).err).toContain("no_binding");
+    const noHelper = await verified({});
+    expect((await noHelper.record(green())).err).toContain("no_helper");
+    expect(loadConfig(noHelper.m.paths.config).writesVerified).toBeUndefined();
+  });
+
+  it("a malformed report is a usage error; --record needs a file", async () => {
+    const { m, record } = await verified({ running: HELPER });
+    expect((await record("{")).code).toBe(EXIT.USAGE);
+    expect((await record(green({ checks: [{ name: "1", ok: "yes" }] }))).err).toContain(
+      "ok must be true or false",
+    );
+    expect((await m.call("verify", "--record")).code).toBe(EXIT.USAGE);
+  });
+
+  it("the template lists steps 1–23, none ok yet: recorded as is, it is refused", async () => {
+    const { record } = await verified({ running: HELPER });
+    const template = JSON.parse(
+      readFileSync(
+        join(__dirname, "../../../docs/devel/testing/verification-report.template.json"),
+        "utf8",
+      ),
+    ) as { checks: { name: string; ok: boolean }[] };
+    expect(template.checks.map((c) => Number.parseInt(c.name, 10))).toEqual(
+      Array.from({ length: 23 }, (_, i) => i + 1),
+    );
+    expect(template.checks.every((c) => c.ok === false)).toBe(true);
+    const r = await record({ ...template, ...HELPER });
+    expect(r.code).toBe(EXIT.NEEDS_PERSON);
+    expect(r.err).toContain("not_green");
   });
 });
