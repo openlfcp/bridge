@@ -37,6 +37,7 @@ import type { BridgeDatabase } from "../db/database.js";
 import { Holds } from "../db/holds.js";
 import { Journal } from "../db/journal.js";
 import { stopState } from "../db/stop.js";
+import { type LOSE_NEXT_WRITE_ANSWER, loseNextWriteAnswer, verificationWrite } from "../fault.js";
 import { AccessTracker, metaAccessStore } from "../lfcp/access.js";
 import { SectionHost, type SectionHostOptions } from "../lfcp/section-host.js";
 import { DatabaseKV } from "../runtime.js";
@@ -192,6 +193,8 @@ export async function machineProcess(o: {
   readonly db: BridgeDatabase;
   readonly config: BridgeConfig;
   readonly paths: BridgePaths;
+  /** The verification run's fault injection (LFCP_BRIDGE_FAULT, src/fault.ts); off by default. */
+  readonly fault?: typeof LOSE_NEXT_WRITE_ANSWER;
 }): Promise<{ readonly process: BridgeProcess; stop(reason?: string): Promise<void> }> {
   const { db, config, paths } = o;
   const journal = new Journal(db);
@@ -214,6 +217,12 @@ export async function machineProcess(o: {
   const macOS = macOSVersion();
   // The helper of the moment: a restart may bring another build (writesVerified follows it).
   let helper: HelperIdentity = { helperVersion: "", macOS };
+  // LFCP_BRIDGE_FAULT (verification run, step 22): one shot for the whole run.
+  const fault =
+    o.fault === undefined
+      ? undefined
+      : { shot: { armed: true }, applies: verificationWrite(db), journal };
+  if (o.fault !== undefined) journal.append("warn", "fault.armed", { params: { fault: o.fault } });
   const supervisor = new HelperSupervisor({
     pidFile: paths.helperPid,
     start: async () => {
@@ -225,7 +234,9 @@ export async function machineProcess(o: {
           journal.append("warn", "helper.unmatched", { params: { line: line.slice(0, 200) } }),
       };
       const link = await HelperProcess.start(options);
-      current = link;
+      // The transport's link: with the verification run's fault, its next verification write
+      // loses its answer (src/fault.ts). The supervisor pings and closes the helper itself.
+      current = fault === undefined ? link : loseNextWriteAnswer(link, fault);
       helper = { helperVersion: link.ready.helperVersion, macOS };
       const supervised = {
         pid: link.ready.pid,

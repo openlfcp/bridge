@@ -70,6 +70,10 @@ export const JOURNAL_TEXT: Readonly<Record<string, (p: JournalParams) => string>
     "You put your own link on the reminder: the bridge keeps it and never puts its own back",
   "helper.unmatched": () =>
     "The Reminders helper said something that answers no request (logged for diagnosis)",
+  "fault.armed": (p) =>
+    `Fault injection is on for this run (${String(p.fault ?? "")}): the next write of a verification binding will lose its answer`,
+  "fault.injected": (p) =>
+    `Fault injection: the answer of ${String(p.op ?? "")} (opKey ${String(p.opKey ?? "")}) was dropped after the helper ${p.answered ? "saved it" : "refused it"}, and the helper was killed`,
   "helper.reconnect_failed": (p) =>
     `The Reminders helper came back but could not be reconnected: ${String(p.error ?? "")}`,
   "effect.refused": (p) => `Reminders refused a write: ${String(p.code ?? "")}`,
