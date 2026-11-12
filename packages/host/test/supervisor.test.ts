@@ -33,6 +33,8 @@ function rig(now = { t: 0 }) {
   const dir = mkdtempSync(join(tmpdir(), "lfcp-sup-"));
   const helpers: FakeHelper[] = [];
   const unavailable: string[] = [];
+  /** The backoff's waits, in order (none really waited). */
+  const sleeps: number[] = [];
   const s = new HelperSupervisor({
     start: async () => {
       const h = new FakeHelper();
@@ -45,8 +47,11 @@ function rig(now = { t: 0 }) {
     clearInterval: () => {},
     isOurs: () => false,
     onUnavailable: (r) => unavailable.push(r),
+    sleep: async (ms: number) => {
+      sleeps.push(ms);
+    },
   });
-  return { s, helpers, unavailable, dir, now, pidFile: join(dir, "helper.pid") };
+  return { s, helpers, unavailable, sleeps, dir, now, pidFile: join(dir, "helper.pid") };
 }
 
 describe("HelperSupervisor", () => {
@@ -89,6 +94,56 @@ describe("HelperSupervisor", () => {
     await r.s.resume();
     expect(r.s.state).toBe("running");
     expect(r.helpers).toHaveLength(count + 1);
+  });
+
+  it("hang analysis G2: a relaunch waits 1 s doubling to 60 s; back to 1 s after a healthy run or a resume", async () => {
+    const r = rig();
+    await r.s.start();
+    const stall = async () => {
+      await r.s.restartNow("stalled on items.snapshot", r.s.helper, { budget: false });
+    };
+    // Restarts outside the budget (a held list): only the backoff spaces them.
+    for (let i = 0; i < 8; i++) {
+      r.now.t += 1_000;
+      await stall();
+    }
+    expect(r.sleeps).toEqual([1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000]);
+    expect(r.s.state).toBe("running");
+    // The helper then ran 5 minutes without a restart: the next one waits the base again.
+    r.now.t += 5 * 60_000;
+    await stall();
+    expect(r.sleeps.at(-1)).toBe(1_000);
+    await stall();
+    expect(r.sleeps.at(-1)).toBe(2_000);
+    await r.s.resume();
+    await stall();
+    expect(r.sleeps.at(-1)).toBe(1_000);
+  });
+
+  it("a stop during the backoff wait launches nothing", async () => {
+    const r = rig();
+    let wake: () => void = () => {};
+    const s = new HelperSupervisor({
+      start: async () => {
+        const h = new FakeHelper();
+        r.helpers.push(h);
+        return h;
+      },
+      pidFile: r.pidFile,
+      setInterval: () => ({}),
+      clearInterval: () => {},
+      isOurs: () => false,
+      sleep: () => new Promise<void>((res) => (wake = res)),
+    });
+    await s.start();
+    const restarting = s.restartNow("stalled", s.helper);
+    await new Promise((res) => setImmediate(res));
+    expect(s.state).toBe("restarting");
+    await s.stop();
+    wake();
+    await restarting;
+    expect(r.helpers).toHaveLength(1);
+    expect(s.state).toBe("stopped");
   });
 
   it("restarts spread over more than 5 minutes stay within the budget", async () => {
@@ -164,6 +219,7 @@ describe("HelperSupervisor", () => {
       setInterval: () => ({}),
       clearInterval: () => {},
       isOurs: () => false,
+      sleep: async () => {},
     });
     await s.start();
     (helpers[0] as FakeHelper).answering = false;

@@ -6,6 +6,9 @@
 // - a ping every 30 s; no answer (the ping's own timeout, 10 s) or an unexpected exit → restart;
 // - more than 3 restarts within 5 min → unavailable: no more restarts, the host sets the hold
 //   helper_unavailable on the bindings of this transport (§7.5) until a person resumes;
+// - each relaunch waits first: 1 s doubling to 60 s, back to 1 s after 5 min of a healthy helper
+//   or a resume (the hang analysis G2); a restart the host tied to one binding's stalled list does
+//   not count toward the budget above;
 // - stop() wins over a ping or restart in flight: each stop starts a new generation, work of an
 //   older one never launches a helper, and a helper whose start was in flight is closed before
 //   stop() resolves (review PR 9 P2-3).
@@ -35,6 +38,16 @@ export interface SupervisorOptions {
   readonly orphanGraceMs?: number;
   readonly onUnavailable?: (reason: string) => void;
   readonly onRestart?: (reason: string, helper: SupervisedHelper) => void;
+  /**
+   * The wait before a relaunch (the hang analysis G2): backoffBaseMs (default 1 s) doubling per
+   * restart up to backoffMaxMs (default 60 s); back to the base once a helper ran healthyAfterMs
+   * (default 5 min) without a restart, and on a person's resume.
+   */
+  readonly backoffBaseMs?: number;
+  readonly backoffMaxMs?: number;
+  readonly healthyAfterMs?: number;
+  /** How the backoff waits (tests substitute one). */
+  readonly sleep?: (ms: number) => Promise<void>;
   readonly now?: () => number;
   readonly setInterval?: (fn: () => void, ms: number) => { unref?: () => void };
   readonly clearInterval?: (h: unknown) => void;
@@ -80,6 +93,10 @@ export class HelperSupervisor {
   #gen = 0;
   /** The launch in flight (including closing a helper that came up after stop). */
   #launching: Promise<unknown> | undefined;
+  /** Restarts since the helper last ran healthy: the backoff's exponent. */
+  #consecutive = 0;
+  /** When the running helper came up. */
+  #launchedAt: number | undefined;
 
   constructor(options: SupervisorOptions) {
     this.#o = options;
@@ -161,6 +178,7 @@ export class HelperSupervisor {
   /** A person resumed after helper_unavailable: try again with a fresh budget. */
   async resume(): Promise<void> {
     this.#restarts = [];
+    this.#consecutive = 0;
     if (this.#state === "unavailable") await this.#launch(this.#gen);
   }
 
@@ -202,6 +220,7 @@ export class HelperSupervisor {
       }
       this.#helper = helper;
       this.#state = "running";
+      this.#launchedAt = (this.#o.now ?? Date.now)();
       if (helper.pid !== undefined) writeFileSync(this.#o.pidFile, `${helper.pid}\n`);
       // Through restartNow: whether this helper is still the one running is checked when the
       // queued restart runs, not when the exit is noticed. A ping or stall handled meanwhile may
@@ -218,6 +237,16 @@ export class HelperSupervisor {
       if (this.#launching === settled) this.#launching = undefined;
     });
     return run;
+  }
+
+  /** The wait before this relaunch: exponential, bounded, reset after a healthy run. */
+  #backoff(now: number): number {
+    const healthy = this.#o.healthyAfterMs ?? 5 * 60_000;
+    if (this.#launchedAt !== undefined && now - this.#launchedAt >= healthy) this.#consecutive = 0;
+    const base = this.#o.backoffBaseMs ?? 1_000;
+    const delay = Math.min(this.#o.backoffMaxMs ?? 60_000, base * 2 ** this.#consecutive);
+    this.#consecutive++;
+    return delay;
   }
 
   /**
@@ -244,6 +273,11 @@ export class HelperSupervisor {
       return;
     }
     this.#state = "restarting";
+    const delay = this.#backoff(now);
+    if (delay > 0) {
+      await (this.#o.sleep ?? sleep)(delay);
+      if (gen !== this.#gen) return;
+    }
     try {
       await this.#launch(gen);
       if (gen === this.#gen && this.#helper) this.#o.onRestart?.(reason, this.#helper);
