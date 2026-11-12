@@ -4,6 +4,7 @@
 // Tests pass their own Runtime.
 
 import { execFileSync } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import type { DurableKV } from "@openlfcp/bridge-reminders/transport";
 import { EventKitTransport } from "@openlfcp/bridge-transport-eventkit";
 import { pairedResources } from "@openlfcp/client";
@@ -99,6 +100,8 @@ export class DatabaseKV implements DurableKV {
 
 export async function machineRuntime(env: NodeJS.ProcessEnv = process.env): Promise<Runtime> {
   const paths = bridgePaths(env);
+  // The first run on a machine: the data directory does not exist yet (R-023).
+  mkdirSync(paths.home, { recursive: true, mode: 0o700 });
   const db = openBridgeDatabase(paths.database);
   const config = loadConfig(paths.config);
   const journal = new Journal(db);
