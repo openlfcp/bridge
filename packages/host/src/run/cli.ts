@@ -14,7 +14,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Plan } from "@openlfcp/bridge-reminders/adapter";
-import { deviceIdentity, pairedResources } from "@openlfcp/client";
+import { deviceIdentity, OperationJournal, pairedResources } from "@openlfcp/client";
 import { fromHex, resourceId, toHex } from "@openlfcp/core";
 import { openNodeInstallation, PAIR_EXIT, pair } from "@openlfcp/storage-node";
 import { EXIT, type ExitCode } from "../exit.js";
@@ -281,6 +281,29 @@ export function pairResumeCommand(
     .join(" ")}`;
 }
 
+/** Creates `dir` (0700) in `parent` atomically: true if this call made it, false if it existed. */
+export function claimDirectory(parent: string, dir: string): boolean {
+  mkdirSync(parent, { recursive: true, mode: 0o700 });
+  try {
+    mkdirSync(dir, { mode: 0o700 });
+    return true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw e;
+  }
+}
+
+/** Whether a pairing request (any status) is recorded in the installation state `dir`. */
+async function hasPairingRequest(dir: string): Promise<boolean> {
+  if (!existsSync(join(dir, "lfcp.sqlite"))) return false;
+  const node = await openNodeInstallation(dir);
+  try {
+    return (await new OperationJournal(node.storage).list({ kind: "pairing-request" })).length > 0;
+  } finally {
+    node.close();
+  }
+}
+
 export async function pairCommand(
   rt: Runtime,
   o: {
@@ -299,11 +322,14 @@ export async function pairCommand(
   }
   const id = o.installation ?? randomUUID();
   const dir = join(rt.paths.installations, id);
-  // A pairing that is neither done nor waiting leaves nothing behind (R-023): the directory it
-  // made, keys included, goes; one that existed before (--installation) is never touched.
-  const created = !existsSync(dir);
-  const discard = () => {
-    if (created) rmSync(dir, { recursive: true, force: true });
+  // A pairing that is neither done nor waiting leaves nothing behind (R-023): the directory this
+  // run claimed, keys included, goes. The claim is atomic (a non-recursive mkdir: EEXIST is
+  // someone else's — an --installation that existed, a concurrent pair), and even a claimed
+  // directory stays once a pairing request is recorded in it: a concurrent pair on the same
+  // --installation may have made one there, and its WAITING state is not ours to remove.
+  const created = claimDirectory(rt.paths.installations, dir);
+  const discard = async () => {
+    if (created && !(await hasPairingRequest(dir))) rmSync(dir, { recursive: true, force: true });
   };
   let code: number;
   try {
@@ -321,10 +347,10 @@ export async function pairCommand(
       { out: env.out, ...(env.stdin === undefined ? {} : { stdin: env.stdin }) },
     );
   } catch (e) {
-    discard();
+    await discard();
     throw e;
   }
-  if (code !== PAIR_EXIT.DONE && code !== PAIR_EXIT.WAITING) discard();
+  if (code !== PAIR_EXIT.DONE && code !== PAIR_EXIT.WAITING) await discard();
   if (code === PAIR_EXIT.WAITING) {
     env.out(
       `not approved yet; approve it on the managing device, then run again:\n  ${pairResumeCommand(o.label, id, o.sections)}`,
