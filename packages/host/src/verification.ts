@@ -69,9 +69,10 @@ export function parseVerificationReport(text: string): VerificationReportFile | 
   }
   const o = v as Record<string, unknown>;
   if (typeof o !== "object" || o === null) return "not a JSON object";
-  if (typeof o.helperVersion !== "string" || o.helperVersion === "")
+  // Empty until the person fills them in: the refusal then says what this machine runs.
+  if (typeof o.helperVersion !== "string")
     return "helperVersion: the helper version the run was done with";
-  if (typeof o.macOS !== "string" || o.macOS === "") return "macOS: the macOS version of the run";
+  if (typeof o.macOS !== "string") return "macOS: the macOS version of the run";
   if (!Array.isArray(o.checks)) return "checks: an array of {name, ok, note}";
   const checks: VerificationReportFile["checks"][number][] = [];
   for (const [i, c] of (o.checks as unknown[]).entries()) {
@@ -123,7 +124,10 @@ export function decideRecord(
     return {
       kind: "refused",
       reason: "helper_mismatch",
-      detail: `the report is for helper ${report.helperVersion} on macOS ${report.macOS}; this machine runs helper ${running.helperVersion} on macOS ${running.macOS}`,
+      detail:
+        report.helperVersion === "" || report.macOS === ""
+          ? `the report does not say which helper and macOS the run was on; this machine runs helper ${running.helperVersion} on macOS ${running.macOS}: if that is what you tested, write them into the report`
+          : `the report is for helper ${report.helperVersion} on macOS ${report.macOS}; this machine runs helper ${running.helperVersion} on macOS ${running.macOS}`,
     };
   const failed = report.checks.filter((c) => !c.ok);
   if (report.checks.length === 0 || failed.length > 0)
