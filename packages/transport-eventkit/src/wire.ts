@@ -43,6 +43,8 @@ export interface WireReady extends WireEvent {
   readonly bundleId?: string | null;
   readonly pid?: number;
   readonly parentPath?: string;
+  /** Every request is announced with a `started` event before it runs (the hang analysis G4). */
+  readonly requestStarted?: boolean;
 }
 
 type Json = Record<string, unknown>;

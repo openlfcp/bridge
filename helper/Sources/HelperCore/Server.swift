@@ -52,6 +52,8 @@ public final class Server {
         o["backend"] = .string(backend.name)
         o["cas"] = .string(backend.cas)
         o["authorization"] = .string(backend.authorization.rawValue)
+        // Every request is announced with a `started` event before it runs (see respond).
+        o["requestStarted"] = true
         o["ts"] = .number(Server.nowMs())
         return .object(o)
     }
@@ -92,6 +94,12 @@ public final class Server {
         if stalled {
             let error = HelperError(.helperStalled, "the helper stalled on an earlier request and runs nothing more; it is restarting")
             return ["id": request()?["id"] ?? .null, "ok": false, "error": error.json, "ms": .int(0)]
+        }
+        // Before the store sees it: a request the host never saw `started` for never ran, so once
+        // this process is gone the host may send it again (the hang analysis G4). Requests queued
+        // behind a stuck one get no `started`.
+        if let id = request()?["id"], id != .null {
+            emit(["event": "started", "id": id, "ts": .number(Server.nowMs())])
         }
         let done = DispatchSemaphore(value: 0)
         let box = Box()

@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AppleItem, type ListInfo, type ListRef, localDate } from "@openlfcp/bridge-reminders";
 import { FakePerson, FakeStore, FakeTransport } from "@openlfcp/bridge-reminders/fake";
+import { OperationInFlightError } from "@openlfcp/bridge-reminders/transport";
 import { receiptOf } from "@openlfcp/client";
 import { type ResourceId, toHex } from "@openlfcp/core";
 import { setTitle } from "@openlfcp/shared-objects";
@@ -241,6 +242,35 @@ describe("a lost answer (§5.7, r3 P2-1)", () => {
     const third = await executor({ transportOpts: { capabilities: { recover: "exact" } } });
     await third.e.recoverAll();
     expect(stateOf((i as Intent).id).state).toBe("finalized");
+  });
+
+  it("hang analysis G4: a lost write the helper never started stays effecting while it may still run, then goes again", async () => {
+    const it0 = item();
+    const { e, t } = await executor();
+    // The answer is lost before the store saw it (queued behind a stuck read).
+    const apply = t.apply.bind(t);
+    t.apply = async () => {
+      throw Object.assign(new Error("helper exited (null) with a request in flight"), {
+        name: "HelperLostError",
+      });
+    };
+    const [i] = e.prepare("b", { intents: [update(it0, "Buy bread")], unlinks: 0 }) ?? [];
+    expect(await e.run((i as Intent).id)).toEqual({ kind: "lost" });
+    // Its helper still lives: the transport cannot say yet.
+    const recover = t.recover.bind(t);
+    t.recover = async (opKey) => {
+      throw new OperationInFlightError(opKey);
+    };
+    expect(await e.recoverAll()).toEqual([{ kind: "in_flight" }]);
+    expect(stateOf((i as Intent).id).state).toBe("effecting");
+    expect(db.prepare("SELECT count(*) AS n FROM conflicts").get()).toEqual({ n: 0 });
+    // That helper is gone without having started it: not_started → sent again, once.
+    t.recover = recover;
+    t.apply = apply;
+    await e.recoverAll();
+    await e.runDue();
+    expect(stateOf((i as Intent).id).state).toBe("finalized");
+    expect(store.items.get(it0.ref.id)?.title).toBe("Buy bread");
   });
 
   it("update, lost answer, then the person edits, then a restart → quarantine; the person's edit stays", async () => {

@@ -22,6 +22,9 @@ func registerTimeoutTests() {
                    "a stalled event tells the host (it restarts the helper)")
         try expect(rig.events.contains { $0["event"]?.stringValue == "stalled" && $0["list"] == nil },
                    "a request without a list: no list in the event")
+        let started = rig.events.filter { $0["event"]?.stringValue == "started" }.map { $0["id"] }
+        try expectEqual(started, [.int(1)],
+                        "the request that ran was announced; the one refused after the stall never started")
     }
 
     test("after a deadline nothing else runs: a late write cannot use another request's gate (review #23 P1-2)") {
