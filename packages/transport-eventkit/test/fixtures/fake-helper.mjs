@@ -12,6 +12,9 @@
 //                    SIGTERM: only SIGKILL ends it. With FAKE_HELPER_STALL_EVENT_MS it also sends
 //                    the helper's own `stalled` event (op, list of the stuck request) after that
 //                    many ms, as its watchdog would, and still does not exit (G3: main blocked).
+//   die-on:OP        on a request with op OP: announces it (`started`), then SIGKILLs itself
+//                    without answering — the line is in the pipe, maybe not read yet;
+//   die-before:OP    on a request with op OP: SIGKILLs itself before announcing it.
 // Every mode but old-protocol announces each request it runs with `started` (ready
 // requestStarted), as the helper does.
 import fs from "node:fs";
@@ -55,7 +58,9 @@ createInterface({ input })
       send({ ok: false, error: { code: "internal", message: "no id" } });
       return;
     }
+    if (mode === `die-before:${m.op}`) process.kill(process.pid, "SIGKILL");
     if (acks) send({ event: "started", id: m.id });
+    if (mode === `die-on:${m.op}`) process.kill(process.pid, "SIGKILL");
     if (stallAfter !== undefined && handled++ >= stallAfter) {
       stalled = true;
       if (stallEventMs > 0)
