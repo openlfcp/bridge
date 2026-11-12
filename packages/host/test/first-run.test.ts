@@ -8,6 +8,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -19,7 +20,12 @@ import { openNodeInstallation, PAIR_EXIT } from "@openlfcp/storage-node";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bridgePaths } from "../src/config.js";
 import { EXIT } from "../src/exit.js";
-import { claimDirectory, pairCommand } from "../src/run/cli.js";
+import {
+  claimDirectory,
+  PAIR_LOCK_UNREADABLE_STALE_MS,
+  pairCommand,
+  takePairLock,
+} from "../src/run/cli.js";
 import type { Runtime } from "../src/runtime.js";
 
 // storage-node's pair, replaced in a test that sets `fake.pair` (the real one otherwise).
@@ -188,10 +194,11 @@ describe("R-023 #3: a rejected pair leaves no installation behind", () => {
     expect(existsSync(join(installations, "inst-l.lock"))).toBe(false);
   });
 
-  it("review #25: a lock left behind refuses pair without touching the directory", async () => {
+  it("review #25: a lock of a live process refuses pair without touching anything", async () => {
     const installations = rt().paths.installations;
-    mkdirSync(installations, { recursive: true });
-    writeFileSync(join(installations, "inst-s.lock"), "999999999\n");
+    mkdirSync(join(installations, "inst-s"), { recursive: true });
+    writeFileSync(join(installations, "inst-s", "mine"), "x");
+    writeFileSync(join(installations, "inst-s.lock"), `${process.pid}\n`);
     const err: string[] = [];
     const code = await pairCommand(
       rt(),
@@ -200,7 +207,49 @@ describe("R-023 #3: a rejected pair leaves no installation behind", () => {
     );
     expect(code).toBe(EXIT.USAGE);
     expect(err.join("\n")).toContain("remove");
-    expect(readdirSync(installations)).toEqual(["inst-s.lock"]);
+    expect(readdirSync(installations).sort()).toEqual(["inst-s", "inst-s.lock"]);
+    expect(existsSync(join(installations, "inst-s", "mine"))).toBe(true);
+  });
+
+  it("review #25: a lock with a dead pid (Ctrl-C during a waiting pair) is taken over", async () => {
+    const installations = rt().paths.installations;
+    mkdirSync(installations, { recursive: true });
+    writeFileSync(join(installations, "inst-d.lock"), "999999999\n");
+    let ran = false;
+    fake.pair = async (state) => {
+      ran = true;
+      // Held by this pair now.
+      expect(readFileSync(join(installations, "inst-d.lock"), "utf8")).toBe(`${process.pid}\n`);
+      await recordRequest(state);
+      return PAIR_EXIT.WAITING;
+    };
+    const code = await pairCommand(
+      rt(),
+      { label: "Mac", sections: ["Verify"], installation: "inst-d" },
+      quiet("lfcp://pair/zz"),
+    );
+    expect(ran).toBe(true);
+    expect(code).toBe(EXIT.NEEDS_PERSON);
+    expect(existsSync(join(installations, "inst-d.lock"))).toBe(false);
+  });
+
+  it("review #25: a lock without a readable pid is stale only after a minute", () => {
+    const installations = join(dir, "home", "installations");
+    mkdirSync(installations, { recursive: true });
+    const path = join(installations, "inst-u.lock");
+    writeFileSync(path, "");
+    const t = statSync(path).mtimeMs;
+    // Fresh: a writer may be between open and write.
+    expect(takePairLock(installations, "inst-u", () => t + 1_000)).toBeUndefined();
+    const release = takePairLock(
+      installations,
+      "inst-u",
+      () => t + PAIR_LOCK_UNREADABLE_STALE_MS + 1,
+    );
+    expect(typeof release).toBe("function");
+    expect(readFileSync(path, "utf8")).toBe(`${process.pid}\n`);
+    release?.();
+    expect(existsSync(path)).toBe(false);
   });
 
   it("review #25: the claim is atomic — the first mkdir owns the directory, a second does not", () => {

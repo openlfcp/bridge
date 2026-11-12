@@ -18,6 +18,7 @@ import {
   openSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
@@ -331,6 +332,10 @@ export async function pairCommand(
   }
   const id = o.installation ?? randomUUID();
   const dir = join(rt.paths.installations, id);
+  // The link is read first, before the lock and its signal handlers: a blocking read of
+  // standard input runs no handler, so Ctrl-C there must keep its default (end, nothing held).
+  const link = env.stdin?.();
+  const linked: RunCliEnvironment = link === undefined ? env : { ...env, stdin: () => link };
   // One pairing of an installation at a time (review #25): installations/<id>.lock, made with
   // "wx" before the directory is claimed and held until this command returns. A second pair of
   // the same installation is refused without touching the directory.
@@ -341,33 +346,101 @@ export async function pairCommand(
     );
     return EXIT.USAGE;
   }
+  // Ctrl-C during a waiting pair (up to 600 s) skips finally: release the lock, then let the
+  // signal end the process as it would have.
+  const onSignal = (signal: NodeJS.Signals) => {
+    stopListening();
+    lock();
+    process.kill(process.pid, signal);
+  };
+  const stopListening = () => {
+    process.removeListener("SIGINT", onSignal);
+    process.removeListener("SIGTERM", onSignal);
+  };
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
   try {
-    return await pairUnderLock(rt, { ...o, label: o.label }, id, dir, env);
+    return await pairUnderLock(rt, { ...o, label: o.label }, id, dir, linked);
   } finally {
+    stopListening();
     lock();
   }
 }
 
+/** A lock file without a readable pid counts as left behind only after this long (ms). */
+export const PAIR_LOCK_UNREADABLE_STALE_MS = 60_000;
+
 /**
- * installations/<id>.lock, created exclusively; its release removes it. undefined when it exists:
- * another pair of this installation holds it (or one that died left it, for a person to remove).
+ * installations/<id>.lock, created exclusively with this process's pid; its release removes it.
+ * A lock left behind heals itself: its pid gone (ESRCH), or no readable pid and older than a
+ * minute (a writer dead between open and write) → removed, and the open tried once more.
+ * undefined while a live process holds it.
  */
-export function takePairLock(installations: string, id: string): (() => void) | undefined {
+export function takePairLock(
+  installations: string,
+  id: string,
+  now: () => number = Date.now,
+): (() => void) | undefined {
   mkdirSync(installations, { recursive: true, mode: 0o700 });
   const path = join(installations, `${id}.lock`);
-  let fd: number;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let fd: number;
+    try {
+      fd = openSync(path, "wx", 0o600);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      if (attempt > 0 || !removeIfStale(path, now())) return undefined;
+      continue;
+    }
+    try {
+      writeSync(fd, `${process.pid}\n`);
+    } finally {
+      closeSync(fd);
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      rmSync(path, { force: true });
+    };
+  }
+  return undefined;
+}
+
+/** Removes the lock at `path` if it was left behind; true when it is gone. */
+function removeIfStale(path: string, now: number): boolean {
+  let before: ReturnType<typeof statSync>;
+  let text: string;
   try {
-    fd = openSync(path, "wx", 0o600);
+    before = statSync(path);
+    text = readFileSync(path, "utf8").trim();
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "EEXIST") return undefined;
+    // Released meanwhile: free to take.
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return true;
     throw e;
   }
+  const pid = /^\d+$/.test(text) ? Number(text) : Number.NaN;
+  if (Number.isSafeInteger(pid) && pid > 0) {
+    if (!pidGone(pid)) return false;
+  } else if (now - before.mtimeMs < PAIR_LOCK_UNREADABLE_STALE_MS) return false;
+  // Only the file judged stale: not one another process made since.
   try {
-    writeSync(fd, `${process.pid}\n`);
-  } finally {
-    closeSync(fd);
+    if (statSync(path).ino !== before.ino) return false;
+  } catch {
+    return true;
   }
-  return () => rmSync(path, { force: true });
+  rmSync(path, { force: true });
+  return true;
+}
+
+/** Whether no process has this pid: kill(pid, 0) fails with ESRCH (EPERM is a live process). */
+function pidGone(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "ESRCH";
+  }
 }
 
 async function pairUnderLock(
