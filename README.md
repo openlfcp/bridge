@@ -20,7 +20,7 @@ the map of this repository: [docs/NAVIGATOR.md](docs/NAVIGATOR.md).
 - **The owner's verification run before normal writes:** until it has passed on your Mac for this
   helper build and macOS, normal bindings only dry-run.
 - **Quarantine for unknown outcomes:** a write whose answer was lost is never repeated by itself;
-  the `quarantine` command (PR #28) lists it and resolves it as a person decides.
+  the `quarantine` command lists it and resolves it as a person decides.
 
 ## How to set up
 
