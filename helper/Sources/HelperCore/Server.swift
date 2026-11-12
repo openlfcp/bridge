@@ -102,7 +102,12 @@ public final class Server {
         if done.wait(timeout: .now() + opTimeout) == .success, let r = box.value { return r }
         stalled = true
         let op = request()?["op"]?.stringValue ?? "?"
-        emit(["event": "stalled", "op": .string(op), "timeoutS": .number(opTimeout), "ts": .number(Server.nowMs())])
+        var event: [String: JSON] = ["event": "stalled", "op": .string(op), "timeoutS": .number(opTimeout),
+                                     "ts": .number(Server.nowMs())]
+        // The list the request was about, when it names one (items.snapshot, items.create,
+        // markers.create): the host holds that list's binding after repeated stalls on it.
+        if let list = request()?["list"]?.stringValue { event["list"] = .string(list) }
+        emit(.object(event))
         let error = HelperError(.eventkitTimeout,
                                 "\(op) did not finish within \(Int(opTimeout.rounded(.up))) s; its outcome is unknown",
                                 ["op": .string(op)])

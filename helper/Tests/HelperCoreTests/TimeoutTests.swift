@@ -20,6 +20,8 @@ func registerTimeoutTests() {
         try expect(Date().timeIntervalSince(t1) < 1, "the next request does not wait for the stuck one")
         try expect(rig.events.contains { $0["event"]?.stringValue == "stalled" && $0["op"]?.stringValue == "debug.hang" },
                    "a stalled event tells the host (it restarts the helper)")
+        try expect(rig.events.contains { $0["event"]?.stringValue == "stalled" && $0["list"] == nil },
+                   "a request without a list: no list in the event")
     }
 
     test("after a deadline nothing else runs: a late write cannot use another request's gate (review #23 P1-2)") {
@@ -35,6 +37,8 @@ func registerTimeoutTests() {
         let stuck = rig.respond(["op": "items.create", "list": .string(a), "linkUrl": "lfcp://task/T1?s=S&b=b1",
                                  "set": ["title": "x"], "opKey": "k-r"])
         try expectEqual(stuck["error"]?["code"]?.stringValue, "eventkit_timeout")
+        try expect(rig.events.contains { $0["event"]?.stringValue == "stalled" && $0["list"]?.stringValue == a },
+                   "the stalled event names the request's list (the host holds that binding)")
         let later = rig.respond(["op": "lists.create", "title": "LFCP · B", "opKey": "k-b"])
         try expectEqual(later["error"]?["code"]?.stringValue, "helper_stalled", "the next request is refused, not run")
         rig.backend.beforeWriteGuard = nil
