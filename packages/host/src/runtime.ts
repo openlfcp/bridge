@@ -15,6 +15,7 @@ import { type BridgeConfig, type BridgePaths, bridgePaths, loadConfig } from "./
 import { type BridgeDatabase, openBridgeDatabase } from "./db/database.js";
 import { Holds } from "./db/holds.js";
 import { Journal } from "./db/journal.js";
+import { faultFromEnv } from "./fault.js";
 import { type Launchctl, launchctl } from "./launchd.js";
 import type { MigrationPorts } from "./migration.js";
 import { installationPorts, machineProcess, macOSVersion } from "./run/machine.js";
@@ -158,7 +159,10 @@ export async function machineRuntime(env: NodeJS.ProcessEnv = process.env): Prom
       return undefined;
     },
     openInstallations: () => installationPorts(db),
-    startProcess: async () => machineProcess({ db, config, paths }),
+    startProcess: async () => {
+      const fault = faultFromEnv(env);
+      return machineProcess({ db, config, paths, ...(fault === undefined ? {} : { fault }) });
+    },
     verifySignature: (app) => {
       try {
         // codesign --verify exits non-zero on a broken signature.
