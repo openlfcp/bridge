@@ -85,6 +85,10 @@ export function loseNextWriteAnswer(
     onEvent: (cb) => link.onEvent(cb),
     onExit: (cb) => link.onExit(cb),
     close: () => link.close(),
+    // The hang analysis G4 sees through the wrapper: which writes the helper started, and whether
+    // it is gone (the faulted write was started: it stays unknown).
+    ...(link.started === undefined ? {} : { started: (id: number) => link.started?.(id) ?? false }),
+    ...(link.gone === undefined ? {} : { gone: () => link.gone?.() ?? Promise.resolve(false) }),
     async request(op, body = {}, opts = {}) {
       if (!o.shot.armed || !WRITES.has(op) || !o.applies(op, body))
         return link.request(op, body, opts);
