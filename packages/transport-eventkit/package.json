@@ -1,6 +1,6 @@
 {
   "name": "@openlfcp/bridge-transport-eventkit",
-  "version": "0.0.0",
+  "version": "0.5.0",
   "private": true,
   "description": "The EventKit transport of lfcp-bridge: the Node side of the Swift helper (protocol v2).",
   "license": "Apache-2.0",

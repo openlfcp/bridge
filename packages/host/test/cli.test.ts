@@ -44,6 +44,6 @@ describe("lfcp-bridge", () => {
     const r = await run("frobnicate");
     expect(r.code).toBe(EXIT.USAGE);
     expect(r.err).toContain("unknown command frobnicate");
-    expect(await run("--version")).toMatchObject({ code: EXIT.OK, out: "0.0.0" });
+    expect(await run("--version")).toMatchObject({ code: EXIT.OK, out: "0.5.0" });
   });
 });
