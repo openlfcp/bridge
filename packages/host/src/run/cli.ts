@@ -11,7 +11,7 @@
 // | `sections`                           | the paired sections of every installation, bound or not    |
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Plan } from "@openlfcp/bridge-reminders/adapter";
 import { deviceIdentity, pairedResources } from "@openlfcp/client";
@@ -299,19 +299,32 @@ export async function pairCommand(
   }
   const id = o.installation ?? randomUUID();
   const dir = join(rt.paths.installations, id);
-  const code = await pair(
-    {
-      link: "-",
-      state: dir,
-      label: o.label,
-      kind: 1,
-      sections: o.sections,
-      platform: "macOS",
-      wait: o.wait ?? 600,
-      poll: 5,
-    },
-    { out: env.out, ...(env.stdin === undefined ? {} : { stdin: env.stdin }) },
-  );
+  // A pairing that is neither done nor waiting leaves nothing behind (R-023): the directory it
+  // made, keys included, goes; one that existed before (--installation) is never touched.
+  const created = !existsSync(dir);
+  const discard = () => {
+    if (created) rmSync(dir, { recursive: true, force: true });
+  };
+  let code: number;
+  try {
+    code = await pair(
+      {
+        link: "-",
+        state: dir,
+        label: o.label,
+        kind: 1,
+        sections: o.sections,
+        platform: "macOS",
+        wait: o.wait ?? 600,
+        poll: 5,
+      },
+      { out: env.out, ...(env.stdin === undefined ? {} : { stdin: env.stdin }) },
+    );
+  } catch (e) {
+    discard();
+    throw e;
+  }
+  if (code !== PAIR_EXIT.DONE && code !== PAIR_EXIT.WAITING) discard();
   if (code === PAIR_EXIT.WAITING) {
     env.out(
       `not approved yet; approve it on the managing device, then run again:\n  ${pairResumeCommand(o.label, id, o.sections)}`,
