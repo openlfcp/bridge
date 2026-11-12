@@ -4,17 +4,46 @@ Bridge between LFCP shared sections and Apple apps, running as one more device o
 person (MVP 0.5: Apple Reminders). Design: D-010 (`design-b-010.md`, MVP 0.5 workbook);
 the map of this repository: [docs/NAVIGATOR.md](docs/NAVIGATOR.md).
 
-> **Experimental.** MVP 0.5 is for people who build it from source and read the runbook first.
-> It writes to your Reminders only after a verification run on your Mac, and a person decides
-> every unknown outcome. Expect changes to commands and to the database between versions (each
+> **Tech preview — experimental.** MVP 0.5 runs from the Terminal on a Mac: you build it from
+> source and start it with `lfcp-bridge run`. There is no installer and no app bundle for the
+> bridge itself; only its helper, `LFCP Reminders Helper.app`, is an app, signed with the
+> development certificate. Expect changes to commands and to the database between versions (each
 > with a way back: [the runbook](docs/guides/running-the-bridge.md#roll-back)).
 
-**Status: under construction.** The long-running process (`run`), pairing and `approve` come with
-PR 9b. Until then those commands answer "not available in this build", and `lfcp-bridge status`
-lists them.
+## What works in 0.5
 
-How to install, update, recover and disconnect:
-[docs/guides/running-the-bridge.md](docs/guides/running-the-bridge.md).
+- **One shared section ↔ one Reminders list per binding**, in both directions: title, due date,
+  priority and completion.
+- **Guards:** holds that stop a binding until a person accepts them; hourly limits on unlinks,
+  imports and status changes (strict for the first 24 hours after `approve`); STOP
+  (`lfcp-bridge stop`, `lfcp-bridge resume`); Safe Mode after two crashed runs within 10 minutes.
+- **The owner's verification run before normal writes:** until it has passed on your Mac for this
+  helper build and macOS, normal bindings only dry-run.
+- **Quarantine for unknown outcomes:** a write whose answer was lost is never repeated by itself;
+  the `quarantine` command (PR #28) lists it and resolves it as a person decides.
+
+## How to set up
+
+1. [docs/devel/testing/verification-run.md](docs/devel/testing/verification-run.md): build, pair,
+   bind a test list and run the owner's checklist on your Mac — the first thing to do.
+2. [docs/guides/running-the-bridge.md](docs/guides/running-the-bridge.md): install, run as a
+   service, update, recover and disconnect.
+
+## Known limits of 0.5
+
+- **Fields.** Only the title, the due date (the date only: a time, a time zone and alarms stay in
+  Reminders), the priority and the completion are synchronized. Notes, tags, scheduled dates,
+  assignment from Reminders and a reminder's repeat rule are not (a repeating reminder locks the
+  Task's status and dates).
+- **Commands not in 0.5:** `conflicts`, `refused` and `links` (field conflicts, refused intents and
+  a per-link view are in the database; `status` and `log` show what there is).
+- **A helper stall on a request without a list** (an update by reference, the global marker search)
+  counts toward the shared helper restart budget: more than 3 restarts in 5 minutes stop every
+  binding (`helper_unavailable`) until a person resumes. Repeated stalls on one list's requests
+  hold only that binding (`helper_stall`).
+- **Creating a list keeps its own unknown-outcome flow:** if the answer is lost while `bind` creates
+  the list, `bind` lists the candidates and you choose with
+  `lfcp-bridge bind --binding <id> --resolve-list <id>|none`.
 
 ## Limits of the MVP
 
