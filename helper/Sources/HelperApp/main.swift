@@ -76,8 +76,10 @@ case "serve":
                 if server.shutdownRequested { exit(0) }
                 // Stalled: a call may still run with this process's state. Answer what is queued
                 // (helper_stalled), then exit: the host starts a new helper (review #23 P1-2).
+                // Not through the main queue: EventKit may hold the main thread, and a stalled helper
+                // must not stay alive answering helper_stalled until the host kills it.
                 if server.stalled {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { exit(3) }
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 1) { exit(3) }
                 }
             }
         }
