@@ -271,6 +271,7 @@ Accept a hold only once its cause is understood:
 | `import_ambiguous` | a new reminder could match more than one pending Task | resolve the quarantine **(not available yet)**, then accept |
 | `access_refused` | the server refused the section (revoked device or grant) | lifts on an "allowed" answer; a proven revocation is final |
 | `helper_unavailable` | the helper restarted more than 3 times in 5 minutes | `doctor`; fix the helper (signature, Reminders access); accept |
+| `helper_stall` | the helper got stuck twice in 5 minutes reading or writing **this binding's list** (`log`: `helper.stalled`, `helper.stall_hold`); only this binding pauses, and nothing reads its list until you accept | look at the list in Reminders — a repeating reminder is the known trigger — then accept; if it stalls again, the hold comes back |
 | `migration` | set by an N8 migration on the old installation's bindings | **do not accept by hand**: `migrate resume` or `migrate abort` lift it |
 
 ### Unknown outcomes
