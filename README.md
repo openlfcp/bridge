@@ -35,8 +35,10 @@ the map of this repository: [docs/NAVIGATOR.md](docs/NAVIGATOR.md).
   Reminders), the priority and the completion are synchronized. Notes, tags, scheduled dates,
   assignment from Reminders and a reminder's repeat rule are not (a repeating reminder locks the
   Task's status and dates).
-- **Commands not in 0.5:** `conflicts`, `refused` and `links` (field conflicts, refused intents and
-  a per-link view are in the database; `status` and `log` show what there is).
+- **Commands not in 0.5:** `conflicts`, `refused` and `links`. Field conflicts, refused intents and
+  links are in the database, but `status` and `log` do not show them all: a cleared due date that
+  meets a personal time or alarm (`due_cleared_in_lfcp`) shows only in
+  `lfcp-bridge dry-run <binding>` (stop `run` first).
 - **A helper stall on a request without a list** (an update by reference, the global marker search)
   counts toward the shared helper restart budget: more than 3 restarts in 5 minutes stop every
   binding (`helper_unavailable`) until a person resumes. Repeated stalls on one list's requests
@@ -59,8 +61,10 @@ the map of this repository: [docs/NAVIGATOR.md](docs/NAVIGATOR.md).
   bridge binds only lists it creates.
 - **A personal time or alarm wins** over clearing the due date: that becomes a conflict, not a
   write. A reminder you made recurring locks the Task's status and dates.
-- **Adding a section (N8) only from quiescence:** no open work, nothing waiting for a person. Work
-  that appears during the pairing aborts it.
+- **Adding a section (N8) is not available in 0.5:** `sections add` and `migrate resume` answer
+  "not available in this build" (the run process does not give them the pairing and the new
+  connection yet); only `lfcp-bridge migrate status` and `lfcp-bridge migrate abort` work. When it
+  comes, it starts only from quiescence: no open work, nothing waiting for a person.
 - **Not in the MVP:** relinking unlinked Tasks, automatic deletion, tags, scheduled dates,
   assignment from Reminders.
 
