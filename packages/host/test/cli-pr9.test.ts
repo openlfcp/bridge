@@ -313,6 +313,13 @@ describe("verify --record (§7.6): the owner's report sets writesVerified", () =
       expect.stringContaining("helper_mismatch"),
     ]);
     expect(r.err).toContain("this machine runs helper 0.3.2 on macOS 26.5.2");
+    // Not filled in (the template's ""): refused, and the person learns what to write.
+    const blank = await record(green({ helperVersion: "", macOS: "" }));
+    expect([blank.code, blank.err]).toEqual([
+      EXIT.NEEDS_PERSON,
+      expect.stringContaining("does not say which helper and macOS"),
+    ]);
+    expect(blank.err).toContain("this machine runs helper 0.3.2 on macOS 26.5.2");
     expect(config()).toBe(before);
   });
 
