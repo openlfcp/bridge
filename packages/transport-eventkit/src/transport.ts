@@ -13,6 +13,13 @@
  * refused with OperationInFlightError.
  * It never infers an outcome from the fields of a reminder (review r3, P2-1); whether a field
  * comparison is allowed (single-step update only) is the host's decision.
+ *
+ * Writes that never started (the hang analysis G4): with a helper that announces each request it
+ * runs (ready `requestStarted`), a write whose answer is lost and which the helper never announced
+ * is not unknown yet. While that helper lives it may still run it: recover answers
+ * OperationInFlightError (settle it later). Once the helper is known to be gone, it never ran:
+ * the stage becomes "failed" (not_started), so recover says not_started and the host sends it
+ * again under the same opKey. A write the helper announced keeps "sent": unknown (B19).
  */
 import {
   type CapabilityDeclaration,
@@ -95,6 +102,11 @@ export class EventKitTransport implements RemindersTransport {
   #unsubs: (() => void)[] = [];
   #writes: WriteMode;
   readonly #inFlight = new Set<string>();
+  /**
+   * Writes sent with no answer yet, on a link that announces started requests: opKey → the request
+   * id and its link. Settled when the answer comes, or when that link's helper is gone.
+   */
+  readonly #unanswered = new Map<string, { id: number; link: HelperLink }>();
 
   constructor(opts: EventKitTransportOptions) {
     this.#opts = opts;
@@ -137,6 +149,7 @@ export class EventKitTransport implements RemindersTransport {
       link.onEvent((e) => this.#onEvent(e)),
       link.onExit((code) => {
         this.#status = { state: "unavailable", reason: "helper_crashed", detail: `exit ${code}` };
+        void this.#settleUnstarted(link);
       }),
     );
     this.#status = statusOf(link.ready.authorization);
@@ -330,7 +343,7 @@ export class EventKitTransport implements RemindersTransport {
       const [name, body] = request(op);
       this.#put(op.opKey, { stage: "sent", kind: op.kind, at: new Date().toISOString() });
       // A lost answer (helper gone, timeout) rejects here and leaves the stage at "sent".
-      const r = await this.#req(name, body);
+      const r = await this.#write(op.opKey, name, body);
       lostIfTimedOut(r);
       const result = mapWriteResponse(op.opKey, r);
       if (result.ok) this.#put(op.opKey, { stage: "done", result });
@@ -341,7 +354,42 @@ export class EventKitTransport implements RemindersTransport {
     }
   }
 
+  /**
+   * A write request: on a link that announces started requests, remembered until answered, so a
+   * lost answer can still turn out not started (see the header).
+   */
+  async #write(opKey: string, op: string, body: Record<string, unknown>): Promise<WireResponse> {
+    const link = this.#link;
+    if (link === undefined) return this.#req(op, body);
+    const tracks = link.ready.requestStarted === true && link.started !== undefined;
+    const r = await link.request(
+      op,
+      body,
+      tracks ? { onId: (id) => this.#unanswered.set(opKey, { id, link }) } : {},
+    );
+    // Answered (an eventkit_timeout too: the helper ran it, stage "sent" stays as decided).
+    this.#unanswered.delete(opKey);
+    return r;
+  }
+
+  /** The link's helper exited: once it is known to be gone, its unannounced writes never ran. */
+  async #settleUnstarted(link: HelperLink): Promise<void> {
+    const gone = (await link.gone?.().catch(() => false)) ?? false;
+    for (const [opKey, w] of [...this.#unanswered]) {
+      if (w.link !== link) continue;
+      this.#unanswered.delete(opKey);
+      if (gone && link.started?.(w.id) === false && this.#stage(opKey)?.stage === "sent")
+        this.#put(opKey, { stage: "failed", code: "not_started" });
+    }
+  }
+
   async recover(opKey: string): Promise<RecoverResult> {
+    const w = this.#unanswered.get(opKey);
+    if (w !== undefined) {
+      // Its helper still lives and has not run it yet: it may still. Settled on exit.
+      if (w.link.started?.(w.id) === false) throw new OperationInFlightError(opKey);
+      this.#unanswered.delete(opKey);
+    }
     const s = this.#stage(opKey);
     if (s === undefined || s.stage === "failed") return { state: "not_started" };
     if (s.stage === "done") return { state: "done", result: s.result };

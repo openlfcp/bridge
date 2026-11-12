@@ -44,11 +44,22 @@ export interface HelperLink {
   request(
     op: string,
     body?: Record<string, unknown>,
-    opts?: { timeoutMs?: number },
+    opts?: { timeoutMs?: number; onId?: (id: number) => void },
   ): Promise<WireResponse>;
   onEvent(cb: (e: WireEvent) => void): () => void;
   onExit(cb: (code: number | null) => void): () => void;
   close(): Promise<void>;
+  /**
+   * The hang analysis G4, with a helper that announces each request it runs (ready
+   * `requestStarted`): whether request `id` was announced. Optional: a link without it never
+   * says a request did not start.
+   */
+  started?(id: number): boolean;
+  /**
+   * After exit: true once the helper process is known to be gone (it can run nothing more),
+   * false when that cannot be confirmed (not our executable to check).
+   */
+  gone?(): Promise<boolean>;
 }
 
 export interface HelperProcessOptions {
@@ -66,6 +77,10 @@ export interface HelperProcessOptions {
   readonly helperName?: string;
   /** How long close() waits for the helper to exit on its own before stopping it. Default 10 s. */
   readonly closeGraceMs?: number;
+  /** How long close() waits for the answer to `shutdown`. Default 5 s. */
+  readonly shutdownTimeoutMs?: number;
+  /** How long a stop waits after SIGTERM before SIGKILL. Default 2 s. */
+  readonly killGraceMs?: number;
   /** stderr lines of the helper (EventKit logs noise there). */
   readonly onStderr?: (line: string) => void;
   /** stdout lines that are not JSON or answer no pending request (a late answer, no id). */
@@ -140,6 +155,10 @@ export class HelperProcess implements HelperLink {
   #closed = false;
   #stopping: Promise<void> = Promise.resolve();
   #ready: WireReady | undefined;
+  /** Request ids the helper announced with `started` (it began running them). */
+  readonly #started = new Set<number>();
+  /** Settles once the exit's stopping is done: whether the helper is known to be gone. */
+  #gone: Promise<boolean> | undefined;
 
   private constructor(opts: HelperProcessOptions) {
     this.#opts = opts;
@@ -273,7 +292,9 @@ export class HelperProcess implements HelperLink {
     }
     if (typeof msg.event === "string") {
       if (msg.event === "ready") this.#emitter.emit("ready", msg);
-      else this.#emitter.emit("event", msg);
+      else if (msg.event === "started") {
+        if (typeof msg.id === "number") this.#started.add(msg.id);
+      } else this.#emitter.emit("event", msg);
       return;
     }
     const p = this.#pending.get(msg.id as number);
@@ -294,6 +315,7 @@ export class HelperProcess implements HelperLink {
     // With `open`, the child is the launcher: it may go away while the helper still runs (killed,
     // crashed). An unmanaged helper must not stay behind (review PR 6 r2): stop it too.
     this.#stopping = this.#stopHelper();
+    this.#gone = this.#stopping.then(() => this.#helperGone());
     for (const [, p] of this.#pending) {
       clearTimeout(p.timer);
       p.reject(new HelperLostError(`helper exited (${code}) with a request in flight`));
@@ -303,14 +325,35 @@ export class HelperProcess implements HelperLink {
     this.#emitter.emit("exit", code);
   }
 
+  started(id: number): boolean {
+    return this.#started.has(id);
+  }
+
+  /** See HelperLink.gone: resolves after the exit's stopping; false before any exit. */
+  gone(): Promise<boolean> {
+    return this.#gone ?? Promise.resolve(false);
+  }
+
+  /**
+   * The helper process can run nothing more: its pid (from ready) is not alive — or, launched
+   * directly, the child (which is the helper) exited. A pid that is alive but not ours to check
+   * cannot be confirmed.
+   */
+  #helperGone(): boolean {
+    const pid = this.#ready?.pid;
+    if (typeof pid === "number" && pid !== process.pid) return !alive(pid);
+    return (this.#opts.launch ?? "open") === "direct" && this.#childExited;
+  }
+
   request(
     op: string,
     body: Record<string, unknown> = {},
-    opts: { timeoutMs?: number } = {},
+    opts: { timeoutMs?: number; onId?: (id: number) => void } = {},
   ): Promise<WireResponse> {
     if (this.#closed || this.#input === undefined)
       return Promise.reject(new HelperLostError("helper is not running"));
     const id = this.#nextId++;
+    opts.onId?.(id);
     const input = this.#input;
     const ms = opts.timeoutMs ?? this.#opts.requestTimeoutMs ?? 60_000;
     return new Promise((resolve, reject) => {
@@ -345,7 +388,9 @@ export class HelperProcess implements HelperLink {
       if (this.#childExited) r();
       else this.#child?.once("exit", () => r());
     });
-    await this.request("shutdown", {}, { timeoutMs: 5_000 }).catch(() => {});
+    await this.request("shutdown", {}, { timeoutMs: this.#opts.shutdownTimeoutMs ?? 5_000 }).catch(
+      () => {},
+    );
     // EOF reaches the helper only when every write end of its stdin is closed; ours is O_RDWR, so
     // close the descriptor once the last request is flushed, not just the writing half.
     const input = this.#input;
@@ -381,11 +426,14 @@ export class HelperProcess implements HelperLink {
     } catch {
       return;
     }
-    for (let i = 0; i < 20 && alive(pid); i++) await sleep(100);
+    const grace = this.#opts.killGraceMs ?? 2_000;
+    for (let waited = 0; waited < grace && alive(pid); waited += 50) await sleep(50);
     if (alive(pid)) {
       try {
         process.kill(pid, "SIGKILL");
       } catch {}
+      // SIGKILL cannot be ignored; wait (briefly) until it took, so "gone" means gone.
+      for (let i = 0; i < 20 && alive(pid); i++) await sleep(50);
     }
   }
 

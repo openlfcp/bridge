@@ -684,7 +684,22 @@ export class Executor {
       if (!resend) return { kind: "retry", reason: "not_started" };
       return this.#execute(this.#intents.get(i.id) as Intent);
     }
-    const r = await this.#o.transport.recover(i.id);
+    let r: Awaited<ReturnType<RemindersTransport["recover"]>>;
+    try {
+      r = await this.#o.transport.recover(i.id);
+    } catch (error) {
+      // Its answer is lost but the helper that has it may still run it (it never said it started,
+      // the hang analysis G4): not unknown yet. It stays effecting; a later settle decides.
+      if (error instanceof Error && error.name === "OperationInFlightError") {
+        this.#journal.append("debug", "effect.in_flight", {
+          bindingId: i.bindingId,
+          taskId: i.taskId,
+          params: { intent: i.id },
+        });
+        return { kind: "in_flight" };
+      }
+      throw error;
+    }
     if (r.state === "done") {
       if (!("rev" in r.result))
         throw new Error(`intent ${i.id}: a list result for a reminder write`);
