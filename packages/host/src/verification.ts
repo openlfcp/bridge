@@ -89,14 +89,45 @@ export type RecordDecision =
   | { readonly kind: "record"; readonly config: BridgeConfig; readonly record: WritesVerified }
   | {
       readonly kind: "refused";
-      readonly reason: "no_binding" | "no_helper" | "helper_mismatch" | "not_green";
+      readonly reason: "no_binding" | "no_helper" | "helper_mismatch" | "incomplete" | "not_green";
       readonly detail: string;
     };
 
 /**
+ * The steps of the owner's checklist (docs/devel/testing/verification-run.md §4), by the names the
+ * report template gives them (verification-report.template.json): every one must be in a report
+ * and ok. A changed checklist changes both, together (a test compares them).
+ */
+export const VERIFICATION_STEPS: readonly string[] = Object.freeze([
+  "1 Obsidian: new task with a date → a reminder on iPhone, date without time",
+  "2 Obsidian: rename → the reminder is renamed",
+  "3 iPhone: rename → the task is renamed",
+  "4 iPhone: time, alarm, note → the task's date unchanged; they stay on iPhone",
+  "5 iPhone: date moved → the task's date moved",
+  "6 Obsidian: rename again → time, alarm and note of step 4 kept",
+  "7 iPhone: priority high → the task's priority high",
+  "8 iPhone: completed → the task done with today's date",
+  "9 Obsidian: reopened → the reminder not completed",
+  "10 iPhone: a new reminder → a task at the end of the section, linked",
+  "11 the bridge's link survives a person's edits of the reminder",
+  "12 Obsidian: cancelled → the reminder completed, the task stays cancelled",
+  "13 iPhone: reminder deleted → the task stays, unlinked, not recreated",
+  "14 iPhone: reminder moved to another list → guard_mass_unlink hold",
+  "15 resume --accept guard_mass_unlink → unlinked moved_out",
+  "16 Obsidian: task deleted → hold, accept → the reminder stays",
+  "17 stop → no sync",
+  "18 resume → the rename goes",
+  "19 Obsidian: 4 tasks deleted at once → holds, accept → the reminders stay",
+  "20 Ctrl-C and run again → works",
+  "21 due removed on one side, changed on the other → the outcome of the checklist",
+  "22 lost answer: helper killed during a write → restarted, no duplicate, no loss",
+  "23 a repeating reminder in the list → the bridge keeps working",
+]);
+
+/**
  * Whether a report sets writesVerified (§7.6): the verification binding exists, the running helper
- * is known and is the one the report names, and every check is ok (at least one). The record's
- * identity is the running helper's, never the file's.
+ * is known and is the one the report names, every step of VERIFICATION_STEPS is in it, and every
+ * check is ok (an added one too). The record's identity is the running helper's, never the file's.
  */
 export function decideRecord(
   config: BridgeConfig,
@@ -129,15 +160,20 @@ export function decideRecord(
           ? `the report does not say which helper and macOS the run was on; this machine runs helper ${running.helperVersion} on macOS ${running.macOS}: if that is what you tested, write them into the report`
           : `the report is for helper ${report.helperVersion} on macOS ${report.macOS}; this machine runs helper ${running.helperVersion} on macOS ${running.macOS}`,
     };
+  const named = new Set(report.checks.map((c) => c.name));
+  const missing = VERIFICATION_STEPS.filter((s) => !named.has(s));
+  if (missing.length > 0)
+    return {
+      kind: "refused",
+      reason: "incomplete",
+      detail: `steps missing from the report (names as in the template): ${missing.join("; ")}`,
+    };
   const failed = report.checks.filter((c) => !c.ok);
-  if (report.checks.length === 0 || failed.length > 0)
+  if (failed.length > 0)
     return {
       kind: "refused",
       reason: "not_green",
-      detail:
-        report.checks.length === 0
-          ? "the report has no checks"
-          : `not ok: ${failed.map((c) => c.name).join("; ")}`,
+      detail: `not ok: ${failed.map((c) => c.name).join("; ")}`,
     };
   const config2 = recordVerification(
     config,
