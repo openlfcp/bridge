@@ -129,12 +129,16 @@ export class HelperSupervisor {
    * run 2). Counts toward the restart budget like any restart. With `helper`, only that helper is
    * restarted: a late report about one already replaced restarts nothing.
    */
-  restartNow(reason: string, helper?: SupervisedHelper): Promise<void> {
+  restartNow(
+    reason: string,
+    helper?: SupervisedHelper,
+    o: { readonly budget?: boolean } = {},
+  ): Promise<void> {
     const gen = this.#gen;
     this.#busy = this.#busy.then(async () => {
       if (gen !== this.#gen || this.#state !== "running" || this.#helper === undefined) return;
       if (helper !== undefined && this.#helper !== helper) return;
-      await this.#restart(reason, gen);
+      await this.#restart(reason, gen, o.budget ?? true);
     });
     return this.#busy;
   }
@@ -216,11 +220,16 @@ export class HelperSupervisor {
     return run;
   }
 
-  async #restart(reason: string, gen: number): Promise<void> {
+  /**
+   * `budget` false: a restart for a stall the host tied to one binding (its list), which that
+   * binding's hold contains; it does not count toward the shared budget, so a list that always
+   * stalls cannot make the helper unavailable for every binding (hang analysis G1).
+   */
+  async #restart(reason: string, gen: number, budget = true): Promise<void> {
     if (gen !== this.#gen) return;
     const now = (this.#o.now ?? Date.now)();
     const window = this.#o.restartWindowMs ?? 5 * 60_000;
-    this.#restarts = [...this.#restarts.filter((t) => now - t < window), now];
+    this.#restarts = [...this.#restarts.filter((t) => now - t < window), ...(budget ? [now] : [])];
     this.#offExit?.();
     const old = this.#helper;
     this.#helper = undefined;

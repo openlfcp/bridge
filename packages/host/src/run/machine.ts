@@ -9,6 +9,8 @@
 // - the EventKit transport over the helper, supervised (PR 9, §8.2): helper.pid, an orphan
 //   stopped, a ping (access.status) every 30 s, a restart reopens the transport; more than 3
 //   restarts within 5 min → hold helper_unavailable on every binding until a person resumes;
+//   a stall on one binding's list restarts the helper outside that budget, and a second one
+//   within 5 min holds only that binding (helper_stall, the hang analysis G1);
 // - writesVerified for this helper build and macOS (sw_vers), §7.6.
 //
 // `installationPorts` is the testable part (a live server in run.live.test.ts); the rest needs
@@ -173,20 +175,68 @@ export function helperReconnector(o: {
  */
 export function helperStallHandler(o: {
   readonly journal: Journal;
-  readonly restart: (reason: string) => Promise<void>;
+  /** `budget` false: the stall is tied to a binding (its list), not to the helper as a whole. */
+  readonly restart: (reason: string, o: { readonly budget: boolean }) => Promise<void>;
+  /**
+   * The hang analysis G1, G5: a stall that names a list is that list's. Its bindings (pending or
+   * active, bound to the list) get the hold helper_stall at the second stall on the list within
+   * `windowMs`, and such restarts do not count toward the shared restart budget. Without it (or for
+   * a list no binding has), a stall counts toward the budget as before.
+   */
+  readonly lists?: {
+    readonly bindingsOf: (list: string) => readonly string[];
+    readonly holds: Holds;
+    readonly stalls: ListStalls;
+  };
 }): (e: WireEvent) => void {
   return (e) => {
     if (e.event !== "stalled") return;
     const op = typeof e.op === "string" ? e.op : "a store call";
+    const list = typeof e.list === "string" ? e.list : undefined;
     const after = typeof e.timeoutS === "number" ? ` after ${e.timeoutS} s` : "";
     o.journal.append("error", "helper.stalled", {
       params: {
         op,
-        text: `The Reminders helper gave up on ${op}${after}: its outcome is unknown. Restarting the helper.`,
+        ...(list === undefined ? {} : { list }),
+        text: `The Reminders helper gave up on ${op}${list === undefined ? "" : ` (list ${list})`}${after}: its outcome is unknown. Restarting the helper.`,
       },
     });
-    void o.restart(`the helper stalled on ${op}`).catch(() => {});
+    const bindings = list === undefined || o.lists === undefined ? [] : o.lists.bindingsOf(list);
+    if (list !== undefined && o.lists !== undefined && bindings.length > 0) {
+      const stalls = o.lists.stalls.record(list);
+      if (stalls >= 2)
+        for (const b of bindings)
+          if (o.lists.holds.set(b, "helper_stall", { op, list, stalls }))
+            o.journal.append("error", "helper.stall_hold", {
+              bindingId: b,
+              params: { op, list, stalls },
+            });
+    }
+    void o
+      .restart(`the helper stalled on ${op}`, { budget: bindings.length === 0 })
+      .catch(() => {});
   };
+}
+
+/** Stalls per list within a window (default 5 min, the restart window); clear() on a resume. */
+export class ListStalls {
+  readonly #at = new Map<string, number[]>();
+  constructor(
+    private readonly windowMs = 5 * 60_000,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  /** Records a stall on `list`; returns how many it had within the window, this one included. */
+  record(list: string): number {
+    const t = this.now();
+    const recent = [...(this.#at.get(list) ?? []).filter((x) => t - x < this.windowMs), t];
+    this.#at.set(list, recent);
+    return recent.length;
+  }
+
+  clear(): void {
+    this.#at.clear();
+  }
 }
 
 export async function machineProcess(o: {
@@ -223,6 +273,7 @@ export async function machineProcess(o: {
       ? undefined
       : { shot: { armed: true }, applies: verificationWrite(db), journal };
   if (o.fault !== undefined) journal.append("warn", "fault.armed", { params: { fault: o.fault } });
+  const stalls = new ListStalls();
   const supervisor = new HelperSupervisor({
     pidFile: paths.helperPid,
     start: async () => {
@@ -250,7 +301,19 @@ export async function machineProcess(o: {
       link.onEvent(
         helperStallHandler({
           journal,
-          restart: (reason) => supervisor.restartNow(reason, supervised),
+          restart: (reason, r) => supervisor.restartNow(reason, supervised, r),
+          lists: {
+            bindingsOf: (list) =>
+              (
+                db
+                  .prepare(
+                    "SELECT id FROM bindings WHERE target_ref = ? AND state IN ('pending_dry_run','active')",
+                  )
+                  .all(list) as { id: string }[]
+              ).map((b) => b.id),
+            holds,
+            stalls,
+          },
         }),
       );
       return supervised;
@@ -305,6 +368,8 @@ export async function machineProcess(o: {
       // resume --accept helper_unavailable: the supervisor gets a fresh budget (review PR 9b #28).
       onHoldsLifted: (reasons) => {
         if (reasons.has("helper_unavailable")) void reconnector.resume();
+        // A person looked at the list: its stalls start counting again from zero.
+        if (reasons.has("helper_stall")) stalls.clear();
       },
     });
     process = started;

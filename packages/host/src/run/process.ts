@@ -340,6 +340,9 @@ export class BridgeProcess {
     if (b === undefined) return { kind: "skipped", reason: "no_binding" };
     const inst = this.#installations.get(b.installation_id);
     if (inst === undefined) return { kind: "skipped", reason: "installation_not_open" };
+    // The helper stalls on this binding's list (hang analysis G1): no pass reads it until a person
+    // accepts the hold; the other bindings go on.
+    if (this.#holds.has(b.id, "helper_stall")) return { kind: "skipped", reason: "helper_stall" };
     // §6.5: ownership on every pass, before any transition or effect (review PR 9b #23); an
     // incomplete search leaves the binding unchecked, so the executor writes nothing.
     await this.#ownership.check(b.id, b.resource_id);

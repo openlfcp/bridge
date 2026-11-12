@@ -3,8 +3,8 @@
 
 import { describe, expect, it } from "vitest";
 import type { BridgeConfig } from "../src/config.js";
-import { Journal, openBridgeDatabase, permits } from "../src/index.js";
-import { eventKitTransportFor, helperStallHandler } from "../src/run/machine.js";
+import { Holds, Journal, openBridgeDatabase, permits } from "../src/index.js";
+import { eventKitTransportFor, helperStallHandler, ListStalls } from "../src/run/machine.js";
 
 const config = (v?: { helperVersion: string; macOS: string }): BridgeConfig => ({
   bridgeInstanceId: "x",
@@ -187,5 +187,52 @@ describe("R-001 live run 2: a helper that stalled on a store call", () => {
     const entries = journal.list();
     expect(entries.map((e) => [e.level, e.key])).toEqual([["error", "helper.stalled"]]);
     expect(entries[0]?.text).toMatch(/items\.snapshot.*30 s.*restarting/i);
+  });
+
+  it("hang analysis G1: a second stall on one list holds that list's binding only; such restarts spare the shared budget", async () => {
+    const db = openBridgeDatabase(":memory:");
+    db.prepare(
+      "INSERT INTO installations (id, dir, principal, root, label, created_at) VALUES ('i', 'd', 'p', 'r', 'l', '2026-11-12T00:00:00Z')",
+    ).run();
+    for (const [id, list, resource] of [
+      ["b1", "L1", "R1"],
+      ["b2", "L2", "R2"],
+    ])
+      db.prepare(
+        "INSERT INTO bindings (id, installation_id, resource_id, adapter, transport, target_ref, state, created_at) VALUES (?, 'i', ?, 'apple-reminders', 'eventkit', ?, 'active', '2026-11-12T00:00:00Z')",
+      ).run(id, resource, list);
+    const journal = new Journal(db);
+    const holds = new Holds(db);
+    let t = 0;
+    const stalls = new ListStalls(5 * 60_000, () => t);
+    const restarts: [string, boolean][] = [];
+    const onEvent = helperStallHandler({
+      journal,
+      restart: async (reason, r) => {
+        restarts.push([reason, r.budget]);
+      },
+      lists: {
+        bindingsOf: (list) => (list === "L1" ? ["b1"] : list === "L2" ? ["b2"] : []),
+        holds,
+        stalls,
+      },
+    });
+    onEvent({ event: "stalled", op: "items.snapshot", list: "L1", timeoutS: 30 });
+    expect(holds.has("b1", "helper_stall")).toBe(false);
+    t = 60_000;
+    onEvent({ event: "stalled", op: "items.snapshot", list: "L1", timeoutS: 30 });
+    expect(holds.has("b1", "helper_stall")).toBe(true);
+    expect(holds.has("b2", "helper_stall")).toBe(false);
+    // Bound lists spare the budget; a stall without a list, or on a list no binding has, counts.
+    onEvent({ event: "stalled", op: "items.find", timeoutS: 30 });
+    onEvent({ event: "stalled", op: "items.snapshot", list: "Lx", timeoutS: 30 });
+    await new Promise((r) => setImmediate(r));
+    expect(restarts.map(([, budget]) => budget)).toEqual([false, false, true, true]);
+    const hold = journal.list().find((e) => e.key === "helper.stall_hold");
+    expect(hold?.bindingId).toBe("b1");
+    expect(hold?.text).toMatch(/stalled 2 times on this list.*resume --accept helper_stall/);
+    // Outside the window the count starts again.
+    t = 60_000 + 5 * 60_000 + 1;
+    expect(stalls.record("L2")).toBe(1);
   });
 });
