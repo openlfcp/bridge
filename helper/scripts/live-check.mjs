@@ -282,56 +282,56 @@ try {
     }
   }
 
-  // 6. URL restore — manual
+  // 6. The bridge's link (EKReminder.url). Reminders.app (iOS, macOS 26) does not show this field,
+  // and the card's "URL" field is other storage EventKit cannot see (R-023 F3): a person can
+  // neither clear nor replace the link from Reminders. What is checked is what can be observed:
+  // the helper reads the link back, a URL typed in the card leaves it alone, and restoreUrl with
+  // the link present changes nothing. restoreUrl on a missing link and on a person's URL
+  // (personal_conflict) is covered by helper/Tests/HelperCoreTests/WriteTests.swift.
+  const LINK = "lfcp://task/LIVE-3?s=S&b=live";
   const url = await req("items.create", {
     list,
-    linkUrl: `lfcp://task/LIVE-3?s=S&b=live`,
+    linkUrl: LINK,
     opKey: "c3",
     set: { title: "Helper check: url" },
   });
+  let it = (await req("items.get", { ref: url.ref })).item;
+  check("the helper reads the bridge's link back (EKReminder.url)", it.linkUrl === LINK, {
+    linkUrl: it.linkUrl,
+  });
   if (
     await manual(
-      "В Reminders открой «Helper check: url» и очисти поле URL (ссылка). Подожди синхронизацию.",
+      "В Reminders открой «Helper check: url». Ссылки lfcp://… в карточке не видно — это ожидаемо: " +
+        "Напоминания не показывают поле, куда её пишет мост. Впиши в поле «URL» карточки " +
+        "https://example.com, сохрани и подожди синхронизацию (до 40 с).",
     )
   ) {
-    let it = (await req("items.get", { ref: url.ref })).item;
-    for (let i = 0; i < 20 && it.linkUrl !== null; i++) {
+    // The edit may or may not change the item's rev; wait for it up to 40 s, then look.
+    const rev0 = it.rev;
+    for (let i = 0; i < 20 && it.rev === rev0; i++) {
       await new Promise((r) => setTimeout(r, 2000));
       it = (await req("items.get", { ref: url.ref })).item;
     }
-    const restored = await req("items.restoreUrl", {
-      ref: url.ref,
-      linkUrl: "lfcp://task/LIVE-3?s=S&b=live",
-      opKey: "r1",
-      expect: { rev: it.rev },
+    check("a URL typed in the card leaves the bridge's link alone", it.linkUrl === LINK, {
+      linkUrl: it.linkUrl,
+      revChanged: it.rev !== rev0,
     });
-    check("restoreUrl fills a cleared link", restored.ok && it.linkUrl === null, {
-      before: it.linkUrl,
-      restored,
-    });
-    if (
-      await manual(
-        "Теперь впиши в поле URL этого напоминания https://example.com и подожди синхронизацию.",
-      )
-    ) {
-      let it2 = (await req("items.get", { ref: url.ref })).item;
-      for (let i = 0; i < 20 && !String(it2.linkUrl).startsWith("https://"); i++) {
-        await new Promise((r) => setTimeout(r, 2000));
-        it2 = (await req("items.get", { ref: url.ref })).item;
-      }
-      const kept = await req("items.restoreUrl", {
-        ref: url.ref,
-        linkUrl: "lfcp://task/LIVE-3?s=S&b=live",
-        opKey: "r2",
-        expect: { rev: it2.rev },
-      });
-      check(
-        "restoreUrl keeps a URL the person set → personal_conflict",
-        kept.error?.code === "personal_conflict",
-        { url: it2.linkUrl, kept },
-      );
-    }
   }
+  const same = await req("items.restoreUrl", {
+    ref: url.ref,
+    linkUrl: LINK,
+    opKey: "r1",
+    expect: { rev: it.rev },
+  });
+  const after = (await req("items.get", { ref: url.ref })).item;
+  check(
+    "restoreUrl with the link present: ok, the link unchanged",
+    same.ok && after.linkUrl === LINK,
+    {
+      same,
+      linkUrl: after.linkUrl,
+    },
+  );
 
   // 7. markers
   const markerUrl = `lfcp://bridge/live-check?r=${stamp}`;
