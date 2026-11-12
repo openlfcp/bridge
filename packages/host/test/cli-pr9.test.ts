@@ -11,6 +11,7 @@ import { bridgePaths, loadConfig } from "../src/config.js";
 import { EXIT, Holds, Journal, main, openBridgeDatabase } from "../src/index.js";
 import type { MigrationPorts } from "../src/migration.js";
 import type { Runtime } from "../src/runtime.js";
+import { VERIFICATION_STEPS } from "../src/verification.js";
 
 /**
  * The helper's write gate (Server.swift requireWrites): every command opens a new transport whose
@@ -248,14 +249,10 @@ describe("lfcp-bridge (PR 9 commands)", () => {
 
 describe("verify --record (§7.6): the owner's report sets writesVerified", () => {
   const HELPER = { helperVersion: "0.3.1", macOS: "26.5.2" };
-  const green = (over: Record<string, unknown> = {}) => ({
-    ...HELPER,
-    checks: [
-      { name: "1 a task → a reminder", ok: true, note: "" },
-      { name: "2 rename in Obsidian", ok: true, note: "" },
-    ],
-    ...over,
-  });
+  /** Every step of the checklist, ok (one of them `bad`, if given). */
+  const steps = (bad?: string) =>
+    VERIFICATION_STEPS.map((name) => ({ name, ok: name !== bad, note: "" }));
+  const green = (over: Record<string, unknown> = {}) => ({ ...HELPER, checks: steps(), ...over });
   async function verified(o: { running?: typeof HELPER; bind?: boolean } = {}) {
     const m = await machine(undefined, { helperIdentity: async () => o.running });
     if (o.bind !== false) expect((await m.call("verify", "--section", "Test")).code).toBe(EXIT.OK);
@@ -279,26 +276,36 @@ describe("verify --record (§7.6): the owner's report sets writesVerified", () =
     );
   });
 
-  it("a red check or no checks: refused, exit 3, config unchanged", async () => {
+  it("a red check, a missing step or no checks: refused, exit 3, config unchanged", async () => {
     const { record, config } = await verified({ running: HELPER });
     const before = config();
-    const red = await record(
-      green({
-        checks: [
-          { name: "1 a task → a reminder", ok: true, note: "" },
-          { name: "22 lost answer", ok: false, note: "duplicate" },
-        ],
-      }),
-    );
+    const step22 = VERIFICATION_STEPS[21] as string;
+    const red = await record(green({ checks: steps(step22) }));
     expect([red.code, red.err]).toEqual([
       EXIT.NEEDS_PERSON,
-      expect.stringContaining("not ok: 22 lost answer"),
+      expect.stringContaining(`not ok: ${step22}`),
     ]);
+    // Every template step by name: one left out (or renamed) is refused even if the rest is ok.
+    const without = await record(green({ checks: steps().filter((c) => c.name !== step22) }));
+    expect([without.code, without.err]).toEqual([
+      EXIT.NEEDS_PERSON,
+      expect.stringContaining(`incomplete): steps missing from the report`),
+    ]);
+    expect(without.err).toContain(step22);
+    const renamed = await record(
+      green({ checks: steps().map((c) => (c.name === step22 ? { ...c, name: "22" } : c)) }),
+    );
+    expect(renamed.err).toContain("incomplete");
     const empty = await record(green({ checks: [] }));
     expect([empty.code, empty.err]).toEqual([
       EXIT.NEEDS_PERSON,
-      expect.stringContaining("no checks"),
+      expect.stringContaining("incomplete"),
     ]);
+    // An added check of the person's counts too.
+    const extra = await record(
+      green({ checks: [...steps(), { name: "my own check", ok: false, note: "" }] }),
+    );
+    expect(extra.err).toContain("not ok: my own check");
     expect(config()).toBe(before);
   });
 
@@ -348,6 +355,8 @@ describe("verify --record (§7.6): the owner's report sets writesVerified", () =
         "utf8",
       ),
     ) as { checks: { name: string; ok: boolean }[] };
+    // The template and the code name the same 23 steps, in order.
+    expect(template.checks.map((c) => c.name)).toEqual(VERIFICATION_STEPS);
     expect(template.checks.map((c) => Number.parseInt(c.name, 10))).toEqual(
       Array.from({ length: 23 }, (_, i) => i + 1),
     );
