@@ -10,8 +10,12 @@
 //     redo — "write it again from LFCP" (the design's `drop`): the intent ends; the next pass
 //       plans the fields again from the bases, so a value Reminders lacks is written anew under a
 //       new opKey (never the old one, B19).
-//   A create or restore_url has no field values to take: accept is redo (the next pass finds the
-//   reminder by its link URL if it was made — no duplicate — and makes it otherwise).
+//   redo drops the bases of the fields, so the next pass writes LFCP as on a first link, whatever
+//   side changed meanwhile (review #28 P2-a).
+//   A create is first looked up by its link URL in every list (it may have been made and moved):
+//   found → linked to it; none → released, the next pass makes it; several or an incomplete
+//   search → refused, the person picks it: link <reminder> <intent> (review #28 P2-b). A
+//   restore_url has no values to take: accept is redo.
 // - ambiguous_match: a link in state quarantine (several reminders claim the Task, §5.4).
 //     link <reminder> <task> — this one is the Task's; the other candidates are ignored.
 //     ignore <reminder> <task> — this one is not; the next pass matches again.
@@ -218,39 +222,32 @@ function resolveConflicts(db: BridgeDatabase, intentId: string, resolution: stri
   ).run(at, resolution, intentId);
 }
 
+/** What a decision needs besides the database: the journal, the handler (accept), Reminders (a create). */
+export interface DecisionPorts {
+  readonly journal: Journal;
+  readonly now?: () => number;
+  /** Reminders, for an unknown create's global lookup (opened only then). */
+  readonly transport?: () => Promise<Pick<RemindersTransport, "find">>;
+}
+
 /** `accept`: the write happened, Reminders as it is (see the header). */
-export function acceptOutcome(
+export async function acceptOutcome(
   db: BridgeDatabase,
   id: string,
-  o: { readonly handler: IntentHandler; readonly journal: Journal; readonly now?: () => number },
-): Resolution {
+  o: DecisionPorts & { readonly handler: IntentHandler },
+): Promise<Resolution> {
   const i = unknownOutcome(db, id);
   if (typeof i === "string") return { kind: "refused", text: i };
-  if (i.direction !== "to_apple" || i.kind !== "update") return redo(db, i, "accept", o);
-  const at = new Date((o.now ?? Date.now)()).toISOString();
+  if (i.direction === "to_apple" && i.kind === "create") return releaseCreate(db, i, "accept", o);
+  if (i.direction !== "to_apple" || i.kind !== "update") return release(db, i, "accept", o);
   const p = i.payload as { ref: { id: string; externalId?: string }; set: WritableSet };
-  const result: AppleOpSuccess = {
-    ok: true,
-    opKey: i.id,
-    ref: p.ref,
-    rev: "",
-    written: writtenOf(p.set),
-  };
-  const intents = new Intents(db, o.now);
-  db.transaction(() => {
-    intents.resolve(i.id, "accept");
-    db.prepare(
-      "UPDATE intents SET state = 'applied', state_reason = NULL, result_json = ? WHERE id = ?",
-    ).run(JSON.stringify(result), i.id);
-    o.handler.finalize(intents.get(i.id) as Intent, result, db);
-    intents.finalized(i.id);
-    resolveConflicts(db, i.id, "accept", at);
-    o.journal.append("info", "quarantine.resolved", {
-      bindingId: i.bindingId,
-      taskId: i.taskId,
-      params: { intent: i.id, choice: "accept", fields: i.fields.join(", ") },
-    });
-  }).immediate();
+  finalizeAsWritten(
+    db,
+    i,
+    { ok: true, opKey: i.id, ref: p.ref, rev: "", written: writtenOf(p.set) },
+    "accept",
+    o,
+  );
   return {
     kind: "resolved",
     text: `accepted: ${i.fields.join(", ")} recorded as written; the next pass compares with what Reminders shows (a difference goes to LFCP)`,
@@ -258,26 +255,65 @@ export function acceptOutcome(
 }
 
 /** `redo`: write it again from LFCP (see the header). */
-export function redoOutcome(
+export async function redoOutcome(
   db: BridgeDatabase,
   id: string,
-  o: { readonly journal: Journal; readonly now?: () => number },
-): Resolution {
+  o: DecisionPorts,
+): Promise<Resolution> {
   const i = unknownOutcome(db, id);
   if (typeof i === "string") return { kind: "refused", text: i };
-  return redo(db, i, "redo", o);
+  if (i.direction === "to_apple" && i.kind === "create") return releaseCreate(db, i, "redo", o);
+  return release(db, i, "redo", o);
 }
 
-function redo(
+/** The intent finalized as if `result` was its answer (the handler's bases, and its link for a create). */
+function finalizeAsWritten(
   db: BridgeDatabase,
   i: Intent,
-  choice: "redo" | "accept",
-  o: { readonly journal: Journal; readonly now?: () => number },
+  result: AppleOpSuccess,
+  choice: string,
+  o: DecisionPorts & { readonly handler: IntentHandler },
+): void {
+  const at = new Date((o.now ?? Date.now)()).toISOString();
+  const intents = new Intents(db, o.now);
+  db.transaction(() => {
+    intents.resolve(i.id, choice);
+    db.prepare(
+      "UPDATE intents SET state = 'applied', state_reason = NULL, result_json = ? WHERE id = ?",
+    ).run(JSON.stringify(result), i.id);
+    o.handler.finalize(intents.get(i.id) as Intent, result, db);
+    intents.finalized(i.id);
+    resolveConflicts(db, i.id, choice, at);
+    o.journal.append("info", "quarantine.resolved", {
+      bindingId: i.bindingId,
+      taskId: i.taskId,
+      params: { intent: i.id, choice, fields: i.fields.join(", ") },
+    });
+  }).immediate();
+}
+
+/**
+ * The intent ends (resolved); its conflicts are resolved. `redo` of an update also drops the bases
+ * of its fields (review #28 P2-a): the next pass then plans them as on a first link, where LFCP
+ * wins unless the two sides are equal (B14) — the direction a person asked for, whatever changed
+ * meanwhile. Kept bases would let the planner pick the side by what changed: an LFCP edit back to
+ * the base during the quarantine would send Reminders' value to LFCP.
+ */
+function release(
+  db: BridgeDatabase,
+  i: Intent,
+  choice: "redo" | "accept" | "link",
+  o: DecisionPorts,
 ): Resolution {
   const at = new Date((o.now ?? Date.now)()).toISOString();
   db.transaction(() => {
     new Intents(db, o.now).resolve(i.id, choice);
     resolveConflicts(db, i.id, choice, at);
+    if (choice === "redo" && i.kind === "update" && i.fields.length > 0)
+      db.prepare(
+        `DELETE FROM bases WHERE binding_id = ? AND task_id = ?
+           AND field IN (${i.fields.map(() => "?").join(", ")})`,
+      ).run(i.bindingId, i.taskId, ...i.fields);
     o.journal.append("info", "quarantine.resolved", {
       bindingId: i.bindingId,
       taskId: i.taskId,
@@ -288,8 +324,128 @@ function redo(
     kind: "resolved",
     text:
       i.kind === "update"
-        ? `redo: the next pass plans ${i.fields.join(", ")} again from LFCP (a new write if Reminders lacks it)`
+        ? choice === "redo"
+          ? `redo: the next pass writes ${i.fields.join(", ")} again from LFCP (if Reminders differs)`
+          : `${choice}: the next pass plans ${i.fields.join(", ")} again`
         : `${choice}: the next pass finds the reminder by its link if the ${i.kind} happened, and writes it otherwise`,
+  };
+}
+
+/**
+ * An unknown create (review #28 P2-b). It may have made a reminder that was moved to another list
+ * before any link existed; the helper's create looks for its link in the target list only, so a
+ * plain release could make a second one. So first a complete lookup by its link URL in every list:
+ * none → released (the next pass makes it); one → linked (accept: as written, the next pass sends a
+ * difference to LFCP; redo: no bases, the next pass writes LFCP's values into it); several, or an
+ * incomplete search → refused: the person picks it (`quarantine link <reminder> <intent>`).
+ */
+async function releaseCreate(
+  db: BridgeDatabase,
+  i: Intent,
+  choice: "redo" | "accept",
+  o: DecisionPorts & { readonly handler?: IntentHandler },
+): Promise<Resolution> {
+  const p = i.payload as { linkUrl: string; set: WritableSet };
+  if (o.transport === undefined)
+    return {
+      kind: "refused",
+      text: "Reminders is needed to look for the reminder this create may have made",
+    };
+  const found = await (await o.transport()).find({ url: p.linkUrl }, "all").catch(() => undefined);
+  if (found === undefined || !found.complete)
+    return {
+      kind: "refused",
+      text: `Reminders could not be searched completely for the reminder this create may have made (in any list). Try again, or pick it yourself: lfcp-bridge quarantine link <reminder> ${i.id}`,
+    };
+  if (found.items.length > 1)
+    return {
+      kind: "refused",
+      text: `several reminders carry this Task's link (${found.items.map((x) => `${x.ref.id} "${x.title}"`).join(", ")}); pick one: lfcp-bridge quarantine link <reminder> ${i.id}`,
+    };
+  const item = found.items[0];
+  if (item === undefined) return release(db, i, choice, o);
+  if (choice === "accept" && o.handler !== undefined) {
+    finalizeAsWritten(
+      db,
+      i,
+      { ok: true, opKey: i.id, ref: item.ref, rev: item.rev, written: writtenOf(p.set) },
+      "accept",
+      { ...o, handler: o.handler },
+    );
+    return {
+      kind: "resolved",
+      text: `accepted: the create happened — linked to "${item.title}" (${item.list === undefined ? "?" : item.list})`,
+    };
+  }
+  linkCreated(db, i, item, choice, o);
+  return {
+    kind: "resolved",
+    text: `${choice}: the create happened — linked to "${item.title}"; the next pass writes LFCP's values into it`,
+  };
+}
+
+/** Links an unknown create's Task to `item` without bases: the next pass writes LFCP's values (B14). */
+function linkCreated(
+  db: BridgeDatabase,
+  i: Intent,
+  item: AppleItem,
+  choice: string,
+  o: DecisionPorts,
+): void {
+  const at = new Date((o.now ?? Date.now)()).toISOString();
+  const p = i.payload as { linkUrl: string };
+  db.transaction(() => {
+    new Intents(db, o.now).resolve(i.id, choice);
+    resolveConflicts(db, i.id, choice, at);
+    db.prepare(
+      `INSERT INTO links (binding_id, task_id, rem_url, rem_external_id, rem_id_cache, rem_title_snapshot,
+         origin, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'lfcp', 'linked', ?, ?)
+       ON CONFLICT (binding_id, task_id) DO UPDATE SET rem_url = excluded.rem_url,
+         rem_external_id = excluded.rem_external_id, rem_id_cache = excluded.rem_id_cache,
+         state = 'linked', state_reason = NULL, updated_at = excluded.updated_at`,
+    ).run(
+      i.bindingId,
+      i.taskId,
+      item.linkUrl ?? p.linkUrl,
+      item.ref.externalId ?? null,
+      item.ref.id,
+      item.title,
+      at,
+      at,
+    );
+    db.prepare("DELETE FROM bases WHERE binding_id = ? AND task_id = ?").run(i.bindingId, i.taskId);
+    o.journal.append("info", "quarantine.resolved", {
+      bindingId: i.bindingId,
+      taskId: i.taskId,
+      params: { intent: i.id, choice, reminder: item.ref.id },
+    });
+  }).immediate();
+}
+
+/**
+ * `link <reminder> <intent>`: the person picks the reminder an unknown create made (when the lookup
+ * could not decide). It must exist; the Task is linked to it as `redo` would.
+ */
+async function linkCreate(
+  db: BridgeDatabase,
+  transport: Pick<RemindersTransport, "find">,
+  reminderId: string,
+  i: Intent,
+  o: DecisionPorts,
+): Promise<Resolution> {
+  if (i.direction !== "to_apple" || i.kind !== "create")
+    return { kind: "refused", text: `intent ${i.id} is not a create: accept or redo it` };
+  let item: AppleItem | undefined;
+  for (const q of [{ id: reminderId }, { externalId: reminderId }] as FindQuery[]) {
+    const r = await transport.find(q, "all");
+    item ??= r.items[0];
+  }
+  if (item === undefined)
+    return { kind: "refused", text: `no reminder ${reminderId} in Reminders` };
+  linkCreated(db, i, item, "link", o);
+  return {
+    kind: "resolved",
+    text: `linked: "${item.title}" is the Task's reminder; the next pass writes LFCP's values into it`,
   };
 }
 
@@ -335,6 +491,9 @@ export async function linkReminder(
   taskId: string,
   o: { readonly journal: Journal; readonly now?: () => number },
 ): Promise<Resolution> {
+  // <task> may be an unknown create's intent: the person picks the reminder it made.
+  const create = unknownOutcome(db, taskId);
+  if (typeof create !== "string") return linkCreate(db, transport, reminderId, create, o);
   const l = quarantinedLink(db, taskId);
   if (typeof l === "string") return { kind: "refused", text: l };
   const c = await candidates(db, transport, taskId);
