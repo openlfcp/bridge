@@ -22,6 +22,9 @@ export const HOLD_REASONS = Object.freeze([
   "access_refused",
   // §7.5, §8.2: the helper did not stay up (more than 3 restarts within 5 min, PR 9 supervision).
   "helper_unavailable",
+  // §8.2, the hang analysis G1: the helper stalled twice on this binding's list within the restart
+  // window; only this binding pauses (no pass reads its list), the others go on.
+  "helper_stall",
 ] as const);
 
 export type HoldReason = (typeof HOLD_REASONS)[number];

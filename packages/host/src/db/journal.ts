@@ -74,6 +74,8 @@ export const JOURNAL_TEXT: Readonly<Record<string, (p: JournalParams) => string>
     `Fault injection is on for this run (${String(p.fault ?? "")}): the next write of a verification binding will lose its answer`,
   "fault.injected": (p) =>
     `Fault injection: the answer of ${String(p.op ?? "")} (opKey ${String(p.opKey ?? "")}) was dropped after the helper ${p.answered ? "saved it" : "refused it"}, and the helper was killed`,
+  "helper.stall_hold": (p) =>
+    `The Reminders helper stalled ${String(p.stalls ?? 2)} times on this list (${String(p.op ?? "")}): this binding is paused, the others go on. Look at the list (a repeating reminder?), then \`lfcp-bridge resume --accept helper_stall --binding <id>\``,
   "helper.reconnect_failed": (p) =>
     `The Reminders helper came back but could not be reconnected: ${String(p.error ?? "")}`,
   "effect.refused": (p) => `Reminders refused a write: ${String(p.code ?? "")}`,

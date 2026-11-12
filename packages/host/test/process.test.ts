@@ -212,6 +212,25 @@ describe("triggers, one pass at a time, decisions", () => {
 });
 
 describe("holds, resume, stop", () => {
+  it("helper_stall (hang analysis G1): the binding's pass reads nothing until the hold is accepted", async () => {
+    b = await bridge();
+    await b.task("Buy milk");
+    const proc = processOf();
+    await proc.start();
+    new Holds(b.db).set("b", "helper_stall", { op: "items.snapshot", list: "L", stalls: 2 });
+    const snapshot = b.t.snapshot.bind(b.t);
+    let reads = 0;
+    b.t.snapshot = async (list) => {
+      reads++;
+      return snapshot(list);
+    };
+    expect(await proc.pass("b")).toEqual({ kind: "skipped", reason: "helper_stall" });
+    expect(reads).toBe(0);
+    new Holds(b.db).accept("b", "helper_stall");
+    expect(await proc.pass("b")).toMatchObject({ kind: "applied" });
+    expect(reads).toBeGreaterThan(0);
+  });
+
   it("a mass unlink holds the pass until the hold is lifted; then it applies", async () => {
     b = await bridge({ filter: "mine" });
     const tasks = [];
