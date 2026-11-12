@@ -38,7 +38,7 @@ node scripts/live-check.mjs
 | 4 | create: `written` = прочитанное; идемпотентность по ссылке; полный снимок | `items.create`, `items.snapshot` |
 | 5 | update с текущим `rev`; устаревший → `conflict_changed`; `rev` из ответа = `rev` записи | `items.update`, `items.get` |
 | 6 | **Ручной.** Время 09:00, заметка и будильник, поставленные человеком, переживают смену даты мостом (B2, B15); `dueDate: null` → `personal_conflict` (B12) | iPhone + `items.update` |
-| 7 | **Ручной.** `restoreUrl` заполняет очищенный URL и не трогает URL, вписанный человеком | iPhone + `items.restoreUrl` |
+| 7 | **Пропусти (s).** Обе ручные подсказки скрипта к URL («очисти поле URL», «впиши https://example.com») в Напоминаниях невыполнимы: ссылка моста лежит в `EKReminder.url`, а Reminders.app (iOS и macOS 26) это поле не показывает. Поле «URL» карточки — другое хранилище, и EventKit его не видит (R-023, F3). Наблюдаемое: после `items.create` с `linkUrl` ответ `items.get` содержит этот `linkUrl` (helper его видит), а в карточке ссылки нет — это ожидаемо. Сам `restoreUrl` (пустой URL заполняется, чужой не трогается → `personal_conflict`) проверен в `helper/Tests/HelperCoreTests/WriteTests.swift` | `items.create`, `items.get` |
 | 8 | Маркеры: создание (выполненная запись), идемпотентность, retire только точного маркера | `markers.*` |
 | 9 | `EKEventStoreChanged` после своей записи и после правки с iPhone (задержка) | события `changed` |
 | 10 | **Ручной.** `sleep` / `wake` от NSWorkspace | сон Mac на ~30 с |
