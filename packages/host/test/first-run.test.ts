@@ -18,6 +18,7 @@ import { OperationJournal } from "@openlfcp/client";
 import { openNodeInstallation, PAIR_EXIT } from "@openlfcp/storage-node";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bridgePaths } from "../src/config.js";
+import { EXIT } from "../src/exit.js";
 import { claimDirectory, pairCommand } from "../src/run/cli.js";
 import type { Runtime } from "../src/runtime.js";
 
@@ -156,6 +157,50 @@ describe("R-023 #3: a rejected pair leaves no installation behind", () => {
     );
     expect(code).not.toBe(0);
     expect(existsSync(join(rt().paths.installations, "inst-c", "lfcp.sqlite"))).toBe(true);
+  });
+
+  it("review #25: while a pair of an installation holds its lock, a second is refused and the directory kept", async () => {
+    const installations = rt().paths.installations;
+    let second: { code: number; err: string } | undefined;
+    fake.pair = async (state) => {
+      await recordRequest(state);
+      // The first pair is running (lock held): a second pair of inst-l now.
+      const err: string[] = [];
+      const code = await pairCommand(
+        rt(),
+        { label: "Mac", sections: ["Verify"], installation: "inst-l" },
+        { out: () => {}, err: (l) => err.push(l), stdin: () => "lfcp://pair/zz" },
+      );
+      second = { code, err: err.join("\n") };
+      expect(existsSync(join(state, "lfcp.sqlite"))).toBe(true);
+      return PAIR_EXIT.WAITING;
+    };
+    await pairCommand(
+      rt(),
+      { label: "Mac", sections: ["Verify"], installation: "inst-l" },
+      quiet("lfcp://pair/zz"),
+    );
+    expect(second?.code).toBe(EXIT.USAGE);
+    expect(second?.err).toContain("a pairing of installation inst-l is already running");
+    expect(second?.err).toContain(join(installations, "inst-l.lock"));
+    expect(existsSync(join(installations, "inst-l", "lfcp.sqlite"))).toBe(true);
+    // Released when the first returns.
+    expect(existsSync(join(installations, "inst-l.lock"))).toBe(false);
+  });
+
+  it("review #25: a lock left behind refuses pair without touching the directory", async () => {
+    const installations = rt().paths.installations;
+    mkdirSync(installations, { recursive: true });
+    writeFileSync(join(installations, "inst-s.lock"), "999999999\n");
+    const err: string[] = [];
+    const code = await pairCommand(
+      rt(),
+      { label: "Mac", sections: ["Verify"], installation: "inst-s" },
+      { out: () => {}, err: (l) => err.push(l), stdin: () => "lfcp://pair/zz" },
+    );
+    expect(code).toBe(EXIT.USAGE);
+    expect(err.join("\n")).toContain("remove");
+    expect(readdirSync(installations)).toEqual(["inst-s.lock"]);
   });
 
   it("review #25: the claim is atomic — the first mkdir owns the directory, a second does not", () => {
