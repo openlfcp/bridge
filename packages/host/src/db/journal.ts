@@ -81,6 +81,14 @@ export const JOURNAL_TEXT: Readonly<Record<string, (p: JournalParams) => string>
   "effect.refused": (p) => `Reminders refused a write: ${String(p.code ?? "")}`,
   "intent.unknown_outcome": () =>
     "Whether a write to Reminders happened is not known: decide in `lfcp-bridge quarantine`",
+  "quarantine.resolved": (p) =>
+    p.choice === "accept"
+      ? `You resolved a quarantine: the write happened, Reminders as it is (${String(p.fields ?? "")})`
+      : p.choice === "redo"
+        ? `You resolved a quarantine: written again from the shared task (${String(p.fields ?? "")})`
+        : p.choice === "link"
+          ? "You resolved a quarantine: this reminder is the task's, the other candidates are ignored"
+          : "You resolved a quarantine: that reminder is not the task's; matched again",
   "intent.invalid": (p) =>
     `An intent did not match its binding and was refused: ${String(p.detail ?? "")}`,
   "intent.field_quarantined": (p) =>
