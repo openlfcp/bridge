@@ -96,7 +96,7 @@ export const COMMANDS: readonly CommandInfo[] = Object.freeze([
   { name: "log", summary: "the log", pr: "9", ready: true },
 ] satisfies CommandInfo[]);
 
-export const VERSION = "0.0.0";
+export const VERSION = "0.5.0";
 
 export const USAGE = `usage: lfcp-bridge <command> [arguments]
 
