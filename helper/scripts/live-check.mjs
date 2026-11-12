@@ -95,7 +95,8 @@ async function req(op, body = {}, ms) {
   rid += 1;
   const id = rid;
   input.write(`${JSON.stringify({ v: 2, id, op, ...body })}\n`);
-  return waitFor((m) => m.id === id, ms);
+  // A reply, not an event that names the request (`started` carries its id too).
+  return waitFor((m) => m.id === id && m.event === undefined, ms);
 }
 const eventsSince = (t, name) => lines.filter((x) => x.at >= t && x.m.event === name);
 

@@ -48,7 +48,8 @@ function session(input, output) {
       id += 1;
       const rid = id;
       input.write(`${JSON.stringify({ v: 2, id: rid, op, ...body })}\n`);
-      return waitFor((m) => m.id === rid);
+      // A reply, not an event that names the request (`started` carries its id too).
+      return waitFor((m) => m.id === rid && m.event === undefined);
     },
   };
 }
