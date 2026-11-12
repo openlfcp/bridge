@@ -13,7 +13,7 @@ them.
   available.
 - **Not available yet, PR 9b included:**
   - a command to leave Safe Mode (see [Safe Mode](#safe-mode));
-  - `conflicts`, `quarantine`, `refused` (the state is in the database, the commands are not);
+  - `conflicts`, `refused` (the state is in the database, the commands are not);
   - N8's `sections add` and `migrate resume` (the `run` process does not give them the pairing and
     the new connection yet).
 
@@ -268,7 +268,7 @@ Accept a hold only once its cause is understood:
 | `guard_mass_unlink`, `guard_mass_import`, `guard_mass_status`, `guard_count_drop`, `guard_backlog` | a pass would change more than the hourly limits allow (§7.2) | check the list and the section; if the change is meant, accept |
 | `ownership_lost` | this bridge's marker "LFCP bridge · не удалять" is gone from the list | never lifted or re-created by itself. If you deleted it by mistake, unbind and bind again. If another Mac took over, this bridge is done here |
 | `foreign_bridge` | another bridge's marker for this section exists | lifts itself when that marker is gone. See [replacing the Mac](replacing-the-mac.md). One bridge per Apple ID |
-| `import_ambiguous` | a new reminder could match more than one pending Task | resolve the quarantine **(not available yet)**, then accept |
+| `import_ambiguous` | a new reminder could match more than one pending Task | `lfcp-bridge quarantine` lists the pending imports; check the list, then accept |
 | `access_refused` | the server refused the section (revoked device or grant) | lifts on an "allowed" answer; a proven revocation is final |
 | `helper_unavailable` | the helper restarted more than 3 times in 5 minutes | `doctor`; fix the helper (signature, Reminders access); accept |
 | `helper_stall` | the helper got stuck twice in 5 minutes reading or writing **this binding's list** (`log`: `helper.stalled`, `helper.stall_hold`); only this binding pauses, and nothing reads its list until you accept | look at the list in Reminders — a repeating reminder is the known trigger — then accept; if it stalls again, the hold comes back |
@@ -293,12 +293,24 @@ lfcp-bridge bind --binding <id>                                   # continue a b
 **While syncing.** A write whose outcome is unknown is never repeated by itself. The intent goes to
 quarantine with field conflicts. A refused intent stays refused. Both wait for a person:
 
-- `quarantine list|link|ignore|drop` **(not available yet)**;
+- `quarantine` — see below;
 - `conflicts list|resolve <id> --take lfcp|apple` **(not available yet)**;
 - `refused list|retry|drop` **(not available yet)**.
 
 The database records the person's decision (`intent_resolutions`, schema version 5). Until then an
 unresolved refused or quarantined intent also keeps [N8](#add-a-section-n8) from starting.
+
+`lfcp-bridge quarantine` lists what waits, one line per item with the exact commands
+(`--binding <id>` for one binding; `status` shows the count per binding):
+
+| Kind | What happened | Your choices |
+|---|---|---|
+| `unknown_outcome` | the answer of a write to Reminders was lost (the helper died, a timeout) | `quarantine accept <intent>`: the write happened — Reminders as it is (what Reminders shows wins: if it lacks the write, its value goes to the shared task). `quarantine redo <intent>`: write it again from the shared task, under a new operation key |
+| `ambiguous_match` | several reminders carry the task's link | `quarantine link <reminder> <task>`: that one is the task's, the others are ignored. `quarantine ignore <reminder> <task>`: that one is not; the bridge matches again |
+| `import_ambiguous` | the hold of the same name | `resume --accept import_ambiguous --binding <id>` |
+
+A decision is journaled (`quarantine.resolved`); a running `run` picks it up within seconds. Nothing
+is deleted in Reminders either way.
 
 ## Replace the Mac
 
