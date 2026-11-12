@@ -101,10 +101,17 @@ export const fifoTestHooks: {
     readonly out: string;
     readonly err: string;
   }) => void;
+  /**
+   * Runs once the helper's stdout is being read: a test may pause it, so lines the helper wrote
+   * are still unread when it dies (the drain after a death resumes it).
+   */
+  onOutput?: (out: Readable) => void;
 } = {};
 
 export const EXECUTABLE = path.join("Contents", "MacOS", "lfcp-reminders-helper");
 const HELPER_NAME = "lfcp-reminders-helper";
+/** The host's own marker line in the helper's stdout FIFO (the drain after a death). */
+const DRAINED = "host.drained";
 
 type Pending = {
   resolve: (r: WireResponse) => void;
@@ -157,8 +164,13 @@ export class HelperProcess implements HelperLink {
   #ready: WireReady | undefined;
   /** Request ids the helper announced with `started` (it began running them). */
   readonly #started = new Set<number>();
-  /** Settles once the exit's stopping is done: whether the helper is known to be gone. */
+  /** Settles once the exit's stopping and drain are done: whether the helper is known to be gone. */
   #gone: Promise<boolean> | undefined;
+  /** The helper's stdout, drained after its death. */
+  #out: Readable | undefined;
+  /** The drain's marker line and what its arrival resolves. */
+  #drainToken: string | undefined;
+  #drained: (() => void) | undefined;
 
   private constructor(opts: HelperProcessOptions) {
     this.#opts = opts;
@@ -263,6 +275,12 @@ export class HelperProcess implements HelperLink {
     const outLines = createInterface({ input: out });
     outLines.on("line", (l) => this.#onLine(l));
     this.#readers.push(errLines, outLines);
+    this.#out = out;
+    try {
+      fifoTestHooks.onOutput?.(out);
+    } catch {
+      // a test hook never stops the launch
+    }
 
     let timer: NodeJS.Timeout | undefined;
     const ready = new Promise<WireReady>((resolve) => this.#emitter.once("ready", resolve));
@@ -292,7 +310,9 @@ export class HelperProcess implements HelperLink {
     }
     if (typeof msg.event === "string") {
       if (msg.event === "ready") this.#emitter.emit("ready", msg);
-      else if (msg.event === "started") {
+      else if (msg.event === DRAINED) {
+        if (msg.token === this.#drainToken) this.#drained?.();
+      } else if (msg.event === "started") {
         if (typeof msg.id === "number") this.#started.add(msg.id);
       } else this.#emitter.emit("event", msg);
       return;
@@ -315,13 +335,18 @@ export class HelperProcess implements HelperLink {
     // With `open`, the child is the launcher: it may go away while the helper still runs (killed,
     // crashed). An unmanaged helper must not stay behind (review PR 6 r2): stop it too.
     this.#stopping = this.#stopHelper();
-    this.#gone = this.#stopping.then(() => this.#helperGone());
+    // Once the helper is known to be gone, what it wrote before dying is read to the end — a
+    // `started` still in the pipe counts — and only then are the streams closed.
+    this.#gone = this.#stopping.then(async () => {
+      const gone = this.#helperGone() && (await this.#drain());
+      this.#cleanup();
+      return gone;
+    });
     for (const [, p] of this.#pending) {
       clearTimeout(p.timer);
       p.reject(new HelperLostError(`helper exited (${code}) with a request in flight`));
     }
     this.#pending.clear();
-    this.#cleanup();
     this.#emitter.emit("exit", code);
   }
 
@@ -332,6 +357,49 @@ export class HelperProcess implements HelperLink {
   /** See HelperLink.gone: resolves after the exit's stopping; false before any exit. */
   gone(): Promise<boolean> {
     return this.#gone ?? Promise.resolve(false);
+  }
+
+  /**
+   * Reads the dead helper's stdout to its end; true once everything it wrote was handled. Launched
+   * directly, that is the pipe's EOF. With `open` we hold the FIFO's write side ourselves, so EOF
+   * never comes: a marker line goes into the FIFO after the helper's last bytes (a FIFO keeps
+   * order, and nobody else writes now) and the drain ends when it is read back. Not read within
+   * a second: false (nothing is concluded from what was not read).
+   */
+  async #drain(): Promise<boolean> {
+    const out = this.#out;
+    if (out === undefined) return false;
+    out.resume(); // a test may have paused it
+    const timeout = new Promise<boolean>((r) => {
+      setTimeout(() => r(false), 1_000).unref();
+    });
+    if (this.#fifoDir === undefined) {
+      if (out.readableEnded) return true;
+      const ended = new Promise<boolean>((r) => {
+        out.once("end", () => r(true));
+        out.once("close", () => r(true));
+      });
+      return Promise.race([ended, timeout]);
+    }
+    const token = `${process.pid}-${Date.now()}-${Math.random()}`;
+    const read = new Promise<boolean>((r) => {
+      this.#drained = () => r(true);
+    });
+    this.#drainToken = token;
+    try {
+      const fd = fs.openSync(
+        path.join(this.#fifoDir, "out"),
+        fs.constants.O_WRONLY | fs.constants.O_NONBLOCK,
+      );
+      try {
+        fs.writeSync(fd, `${JSON.stringify({ event: DRAINED, token })}\n`);
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+      return false;
+    }
+    return Promise.race([read, timeout]);
   }
 
   /**
@@ -382,6 +450,7 @@ export class HelperProcess implements HelperLink {
       // Already gone (the launcher exited): make sure the helper went with it.
       await this.#stopping;
       await this.#stopHelper();
+      await this.#gone;
       return;
     }
     const exited = new Promise<void>((r) => {
@@ -398,6 +467,8 @@ export class HelperProcess implements HelperLink {
     await Promise.race([exited, sleep(this.#opts.closeGraceMs ?? 10_000)]);
     await this.#stop();
     this.#onExit(null);
+    // Its output read to the end, then the streams and FIFOs gone.
+    await this.#gone;
   }
 
   /** Stops the helper (pid from ready, if it is our executable) and the launcher; waits for both. */
