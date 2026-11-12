@@ -391,17 +391,30 @@ function linkCreated(
   item: AppleItem,
   choice: string,
   o: DecisionPorts,
+  /** External ids of the other reminders with the Task's link: ignored from now on. */
+  ignore: readonly string[] = [],
 ): void {
   const at = new Date((o.now ?? Date.now)()).toISOString();
   const p = i.payload as { linkUrl: string };
   db.transaction(() => {
     new Intents(db, o.now).resolve(i.id, choice);
     resolveConflicts(db, i.id, choice, at);
+    const before = db
+      .prepare("SELECT ignored_external_ids_json FROM links WHERE binding_id = ? AND task_id = ?")
+      .get(i.bindingId, i.taskId) as { ignored_external_ids_json: string } | undefined;
+    const ignored = JSON.stringify([
+      ...new Set([
+        ...(before === undefined ? [] : (JSON.parse(before.ignored_external_ids_json) as string[])),
+        ...ignore,
+      ]),
+    ]);
     db.prepare(
       `INSERT INTO links (binding_id, task_id, rem_url, rem_external_id, rem_id_cache, rem_title_snapshot,
-         origin, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'lfcp', 'linked', ?, ?)
+         origin, state, ignored_external_ids_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'lfcp', 'linked', ?, ?, ?)
        ON CONFLICT (binding_id, task_id) DO UPDATE SET rem_url = excluded.rem_url,
          rem_external_id = excluded.rem_external_id, rem_id_cache = excluded.rem_id_cache,
+         ignored_external_ids_json = excluded.ignored_external_ids_json,
          state = 'linked', state_reason = NULL, updated_at = excluded.updated_at`,
     ).run(
       i.bindingId,
@@ -410,6 +423,7 @@ function linkCreated(
       item.ref.externalId ?? null,
       item.ref.id,
       item.title,
+      ignored,
       at,
       at,
     );
@@ -442,10 +456,30 @@ async function linkCreate(
   }
   if (item === undefined)
     return { kind: "refused", text: `no reminder ${reminderId} in Reminders` };
-  linkCreated(db, i, item, "link", o);
+  // The other reminders that carry the Task's link are ignored, as `link <reminder> <task>` does
+  // (review #28 r2): left in the list, they would match the Task too and quarantine it again.
+  const chosen = item;
+  const p = i.payload as { linkUrl: string };
+  const others = (await transport.find({ url: p.linkUrl }, "all")).items.filter(
+    (x) => x.ref.id !== chosen.ref.id,
+  );
+  const noExternal = others.filter((x) => x.ref.externalId === undefined);
+  if (noExternal.length > 0)
+    return {
+      kind: "refused",
+      text: `another reminder with this Task's link (${noExternal.map((x) => x.ref.id).join(", ")}) cannot be ignored (no external id); remove it from the list in Reminders, then link`,
+    };
+  linkCreated(
+    db,
+    i,
+    chosen,
+    "link",
+    o,
+    others.map((x) => x.ref.externalId as string),
+  );
   return {
     kind: "resolved",
-    text: `linked: "${item.title}" is the Task's reminder; the next pass writes LFCP's values into it`,
+    text: `linked: "${chosen.title}" is the Task's reminder${others.length > 0 ? `; ${others.length} other(s) ignored` : ""}; the next pass writes LFCP's values into it`,
   };
 }
 
