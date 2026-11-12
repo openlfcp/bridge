@@ -12,6 +12,19 @@ import { EXIT, type ExitCode } from "./exit.js";
 import { installLaunchAgent, uninstallLaunchAgent } from "./launchd.js";
 import { MigrationError, type MigrationRow, Migrations } from "./migration.js";
 import {
+  acceptOutcome,
+  candidates,
+  ignoreReminder,
+  linkReminder,
+  quarantineCounts,
+  quarantined,
+  type Resolution,
+  redoOutcome,
+  resolveCommands,
+  shortId,
+} from "./quarantine.js";
+import { bridgeHandler } from "./reconcile/handler.js";
+import {
   approveCommand,
   dryRunCommand,
   pairCommand,
@@ -59,7 +72,12 @@ export const COMMANDS: readonly CommandInfo[] = Object.freeze([
   { name: "resume", summary: "remove STOP, or accept one hold", pr: "9", ready: true },
   { name: "doctor", summary: "preflight checks; the TCC request", pr: "9", ready: true },
   { name: "conflicts", summary: "field conflicts", pr: "10" },
-  { name: "quarantine", summary: "ambiguous matches and unknown outcomes", pr: "12" },
+  {
+    name: "quarantine",
+    summary: "ambiguous matches and unknown outcomes: list, accept, redo, link, ignore",
+    pr: "12",
+    ready: true,
+  },
   { name: "refused", summary: "refused intents", pr: "7" },
   {
     name: "verify",
@@ -224,6 +242,96 @@ async function recordCommand(
   return EXIT.OK;
 }
 
+const QUARANTINE_USAGE = `lfcp-bridge quarantine [list] [--binding <binding>]
+       lfcp-bridge quarantine accept <intent>     the write happened: take Reminders as it is
+       lfcp-bridge quarantine redo <intent>       write it again from LFCP
+       lfcp-bridge quarantine link <reminder> <task>
+       lfcp-bridge quarantine ignore <reminder> <task>`;
+
+/** `quarantine` (D-010 §2.1, §5.4, §5.7): what waits for a person, and their decisions. */
+async function quarantineCommand(
+  rt: Runtime,
+  positional: readonly string[],
+  opts: ReadonlyMap<string, string | true>,
+  env: CliEnvironment,
+): Promise<ExitCode> {
+  const [sub = "list", a, b] = positional;
+  const o = { journal: rt.journal };
+  const done = (r: Resolution): ExitCode => {
+    if (r.kind === "refused") {
+      env.err(`quarantine ${sub} refused: ${r.text}`);
+      return r.text.startsWith("no ") ? EXIT.NOT_FOUND : EXIT.NEEDS_PERSON;
+    }
+    // The run process looks at the control state every 2 s: a change starts a full pass.
+    bumpControl(rt.db);
+    env.out(r.text);
+    return EXIT.OK;
+  };
+  switch (sub) {
+    case "list": {
+      const binding = opts.get("binding");
+      const entries = quarantined(rt.db, typeof binding === "string" ? binding : undefined);
+      if (entries.length === 0) {
+        env.out("nothing in quarantine");
+        return EXIT.OK;
+      }
+      // Candidates of an ambiguous match come from Reminders: the helper only when one is listed.
+      let transport: Awaited<ReturnType<Runtime["openTransport"]>> | undefined;
+      if (entries.some((e) => e.kind === "ambiguous_match"))
+        transport = await rt.openTransport().catch(() => undefined);
+      for (const e of entries) {
+        const task = e.taskTitle === undefined ? "" : `  task "${e.taskTitle}"`;
+        const reminder =
+          e.reminder === undefined
+            ? ""
+            : `  reminder ${shortId(e.reminder.id)}${e.reminder.title === undefined ? "" : ` "${e.reminder.title}"`}`;
+        env.out(
+          `${e.id}  ${e.bindingId}  ${e.kind}${task}${reminder}  since ${e.since}${e.detail ? `  (${e.detail})` : ""}`,
+        );
+        if (e.kind === "ambiguous_match") {
+          const c =
+            transport?.status().state === "ok"
+              ? await candidates(rt.db, transport, e.id).catch(() => undefined)
+              : undefined;
+          if (c === undefined)
+            env.out("    candidates: Reminders not available (lfcp-bridge doctor); try again");
+          for (const i of c?.items ?? [])
+            env.out(
+              `    candidate ${i.ref.id} "${i.title}"${i.completed ? " (completed)" : ""}  → lfcp-bridge quarantine link ${i.ref.id} ${e.id}  |  lfcp-bridge quarantine ignore ${i.ref.id} ${e.id}`,
+            );
+          continue;
+        }
+        for (const cmd of resolveCommands(e)) env.out(`    → ${cmd}`);
+      }
+      return EXIT.OK;
+    }
+    case "accept":
+      if (a === undefined) return usage(env, QUARANTINE_USAGE);
+      return done(
+        acceptOutcome(rt.db, a, {
+          ...o,
+          handler: bridgeHandler({ timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }),
+        }),
+      );
+    case "redo":
+    case "drop":
+      if (a === undefined) return usage(env, QUARANTINE_USAGE);
+      return done(redoOutcome(rt.db, a, o));
+    case "link":
+    case "ignore": {
+      if (a === undefined || b === undefined) return usage(env, QUARANTINE_USAGE);
+      const transport = await rt.openTransport();
+      return done(
+        sub === "link"
+          ? await linkReminder(rt.db, transport, a, b, o)
+          : await ignoreReminder(rt.db, transport, a, b, o),
+      );
+    }
+    default:
+      return usage(env, QUARANTINE_USAGE);
+  }
+}
+
 async function run(
   name: string,
   args: readonly string[],
@@ -337,6 +445,8 @@ async function run(
         );
       return EXIT.OK;
     }
+    case "quarantine":
+      return quarantineCommand(rt, positional, opts, env);
     case "status": {
       const s = stopState(rt.paths.home);
       env.out(`STOP: ${s === undefined ? "no" : `yes${s.at ? ` (since ${s.at})` : ""}`}`);
@@ -355,10 +465,12 @@ async function run(
         verification: number;
       }[];
       if (rows.length === 0) env.out("no bindings");
+      const quarantine = quarantineCounts(rt.db);
       for (const b of rows) {
         const holds = rt.holds.of(b.id).map((h) => h.reason);
+        const q = quarantine.get(b.id) ?? 0;
         env.out(
-          `${b.id}  ${b.state}  "${b.target_title ?? ""}"${b.verification ? "  (verification)" : ""}${holds.length ? `  holds: ${holds.join(", ")}` : ""}`,
+          `${b.id}  ${b.state}  "${b.target_title ?? ""}"${b.verification ? "  (verification)" : ""}${holds.length ? `  holds: ${holds.join(", ")}` : ""}${q > 0 ? `  quarantine: ${q} (lfcp-bridge quarantine)` : ""}`,
         );
       }
       for (const c of COMMANDS.filter((x) => x.ready !== true))
