@@ -133,6 +133,24 @@ lfcp-bridge log --limit 30
 | 18 | Terminal | `lfcp-bridge resume` | через несколько секунд (процесс смотрит на команды раз в 2 с) напоминание переименовано |
 | 19 | Obsidian | создать 4 задачи, дождаться 4 напоминаний; потом удалить все 4 задачи сразу | напоминания остаются; `lfcp-bridge status` показывает `guard_mass_unlink` и, возможно, `guard_count_drop`; ничего не синхронизируется. Принять каждый hold из `status`: `lfcp-bridge resume --accept <hold> --binding <binding>` — через несколько секунд проход идёт, `status` без holds; в `log` четыре строки `link.task_gone`. **Напоминания остаются — это ожидаемо**: мост ничего не удаляет в Напоминаниях |
 | 20 | Terminal | Ctrl-C в окне `run`, затем снова `lfcp-bridge run` | процесс останавливается и запускается без ошибок; шаг 2 ещё раз работает. Напоминания шага 19 по-прежнему в списке — это ожидаемо |
+| 21 | Obsidian, iPhone, Terminal | новая задача «Тест 21» со сроком на завтра, дождаться напоминания. `lfcp-bridge stop`; на iPhone **убрать дату** у «Тест 21»; в Obsidian перенести срок «Тест 21» на послезавтра; `lfcp-bridge resume` | обе правки попадают в один проход; по §5.5 побеждает общая задача: напоминание получает дату послезавтра (время и будильник, если были, на месте). В `log`: `info  field.apple_overruled […]  Changed on both sides: the shared task's due was kept; your Reminders value was null`. Hold нет. Обратный порядок — см. замечание к шагу 21 |
+| 22 | Obsidian, Terminal | новая задача «Тест 22» со сроком на завтра, дождаться напоминания. Во втором окне: `kill -STOP "$(cat "$HOME/Library/Application Support/org.openlfcp.bridge/helper.pid")"` и **сразу** в Obsidian переименовать задачу в «Тест 22 б». Подождать минуту | helper стоит, запись переименования ушла и ответа не получила. Через ≤ 40 с супервизор не получает ответа на ping и перезапускает helper (остановленный процесс убивается). В `log`: `warn  effect.lost  The answer of a write to Reminders was lost`, после прохода — `warn  intent.unknown_outcome  Whether a write to Reminders happened is not known: decide in \`lfcp-bridge quarantine\``. На iPhone **одно** напоминание «Тест 22» (не два); в Obsidian задача по-прежнему «Тест 22 б» — ничего не потеряно и не задвоено. `status` без holds; шаг 2 с другой задачей работает |
+| 23 | iPhone, Obsidian | новое напоминание «Тест 23» с повтором «Каждый день» в этом списке; дождаться задачи в Obsidian; потом переименовать в Obsidian «Позвонить маме» | «Тест 23» появляется задачей в конце `Verify`; в `log`: `info  link.status_locked  The reminder repeats: its completion and due date are not synchronized while it does`. Переименование «Позвонить маме» доходит до напоминания — мост работает дальше. Если helper застрянет на чтении (так было в R-001 после повторяющегося напоминания): в `log` `error  helper.stalled  The Reminders helper gave up on <op> after 30 s: its outcome is unknown. Restarting the helper.`, helper перезапускается сам, синхронизация продолжается — это ожидаемо. Hold `helper_unavailable` (больше трёх перезапусков за 5 минут) — **не** ожидаемо: запиши шаг |
+
+Замечания к шагам 21–23:
+
+- **21, обратный порядок** (дату убрали в Obsidian, на iPhone её поменяли). С фильтром `default` задача без срока и без
+  назначения выходит из фильтра (QB10). Поэтому результат — `link.out_of_filter` («The task left this list's filter…»),
+  а напоминание остаётся с датой iPhone. Это отвязка: в первые 24 часа ожидай `guard_mass_unlink` и прими его. Если
+  задача назначена на тебя, дизайн (§4.5, B12) ждёт конфликт `due_cleared_in_lfcp`: ничего не пишется, дата
+  напоминания остаётся. В этой сборке такой конфликт виден только в `lfcp-bridge dry-run <binding>` (строка
+  `conflict <task> due: due_cleared_in_lfcp`; перед `dry-run` останови `run` через Ctrl-C). В `log` и `status` его нет:
+  это известный пробел, не сбой прогона.
+- **22.** `lfcp-bridge quarantine` в этой сборке ещё нет: задача «Тест 22 б» остаётся в карантине, её название в
+  Напоминания больше не пишется (`intent.field_quarantined` в `log`). Это ожидаемо. Мост не угадывает, была ли
+  запись, и не повторяет её (B19), — поэтому дубля нет.
+- **23.** Зависание helper на EventKit и почему каждый вызов ограничен 30 с, разобраны в
+  [PR #23](https://github.com/openlfcp/bridge/pull/23) (коммит `ac7ffad`, «fix(helper): bound every EventKit call…»).
 
 Ни на одном шаге мост не должен удалить напоминание, будильник, время или заметку и не должен писать в другие списки.
 
@@ -144,9 +162,31 @@ lfcp-bridge log --limit 300 > ~/Desktop/verify-log.txt
 sw_vers -productVersion
 ```
 
-Пришли оба файла, версию macOS и номера шагов, где ожидаемое не произошло; где сможешь — со скриншотом. По этому
-отчёту выставляется `writesVerified` для этой сборки helper и версии macOS (§7.6). Пока его нет, обычные привязки
-работают только в dry-run.
+Пришли оба файла, версию macOS и номера шагов, где ожидаемое не произошло; где сможешь — со скриншотом.
+
+Потом заполни отчёт: скопируй шаблон и отметь каждый шаг.
+
+```sh
+cp ~/dev/openlfcp-work/mvp-0.5/bridge/docs/devel/testing/verification-report.template.json ~/Desktop/verify-report.json
+open -e ~/Desktop/verify-report.json
+```
+
+- В `helperVersion` и `macOS` впиши, на чём шёл прогон. Если оставить их пустыми, команда ниже откажет и напечатает,
+  что запущено на этом Mac (`this machine runs helper … on macOS …`): впиши эти значения, если прогон шёл на них.
+- У каждого шага поставь `"ok": true` только если ожидаемое произошло. Иначе оставь `false` и опиши в `note`.
+
+Записать результат (до уборки: нужна verification-привязка):
+
+```sh
+lfcp-bridge verify --record ~/Desktop/verify-report.json
+lfcp-bridge status
+```
+
+Команда сама спрашивает у запущенного helper его версию, а у системы версию macOS, и сверяет их с отчётом. Она
+выставляет `writesVerified` (§7.6) только если все шаги `ok` и привязка есть. `status` после этого показывает
+`writesVerified: helper … on macOS … (recorded …)`. Любой шаг не `ok`, другая сборка helper или другая macOS — отказ,
+exit 3, ничего не меняется. Пока записи нет, обычные привязки работают только в dry-run. Новая сборка helper или
+обновление macOS снова требуют прогона.
 
 ## 6. Уборка
 
