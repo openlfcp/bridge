@@ -1,0 +1,114 @@
+# Spike S-2 (A§2.1, T§3 S-2, plan gate №1): does the portable bundle — official Node 24 (lipo
+# arm64 + x86_64), the esbuild host, the better-sqlite3 production subtree with a universal .node
+# — run under the hardened runtime, signed ad-hoc, from a path with a space, with no node on PATH
+# and no node_modules of the repository? Also finds the minimal entitlements of node.
+# Throwaway: lives on branch spike/s2-bundle only (never merged).
+name: spike-s2-bundle
+
+on:
+  push:
+    branches: [spike/s2-bundle]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    name: s2 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    env:
+      # The pin (A§2.1): the official build the .app carries, and its ABI.
+      NODE_VERSION: 24.22.3
+      NODE_MODULE_VERSION: "137"
+      # Acceptance place: a path with a space, outside the repository.
+      DEST: /tmp/a b
+    steps:
+      - uses: actions/checkout@v5
+      - name: Paths
+        run: echo "OUT=$RUNNER_TEMP/s2-out" >> "$GITHUB_ENV"
+      - uses: pnpm/action-setup@v6
+      # Node for building only (pnpm, tsc, esbuild); the .app never uses it.
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build the unsigned .app
+        run: scripts/spike-s2/build-app.sh "$OUT"
+
+      - name: Entitlements of node — which sets run the self-test (informational)
+        run: |
+          set +e -u
+          ent() { # <file> <key>... → a plist with each key true
+            { echo '<?xml version="1.0" encoding="UTF-8"?>'
+              echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+              echo '<plist version="1.0"><dict>'
+              local f=$1; shift
+              for k in "$@"; do echo "<key>com.apple.security.cs.$k</key><true/>"; done
+              echo '</dict></plist>'; } > "$f"
+          }
+          E="$RUNNER_TEMP/ent"; mkdir -p "$E"
+          ent "$E/jit" allow-jit
+          ent "$E/mem" allow-unsigned-executable-memory
+          ent "$E/jit-mem" allow-jit allow-unsigned-executable-memory
+          ent "$E/jit-mem-dlv" allow-jit allow-unsigned-executable-memory disable-library-validation
+          : > "$OUT/entitlements.txt"
+          for v in none jit mem jit-mem jit-mem-dlv; do
+            d="$DEST/ent-$v"; rm -rf "$d"; mkdir -p "$d"
+            ditto "$OUT/LFCP Bridge.app" "$d/LFCP Bridge.app"
+            file=""; [ "$v" = none ] || file="$E/$v"
+            if ! scripts/spike-s2/sign-app.sh "$d/LFCP Bridge.app" "$file" > "$d/sign.log" 2>&1; then
+              echo "S2 ent $v: sign failed $(tail -1 "$d/sign.log")" | tee -a "$OUT/entitlements.txt"; continue
+            fi
+            out="$(cd "$d" && env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+              perl -e 'alarm 120; exec @ARGV' "$d/LFCP Bridge.app/Contents/MacOS/LFCP Bridge" --self-test 2>&1)"
+            rc=$?
+            echo "S2 ent $v: exit $rc — $(echo "$out" | tail -1 | cut -c1-300)" | tee -a "$OUT/entitlements.txt"
+            [ "$rc" = 0 ] || echo "$out" | sed "s/^/    [$v] /" | head -40
+            rm -rf "$d"
+          done
+
+      - name: Sign the .app (scripts/spike-s2/node.entitlements), copy it to "/tmp/a b/"
+        run: |
+          scripts/spike-s2/sign-app.sh "$OUT/LFCP Bridge.app"
+          rm -rf "$DEST"; mkdir -p "$DEST"
+          ditto "$OUT/LFCP Bridge.app" "$DEST/LFCP Bridge.app"
+
+      - name: Acceptance — no node on PATH, no node_modules of the repository
+        run: |
+          set +e
+          mv node_modules "$RUNNER_TEMP/repo-node_modules.hidden"
+          for p in packages/*/node_modules; do mv "$p" "$p.hidden"; done
+          scripts/spike-s2/check-app.sh "$DEST/LFCP Bridge.app" 2>&1 | tee "$OUT/check.txt"
+          rc=${PIPESTATUS[0]}
+          mv "$RUNNER_TEMP/repo-node_modules.hidden" node_modules
+          for p in packages/*/node_modules.hidden; do mv "$p" "${p%.hidden}"; done
+          exit "$rc"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Spike S-2 — ${{ matrix.os }} ($(sw_vers -productVersion), $(uname -m))"
+            echo; echo '### Entitlements of node (self-test through the launcher)'; echo '```'
+            cat "$OUT/entitlements.txt" 2>/dev/null || echo "(not run)"
+            echo '```'; echo; echo '### Acceptance'; echo '```'
+            grep -E '^S2 |^== S2' "$OUT/check.txt" 2>/dev/null || echo "(not run)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s2-${{ matrix.os }}
+          path: |
+            ${{ env.OUT }}/entitlements.txt
+            ${{ env.OUT }}/check.txt
+          if-no-files-found: warn
