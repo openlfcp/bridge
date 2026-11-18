@@ -44,13 +44,16 @@ jobs:
         run: scripts/spike-s2/build-app.sh "$OUT"
 
       - name: Entitlements of node — which sets run the self-test (informational)
+        # Never blocks: signing and acceptance below run whatever happens here.
+        continue-on-error: true
         run: |
           set +e -u
           ent() { # <file> <key>... → a plist with each key true
+            # f first: the group's redirect is expanded before anything inside the group runs.
+            local f=$1; shift
             { echo '<?xml version="1.0" encoding="UTF-8"?>'
               echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
               echo '<plist version="1.0"><dict>'
-              local f=$1; shift
               for k in "$@"; do echo "<key>com.apple.security.cs.$k</key><true/>"; done
               echo '</dict></plist>'; } > "$f"
           }
@@ -74,6 +77,7 @@ jobs:
             [ "$rc" = 0 ] || echo "$out" | sed "s/^/    [$v] /" | head -40
             rm -rf "$d"
           done
+          exit 0
 
       - name: Sign the .app (scripts/spike-s2/node.entitlements), copy it to "/tmp/a b/"
         run: |
