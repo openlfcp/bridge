@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements of the bundled node under the hardened runtime (A§2.1, spike S-2): V8's JIT only.
+  Node's own tools/osx-entitlements.plist also has disable-executable-page-protection,
+  allow-dyld-environment-variables, disable-library-validation and get-task-allow; the spike's
+  workflow signs with fewer and more of them to find the minimum (research/s-2-bundle.md).
+  No get-task-allow: notarization refuses it.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+</dict>
+</plist>
