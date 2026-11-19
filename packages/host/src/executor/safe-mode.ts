@@ -1,7 +1,8 @@
 // Runs and Safe Mode (D-010 §2.2, §7.3; r2 §2.3): each `run` writes a
 // process row (runs.kind 'process') first thing, and closes it when it ends. A row still open at the next start is a
 // crash. Two crashed runs in a row, started less than 10 minutes apart, put
-// the bridge into Safe Mode: no effect runs until `resume --safe-mode-off`.
+// the bridge into Safe Mode: no effect runs until `lfcp-bridge safe-mode reset` (support CLI, A§7.3:
+// refused while doctor names an active cause) calls Runs.safeModeOff().
 
 import type { BridgeDatabase } from "../db/database.js";
 import { Journal } from "../db/journal.js";
@@ -85,7 +86,7 @@ export class Runs {
     return r === undefined ? undefined : (JSON.parse(r.value) as SafeModeState);
   }
 
-  /** `resume --safe-mode-off`. */
+  /** Safe Mode off: `lfcp-bridge safe-mode reset` (commands.ts), after doctor finds no cause. */
   safeModeOff(): boolean {
     const off = this.db.prepare("DELETE FROM meta WHERE key = ?").run(KEY).changes === 1;
     if (off) new Journal(this.db, this.now).append("info", "safe_mode.off");
