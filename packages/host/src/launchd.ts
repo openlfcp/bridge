@@ -6,7 +6,7 @@
 //   The absolute path of node is recorded at install: launchd has no PATH of the person.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { LAUNCH_AGENT_LABEL } from "./config.js";
 
@@ -99,4 +99,65 @@ export function uninstallLaunchAgent(path: string, ctl: Launchctl = launchctl): 
   } catch {}
   rmSync(path, { force: true });
   return true;
+}
+
+/** What the first start of 0.6 found of 0.5's LaunchAgent. */
+export type LaunchAgent05 =
+  | { readonly state: "none" }
+  | {
+      readonly state: "removed";
+      /** The data directory the agent ran with (its LFCP_BRIDGE_HOME), if it names one. */
+      readonly home: string | undefined;
+    }
+  | {
+      /** bootout failed for another reason than "not loaded": the plist stays, to try again. */
+      readonly state: "failed";
+      /** launchctl's exit status, or the error's code. */
+      readonly detail: string;
+    };
+
+/**
+ * launchctl's exit statuses of a bootout whose service is not loaded: 3 (ESRCH, "Boot-out failed:
+ * 3: No such process") and 113 ("Could not find service … in domain"). Anything else — 36
+ * "Operation now in progress", 5 "Input/output error", launchctl not run — leaves it undecided.
+ */
+export const BOOTOUT_NOT_LOADED: ReadonlySet<number> = new Set([3, 113]);
+
+const unesc = (s: string) =>
+  s.replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
+
+/**
+ * 0.6 over 0.5 (A§5.3 before the unbind, PLAN §E-007): LFCP Bridge.app runs the host itself, so
+ * 0.5's agent (~/Library/LaunchAgents/org.openlfcp.bridge.plist, `lfcp-bridge service install`)
+ * is booted out of the GUI session — launchd stops its `run`, which releases run.lock — and its
+ * plist removed, so that it never comes back at the next login. By its label, not its file: the
+ * job is stopped even when the plist no longer loads. The plist goes only once launchd has
+ * unloaded the job or said it was not loaded; on any other failure it stays, so that the next
+ * start tries again. Nothing else of 0.5 changes: the same data directory, config.json
+ * (bridgeInstanceId) and bridge.sqlite. No plist: nothing to do, no launchctl.
+ */
+export function retireLaunchAgent05(path: string, ctl: Launchctl = launchctl): LaunchAgent05 {
+  if (!existsSync(path)) return { state: "none" };
+  let home: string | undefined;
+  try {
+    const m = /<key>LFCP_BRIDGE_HOME<\/key>\s*<string>([^<]*)<\/string>/.exec(
+      readFileSync(path, "utf8"),
+    );
+    if (m?.[1] !== undefined) home = unesc(m[1]);
+  } catch {}
+  try {
+    ctl(["bootout", `${domain()}/${LAUNCH_AGENT_LABEL}`]);
+  } catch (e) {
+    const status = (e as { status?: unknown }).status;
+    if (typeof status !== "number" || !BOOTOUT_NOT_LOADED.has(status)) {
+      const code = (e as { code?: unknown }).code;
+      return {
+        state: "failed",
+        detail: typeof status === "number" ? `status ${status}` : String(code ?? "error"),
+      };
+    }
+    // Not loaded (already booted out, another session): nothing to stop.
+  }
+  rmSync(path, { force: true });
+  return { state: "removed", home };
 }
