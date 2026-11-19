@@ -6,6 +6,9 @@
 //   bridge.mjs --self-test                 the helper is found from this file's place in the .app
 //   bridge.mjs --self-test --app <path>    the .app (or any directory with Contents/MacOS/…)
 //   bridge.mjs --self-test --no-helper     skip the helper (a dev run outside a bundle)
+//   bridge.mjs --self-test --tcc           also the helper `direct` on EventKit (spike S-1, A§2.2):
+//                                          the Reminders authorization it sees through the launch
+//                                          chain, and whether `lists.list` agrees with it
 
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -115,6 +118,44 @@ async function helper(app: string): Promise<Check> {
   }
 }
 
+/** Authorizations under which `lists.list` must succeed; any other must fail with a TCC error. */
+const GRANTED = new Set(["fullAccess"]);
+
+/**
+ * Spike S-1: the helper launched `direct` (a child of this node) on the EventKit backend. TCC
+ * attributes it to the responsible process — the app that started node — so `authorization` is
+ * what that app was granted. The value is reported, not judged: the caller knows what it expects.
+ * `ok` means the observation is consistent: ready came, and `lists.list` succeeded exactly when
+ * access is granted.
+ */
+async function tcc(app: string): Promise<Check> {
+  const h = await HelperProcess.start({
+    appPath: app,
+    launch: "direct",
+    backend: "eventkit",
+    readyTimeoutMs: 20_000,
+  });
+  try {
+    const authorization = h.ready.authorization;
+    const r = (await h.request("lists.list", {}, { timeoutMs: 20_000 })) as Record<string, unknown>;
+    const listsOk = r.ok === true;
+    return {
+      check: "tcc",
+      ok: listsOk === GRANTED.has(authorization),
+      authorization,
+      lists: listsOk
+        ? { ok: true, count: Array.isArray(r.lists) ? r.lists.length : null }
+        : { ok: false, error: r.error ?? null },
+      parentPath: h.ready.parentPath,
+      helperPid: h.ready.pid,
+      nodePid: process.pid,
+      nodePpid: process.ppid,
+    };
+  } finally {
+    await h.close();
+  }
+}
+
 /** Runs the checks, writes one JSON line each; returns the exit code. */
 export async function selfTest(
   args: readonly string[],
@@ -133,6 +174,7 @@ export async function selfTest(
     ["automerge", automerge],
   ];
   if (!noHelper) checks.push(["helper", () => helper(app)]);
+  if (args.includes("--tcc")) checks.push(["tcc", () => tcc(app)]);
   let failed = 0;
   for (const [name, run] of checks) {
     let result: Check;
