@@ -12,6 +12,7 @@ import {
   type AnomalySnapshot,
   type BridgeDatabase,
   Holds,
+  Intents,
   Journal,
   Limits,
   type NewIntent,
@@ -113,8 +114,9 @@ describe("T§3 R3-1a: an answer accepts the anomaly, not the next one", () => {
     expect(holds().of("b")).toEqual([]);
   });
 
-  it("2 came back, none new (3 ⊆ 5) → consumed, acceptedAt moved", () => {
+  it("2 came back, none new (3 ⊆ 5) → consumed; acceptedAt moves then, not at the answer", () => {
     const id = answered();
+    expect(holds().acceptedAt("b", "guard_mass_unlink")).toBeUndefined();
     expect(limits().admit("b", { intents: [], unlinks: deleted(2, 3, 4) })).toEqual({
       ok: true,
       accepted: ["guard_mass_unlink"],
@@ -310,5 +312,70 @@ describe("other snapshots", () => {
       ok: false,
     });
     expect(db.prepare("SELECT count(*) AS n FROM acceptances").get()).toEqual({ n: 0 });
+  });
+});
+
+describe("the window keeps its base until an acceptance is consumed (A§7.1, A§8)", () => {
+  /** Three unaccepted unlinks journaled in this hour, 20 links: one more is a hold (4 > 3). */
+  function heldOnTheWindow(task: number) {
+    for (let k = 0; k < 3; k++)
+      new Journal(db, () => t - 10 * 60_000).append("info", "link.unlinked", { bindingId: "b" });
+    expect(limits().admit("b", { intents: [], unlinks: deleted(task) })).toMatchObject({
+      holds: ["guard_mass_unlink"],
+    });
+    holds().accept("b", "guard_mass_unlink");
+    t += 60_000;
+  }
+  const another = () => limits().check("b", { intents: [], unlinks: deleted(15) });
+
+  it("after void{vanished}", () => {
+    heldOnTheWindow(10);
+    expect(another()).toMatchObject({ ok: false }); // pending: the window is unchanged
+    expect(limits().admit("b", { intents: [], unlinks: [] })).toEqual({ ok: true });
+    expect(acceptances().pending("b")).toEqual([]);
+    expect(another()).toMatchObject({ ok: false, holds: ["guard_mass_unlink"] });
+  });
+
+  it("after void{changed}", () => {
+    heldOnTheWindow(10);
+    expect(limits().admit("b", { intents: [], unlinks: deleted(11) }).ok).toBe(false);
+    expect(keys()).toContain("acceptance.changed");
+    expect(another()).toMatchObject({ ok: false, holds: ["guard_mass_unlink"] });
+  });
+
+  it("while the acceptance waits behind another hold", () => {
+    heldOnTheWindow(10);
+    expect(
+      limits().admit("b", { intents: [], unlinks: deleted(10) }, ["guard_count_drop"]).ok,
+    ).toBe(false);
+    expect(acceptances().pending("b")).toHaveLength(1);
+    expect(another()).toMatchObject({ ok: false, holds: ["guard_mass_unlink"] });
+    expect(holds().acceptedAt("b", "guard_mass_unlink")).toBeUndefined();
+  });
+
+  it("imports: the hour of prepared imports stays after void{vanished}", () => {
+    const imp = (task: string): NewIntent => ({
+      bindingId: "b",
+      taskId: task,
+      installationId: "i",
+      direction: "to_lfcp",
+      kind: "create_task",
+      fields: ["title"],
+      basis: null,
+      payload: {},
+    });
+    const prepared = new Intents(db, () => t - 10 * 60_000);
+    for (let k = 0; k < 10; k++) prepared.prepare(imp(`W${k}`));
+    expect(limits().admit("b", { intents: [imp("X")], unlinks: 0 })).toMatchObject({
+      holds: ["guard_mass_import"],
+    });
+    holds().accept("b", "guard_mass_import");
+    expect(limits().check("b", { intents: [imp("Y")], unlinks: 0 })).toMatchObject({ ok: false });
+    expect(limits().admit("b", { intents: [], unlinks: 0 })).toEqual({ ok: true });
+    expect(keys()).toContain("acceptance.vanished");
+    expect(limits().check("b", { intents: [imp("Y")], unlinks: 0 })).toMatchObject({
+      ok: false,
+      holds: ["guard_mass_import"],
+    });
   });
 });

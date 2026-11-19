@@ -112,11 +112,12 @@ export class Holds {
         // (review PR 9b #24).
         const held = this.of(binding).find((h) => h.reason === reason);
         if (held === undefined || !this.lift(binding, reason)) return false;
+        // A guard's answer is a pending acceptance; its window moves only when it is consumed
+        // (Limits.admit, with the preparation), never by the answer itself.
         if (reason.startsWith("guard_")) {
           const snap = anomalyOf(held.detail) ?? snapshot(binding, reason, "opaque");
           new Acceptances(this.db, this.now).record(snap, o.answerId);
-        }
-        this.markAccepted(binding, reason, iso(this.now()));
+        } else this.markAccepted(binding, reason, iso(this.now()));
         return true;
       })
       .immediate();
