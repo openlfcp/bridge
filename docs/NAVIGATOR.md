@@ -20,6 +20,7 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 | Path | What | PR |
 |---|---|---|
 | `src/cli.ts`, `src/commands.ts`, `src/exit.ts` | the command table and exit codes; later commands answer "not available in this build" | 1 |
+| `src/self-test.ts` | `bridge.mjs --self-test` of the packaged host (T§2 L5): the bundle's node and better-sqlite3, sqlite (WAL), Automerge, helper `ping` (memory backend) | E-005 |
 | `src/db/` | `bridge.sqlite` on better-sqlite3 (WAL, synchronous=FULL, foreign keys): `schema.ts` (migrations over `user_version`, each with its `down`), `database.ts` (open, `migrateTo`, newer schema refused), `holds.ts` (a set per binding), `journal.ts`, `stop.ts` (the STOP file) | 2 |
 | `src/lfcp/section-host.ts` | SectionHost: one SyncClient per coordinator (with the SDK's 429 upgrade probe); restore/rebuild of checkpoints, applier, snapshot binding (load only, never publish), sync driver, outbound; `commitGuarded` is the only commit; `onNodesChanged`; `isLive` / `generation` | 3a |
 | `src/lfcp/commit-guard.ts` | the atomic basis check (§5.8): a wrapper of `CommitBinding.stage` with a guard registry by array object; unguarded stage → `UnguardedCommitError`, failed check → `BasisChangedError` | 3a |
@@ -109,8 +110,10 @@ SDK's bridge API directly, with no fallbacks of its own: `openNodeInstallation`
 
 | Path | What |
 |---|---|
-| `scripts/bundle-host.mjs` | the host as one ESM file for the app (esbuild; better-sqlite3 external, Automerge wasm inlined) |
+| `scripts/bundle-host.mjs` | the host as one ESM file for the app (esbuild; better-sqlite3 external, Automerge `/slim` with its wasm inlined, initialized by `cli.ts`) |
 | `scripts/app/build-dev-app.sh`, `scripts/app/smoke.sh` | a development `LFCP Bridge.app` (native slice, ad-hoc; `TEST_HOOKS=1` for the smoke's hooks) and its L5 smoke |
+| `scripts/app/package-app.sh`, `scripts/app/node-darwin.sha256` | the release `LFCP Bridge.app` and its DMG: universal, Node pinned by `.node-version` and these SHA-256, better-sqlite3 subtree, signed inside out (ad-hoc or `SIGN_IDENTITY`), Sparkle keys in `Info.plist` |
+| `scripts/app/check-app.sh`, `scripts/app/check-no-test-hooks.sh` | T§2 L5 on the packaged app where it lies: Info.plist, universal Mach-O loadable on 15.0, signature and entitlements, Node and ABI, no test hooks, `bridge.mjs --self-test` |
 | `scripts/bridge-db.mjs` | `status` / `backup` / `migrate --to <N>` of `bridge.sqlite` (up and down; needs STOP and no `run`; backs up to a new file first, never over one); `--self-test` |
 | `scripts/check-runbook.mjs` | checks the `lfcp-bridge …` commands of the guides against the CLI sources (`--src` for another tree): command ready, flags read by the code, required flags, N8's migration ports |
 | `helper/scripts/sign-release.sh` | release signing: Developer ID, hardened runtime, `Support/release.entitlements`, notarytool submit + staple; changes no keychain without `--add-to-search-list` |

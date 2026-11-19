@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- LFCP Bridge.app (A§2.1, A§2.3). The build script sets the versions; Sparkle keys come with E-056. -->
+<!-- LFCP Bridge.app (A§2.1, A§2.3). The build scripts set the versions; scripts/app/package-app.sh
+     adds SUFeedURL and SUPublicEDKey when given. Sparkle itself comes with E-056: until then the SU*
+     keys are read by nothing. -->
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key><string>org.openlfcp.bridge</string>
@@ -21,6 +23,9 @@
 			<key>CFBundleURLSchemes</key><array><string>lfcp-bridge</string></array>
 		</dict>
 	</array>
+	<key>SUEnableAutomaticChecks</key><true/>
+	<key>SUAutomaticallyUpdate</key><true/>
+	<key>SUScheduledCheckInterval</key><integer>86400</integer>
 	<key>NSRemindersUsageDescription</key><string>LFCP Bridge keeps your shared Obsidian tasks in Apple Reminders.</string>
 	<key>NSRemindersFullAccessUsageDescription</key><string>LFCP Bridge keeps your shared Obsidian tasks in Apple Reminders.</string>
 </dict>

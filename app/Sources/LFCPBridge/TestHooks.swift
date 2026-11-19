@@ -24,7 +24,8 @@
       let t = Timer(timeInterval: 0.5, repeats: true) { _ in poll(d, dir) }
       RunLoop.main.add(t, forMode: .common)
       timer = t
-      d.log.info("test hooks: on")
+      // Over 15 bytes, so a C string in the binary (scripts/app/check-no-test-hooks.sh).
+      d.log.info("test hooks: on (L5 smoke build)")
     }
 
     static func poll(_ d: AppDelegate, _ dir: URL) {
