@@ -1,6 +1,7 @@
 // A release is built from npm only (scripts/check-release-deps.mjs): the
-// development pin of the SDK (sdk-ts.lock, file: tarballs, link: or an
-// override to either) refuses it; this repository's workspace: ranges do not.
+// development pin of the SDK (sdk-ts.lock, file: tarballs, link:, a
+// workspace copy or an override to any) refuses it; the workspace: ranges
+// of the bridge's own packages do not.
 
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -23,6 +24,7 @@ describe("release dependencies", () => {
         manifests: [
           ["package.json", { pnpm: { overrides: { "@openlfcp/core": "0.7.0" } } }],
           ["packages/host/package.json", npmHost],
+          ["packages/reminders/package.json", { name: "@openlfcp/bridge-reminders" }],
         ],
         sdkLock: false,
         workspaceYaml: 'packages:\n  - "packages/*"\n',
@@ -72,6 +74,33 @@ describe("release dependencies", () => {
     ).toEqual([
       'package.json: pnpm.overrides sends @openlfcp/wire to "link:../sdk-ts/wire"',
       'packages/host/package.json: @openlfcp/crypto is "^0.7.0", not an exact npm version',
+    ]);
+  });
+
+  it("refuse the SDK from the workspace, even as a package of packages/", () => {
+    expect(
+      releaseDepsProblems({
+        manifests: [
+          [
+            "packages/host/package.json",
+            {
+              name: "@openlfcp/bridge",
+              dependencies: {
+                "@openlfcp/bridge-reminders": "workspace:*",
+                "@openlfcp/core": "workspace:*",
+                "@openlfcp/bridge-ghost": "workspace:*",
+              },
+            },
+          ],
+          ["packages/core/package.json", { name: "@openlfcp/core" }],
+          ["packages/reminders/package.json", { name: "@openlfcp/bridge-reminders" }],
+        ],
+        sdkLock: false,
+        workspaceYaml: 'packages:\n  - "packages/*"\n',
+      }),
+    ).toEqual([
+      'packages/host/package.json: @openlfcp/core is "workspace:*", not an exact npm version',
+      'packages/host/package.json: @openlfcp/bridge-ghost is "workspace:*", not an exact npm version',
     ]);
   });
 

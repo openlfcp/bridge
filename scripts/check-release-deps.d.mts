@@ -1,6 +1,7 @@
 // Types of scripts/check-release-deps.mjs for the tests.
 
 interface Manifest {
+  name?: string;
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
   optionalDependencies?: Record<string, string>;

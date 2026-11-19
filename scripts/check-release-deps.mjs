@@ -9,14 +9,18 @@
 //   node scripts/check-release-deps.mjs     exit 0: releasable; 1: refused
 //
 // It reads the root package.json, every packages/*/package.json and
-// pnpm-workspace.yaml. Workspace ranges (workspace:*) name this
-// repository's own packages and are allowed.
+// pnpm-workspace.yaml. A workspace range (workspace:*) is allowed only for
+// the bridge's own packages: an @openlfcp/bridge or @openlfcp/bridge-*
+// package that is one of packages/*. Any other @openlfcp/* package, the
+// SDK's above all, must be an exact npm version: a workspace copy of the
+// SDK is no more npm than a tarball.
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const EXACT = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
+const BRIDGE = /^@openlfcp\/bridge(-[a-z0-9-]+)?$/;
 
 /**
  * What keeps this checkout from being released: [] when the SDK comes from npm.
@@ -25,15 +29,19 @@ const EXACT = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
 export function releaseDepsProblems({ manifests, sdkLock, workspaceYaml = "" }) {
   const problems = [];
   if (sdkLock) problems.push("sdk-ts.lock is present: the SDK is pinned to a commit, not npm");
+  // The bridge's own packages: named @openlfcp/bridge(-*) and present under packages/.
+  const own = new Set(
+    manifests
+      .filter(([path, pkg]) => path.startsWith("packages/") && BRIDGE.test(pkg.name ?? ""))
+      .map(([, pkg]) => pkg.name),
+  );
   for (const [path, pkg] of manifests) {
     for (const field of ["dependencies", "devDependencies", "optionalDependencies"])
-      for (const [name, version] of Object.entries(pkg[field] ?? {}))
-        if (
-          name.startsWith("@openlfcp/") &&
-          !version.startsWith("workspace:") &&
-          !EXACT.test(version)
-        )
-          problems.push(`${path}: ${name} is "${version}", not an exact npm version`);
+      for (const [name, version] of Object.entries(pkg[field] ?? {})) {
+        if (!name.startsWith("@openlfcp/") || EXACT.test(version)) continue;
+        if (version.startsWith("workspace:") && own.has(name)) continue;
+        problems.push(`${path}: ${name} is "${version}", not an exact npm version`);
+      }
     // An override sends the SDK elsewhere whatever the dependencies say.
     for (const [name, target] of Object.entries(pkg.pnpm?.overrides ?? {}))
       if (name.includes("@openlfcp/") && !EXACT.test(target))
@@ -51,7 +59,7 @@ export function releaseDepsProblems({ manifests, sdkLock, workspaceYaml = "" }) 
 export function readManifests(root) {
   const out = [["package.json", JSON.parse(readFileSync(join(root, "package.json"), "utf8"))]];
   for (const dir of readdirSync(join(root, "packages")).sort()) {
-    const path = join("packages", dir, "package.json");
+    const path = `packages/${dir}/package.json`;
     if (existsSync(join(root, path)))
       out.push([path, JSON.parse(readFileSync(join(root, path), "utf8"))]);
   }
