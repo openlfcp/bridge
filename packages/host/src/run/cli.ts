@@ -19,7 +19,6 @@ import {
   readFileSync,
   rmSync,
   statSync,
-  writeFileSync,
   writeSync,
 } from "node:fs";
 import { join } from "node:path";
