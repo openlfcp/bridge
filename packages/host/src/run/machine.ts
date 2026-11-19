@@ -42,7 +42,7 @@ import { stopState } from "../db/stop.js";
 import { type LOSE_NEXT_WRITE_ANSWER, loseNextWriteAnswer, verificationWrite } from "../fault.js";
 import { AccessTracker, metaAccessStore } from "../lfcp/access.js";
 import { SectionHost, type SectionHostOptions } from "../lfcp/section-host.js";
-import { DatabaseKV } from "../runtime.js";
+import { DatabaseKV, type RunningProcess } from "../runtime.js";
 import { HelperSupervisor } from "../supervisor.js";
 import { type HelperIdentity, writesVerified } from "../verification.js";
 import { BridgeProcess, type InstallationPorts } from "./process.js";
@@ -252,7 +252,7 @@ export async function machineProcess(o: {
   readonly appBundle?: string;
   /** The app's host is shutting down: no effect starts, also during the start (BridgeProcess). */
   readonly shuttingDown?: () => boolean;
-}): Promise<{ readonly process: BridgeProcess; stop(reason?: string): Promise<void> }> {
+}): Promise<RunningProcess & { readonly process: BridgeProcess }> {
   const { db, config, paths } = o;
   const journal = new Journal(db);
   const holds = new Holds(db);
@@ -391,6 +391,8 @@ export async function machineProcess(o: {
   const running = process;
   return {
     process: running,
+    transport: running.transport,
+    exclusive: (fn) => running.exclusive(fn),
     // The helper and the storage are released whatever stop() says (review PR 9b #26).
     async stop(reason = "exit") {
       try {

@@ -3,11 +3,20 @@
 // (exit 2), and `status` lists it the same way.
 
 import { mkdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { retire05 } from "./app/legacy.js";
 import { type AppIo, serveApp } from "./app/serve.js";
+import {
+  type PeerUid,
+  SUPPORT_SOCKET,
+  type SupportIo,
+  shellExecutable,
+  shellPeerUid,
+} from "./app/support.js";
 import { type BindOutcome, Bootstrap } from "./bootstrap.js";
 import { bridgePaths, loadConfig, saveConfig } from "./config.js";
 import { HOLD_REASONS, type HoldReason } from "./db/holds.js";
+import { Journal } from "./db/journal.js";
 import { resume, stop, stopState } from "./db/stop.js";
 import { doctor, worst } from "./doctor.js";
 import { EXIT, type ExitCode } from "./exit.js";
@@ -40,7 +49,7 @@ import {
   takeRunLock,
 } from "./run/cli.js";
 import { bumpControl } from "./run/process.js";
-import { machineRuntime, type Runtime } from "./runtime.js";
+import { machineRuntime, type RunningProcess, type Runtime } from "./runtime.js";
 import { decideRecord, parseVerificationReport } from "./verification.js";
 
 export interface CommandInfo {
@@ -133,6 +142,11 @@ export interface CliEnvironment {
     readonly launchctl?: Launchctl;
     readonly waitMs?: number;
   };
+  /**
+   * `run --app`: who may use support.sock (default: this process's uid, told by the shell's
+   * executable of LFCP_BRIDGE_APP; none outside the app).
+   */
+  readonly support?: { readonly uid?: number; readonly peerUid?: PeerUid };
 }
 
 /** --name value / --flag parsing for the commands below. */
@@ -265,8 +279,81 @@ async function appCommand(
       write: (line) => process.stdout.write(`${line}\n`),
     },
     log: env.err,
+    support: {
+      path: join(rt.paths.home, SUPPORT_SOCKET),
+      uid: env.support?.uid ?? process.getuid?.() ?? -1,
+      peerUid:
+        env.support?.peerUid ??
+        (process.env.LFCP_BRIDGE_APP
+          ? shellPeerUid(shellExecutable(process.env.LFCP_BRIDGE_APP))
+          : undefined),
+      run: (argv, io, p) => supportCommand(rt, argv, io, p),
+    },
   });
   return typeof r === "string" ? EXIT.OK : EXIT.NEEDS_PERSON;
+}
+
+/** The author of what a support command journals (A§7.3). */
+export const SUPPORT_AUTHOR = "support CLI";
+
+/** The commands support.sock runs (A§7.3; links, safe-mode reset, certification-test: E-006b). */
+export const SUPPORT_COMMANDS: readonly string[] = [
+  "status",
+  "doctor",
+  "quarantine",
+  "bind",
+  "migrate",
+  "resume",
+  "stop",
+];
+
+/**
+ * One support command inside the host (src/app/serve.ts runs it in its queue, serialized with the
+ * passes): the 0.5 command, with the run process's transport — never a second one (A§7.3) — and
+ * its journal entries authored "support CLI".
+ */
+async function supportCommand(
+  rt: Runtime,
+  argv: readonly string[],
+  io: SupportIo,
+  p: RunningProcess | undefined,
+): Promise<ExitCode> {
+  const [name = "", sub] = argv;
+  const journal = new Journal(rt.db, Date.now, undefined, SUPPORT_AUTHOR);
+  const bindOpts = ["resolve-list", "resolve-marker", "retry-marker"];
+  let code: ExitCode;
+  if (!SUPPORT_COMMANDS.includes(name)) {
+    io.err(`not a support command: ${name} (${SUPPORT_COMMANDS.join(", ")})`);
+    code = EXIT.USAGE;
+  } else if (name === "bind" && !bindOpts.some((k) => options(argv.slice(1)).opts.has(k))) {
+    code = usage(
+      io,
+      "lfcp-bridge bind --binding <binding> --resolve-list <id>|none | --resolve-marker <id>|none | --retry-marker",
+    );
+  } else {
+    const support: Runtime = {
+      ...rt,
+      journal,
+      async openTransport() {
+        if (p?.transport === undefined)
+          throw new Error(
+            "Reminders is not open: the run process is not running (lfcp-bridge doctor)",
+          );
+        return p.transport;
+      },
+    };
+    try {
+      code = await run(name, argv.slice(1), support, io);
+    } catch (e) {
+      io.err(`${name}: ${(e as Error).message}`);
+      code = EXIT.NEEDS_PERSON;
+    }
+  }
+  const command = name === "quarantine" || name === "migrate" ? `${name} ${sub ?? ""}` : name;
+  journal.append(code === EXIT.OK ? "info" : "warn", "support.command", {
+    params: { command: command.trim(), exit: code },
+  });
+  return code;
 }
 
 function bindResult(r: BindOutcome, env: CliEnvironment): ExitCode {
@@ -791,7 +878,7 @@ function migrationResult(m: MigrationRow, env: CliEnvironment): ExitCode {
   }
 }
 
-function usage(env: CliEnvironment, line: string): ExitCode {
+function usage(env: Pick<CliEnvironment, "err">, line: string): ExitCode {
   env.err(`usage: ${line}`);
   return EXIT.USAGE;
 }

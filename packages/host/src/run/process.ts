@@ -174,6 +174,10 @@ export class BridgeProcess {
   #ready = false;
   #runId: string | undefined;
   #stopping = false;
+  /** A command of the host's queue runs (exclusive): passes asked meanwhile start after it. */
+  #gate: Promise<void> | undefined;
+  /** The commands in exclusive(): stop() waits for them. */
+  readonly #commands = new Set<Promise<void>>();
 
   constructor(options: BridgeProcessOptions) {
     this.#o = options;
@@ -220,6 +224,47 @@ export class BridgeProcess {
 
   get executor(): Executor {
     return this.#executor;
+  }
+
+  /** The transport of this process: the only one the host opens (A§7.3, no second executor). */
+  get transport(): WriteModeTransport {
+    return this.#o.transport;
+  }
+
+  /**
+   * Runs `fn` alone, serialized with the passes (A§7.3, the host's one command queue): it starts
+   * after the passes in flight, and a pass asked meanwhile starts after it. The host's queue
+   * calls it one command at a time.
+   */
+  async exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.#stopping) throw new Error("the run process is stopping");
+    // The passes to wait for are the ones asked before this gate closes, taken now: a pass asked
+    // from here on waits for this gate, and waiting for it would wait for this command (review #35-1).
+    const before = [...this.#running.values()];
+    let open!: () => void;
+    const gate = new Promise<void>((r) => {
+      open = r;
+    });
+    const previous = this.#gate;
+    this.#gate = gate;
+    const run = (async () => {
+      await previous;
+      await Promise.allSettled(before);
+      return fn();
+    })();
+    // stop() waits for it as for a pass (review #35-2).
+    const done = run.then(
+      () => {},
+      () => {},
+    );
+    this.#commands.add(done);
+    try {
+      return await run;
+    } finally {
+      this.#commands.delete(done);
+      if (this.#gate === gate) this.#gate = undefined;
+      open();
+    }
   }
 
   /** Starts the process: see the header. */
@@ -270,6 +315,9 @@ export class BridgeProcess {
     this.#scheduled.clear();
     this.#again.clear();
     const errors: unknown[] = [];
+    // A support command in flight finishes first (its own failure is its caller's); the passes
+    // gated behind it then run, without effects (#stopping).
+    await Promise.all([...this.#commands]);
     for (const r of await Promise.allSettled([...this.#running.values()]))
       if (r.status === "rejected") errors.push(r.reason);
     for (const i of this.#installations.values())
@@ -306,7 +354,10 @@ export class BridgeProcess {
       this.#again.add(bindingId);
       return current;
     }
-    const p = this.#passNow(bindingId).finally(() => {
+    const gate = this.#gate;
+    const p = (
+      gate === undefined ? this.#passNow(bindingId) : gate.then(() => this.#passNow(bindingId))
+    ).finally(() => {
       this.#running.delete(bindingId);
       if (this.#again.delete(bindingId) && !this.#stopping) void this.pass(bindingId);
     });
