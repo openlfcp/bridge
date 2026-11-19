@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type BridgeDatabase, openBridgeDatabase } from "../src/db/database.js";
+import { Holds } from "../src/db/holds.js";
 import { Journal } from "../src/db/journal.js";
 import { hostSignature, ipsSignature, recordHostCrash } from "../src/diag/crash.js";
 import {
@@ -21,6 +22,8 @@ import {
   zip,
 } from "../src/diag/export.js";
 import { Runs } from "../src/executor/safe-mode.js";
+import { EXIT, main } from "../src/index.js";
+import type { Runtime } from "../src/runtime.js";
 
 const CANARY = "CANARY7f3a";
 const T = "2026-11-20T10:00:00.000Z";
@@ -317,5 +320,44 @@ describe("crash signatures (A§11)", () => {
     expect(ipsSignature(ips("Other"))).toBeUndefined();
     expect(ipsSignature("{}\nnot json")).toBeUndefined();
     expect(ipsSignature(ips("LFCP Bridge"))?.process).toBe("LFCP Bridge");
+  });
+});
+
+describe("lfcp-bridge export", () => {
+  async function call(...argv: string[]) {
+    const out: string[] = [];
+    const err: string[] = [];
+    const rt = {
+      paths: { home },
+      db,
+      config: { bridgeInstanceId: "inst" },
+      journal: new Journal(db),
+      holds: new Holds(db),
+      async close() {},
+    } as unknown as Runtime;
+    const code = await main(argv, {
+      out: (l) => out.push(l),
+      err: (l) => err.push(l),
+      runtime: async () => rt,
+    });
+    return { code, out, err };
+  }
+
+  it("writes the zip to --out, or to <home>/diagnostics, and says where", async () => {
+    seed();
+    const path = join(dir, "d.zip");
+    const r = await call("export", "--out", path);
+    expect(r.code).toBe(EXIT.OK);
+    expect(r.out[0]).toBe(`diagnostics exported (${readFileSync(path).length} bytes): ${path}`);
+    expect(readFileSync(path).includes(Buffer.from(CANARY))).toBe(false);
+    const d = await call("export");
+    expect(d.code).toBe(EXIT.OK);
+    expect(d.out[0]).toMatch(/diagnostics[/\\]lfcp-bridge-diagnostics-\d{8}T\d{6}Z\.zip$/);
+  });
+
+  it("refuses a relative path or another extension", async () => {
+    expect((await call("export", "--out", "d.zip")).code).toBe(EXIT.USAGE);
+    expect((await call("export", "--out", join(dir, "d.txt"))).code).toBe(EXIT.USAGE);
+    expect((await call("export", "--out")).code).toBe(EXIT.USAGE);
   });
 });

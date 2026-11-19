@@ -3,7 +3,8 @@
 // (exit 2), and `status` lists it the same way.
 
 import { mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join } from "node:path";
 import { retire05 } from "./app/legacy.js";
 import { type AppIo, serveApp } from "./app/serve.js";
 import {
@@ -18,6 +19,8 @@ import { bridgePaths, loadConfig, saveConfig } from "./config.js";
 import { HOLD_REASONS, type HoldReason } from "./db/holds.js";
 import { Journal } from "./db/journal.js";
 import { resume, stop, stopState } from "./db/stop.js";
+import { recordHostCrash } from "./diag/crash.js";
+import { type DiagnosticsSource, defaultExportPath, exportDiagnostics } from "./diag/export.js";
 import { type Check, doctor, worst } from "./doctor.js";
 import { Runs } from "./executor/safe-mode.js";
 import { EXIT, type ExitCode } from "./exit.js";
@@ -123,6 +126,12 @@ export const COMMANDS: readonly CommandInfo[] = Object.freeze([
     name: "certification-test",
     summary: "on|off: the certification test mode (E-050)",
     pr: "E-006",
+    ready: true,
+  },
+  {
+    name: "export",
+    summary: "export diagnostics: a zip to send to support yourself (--out <file.zip>)",
+    pr: "E-045",
     ready: true,
   },
 ] satisfies CommandInfo[]);
@@ -274,6 +283,21 @@ async function appCommand(
       `run --app: the LaunchAgent of lfcp-bridge 0.5 was removed${sameHome ? "" : "; it used another data directory, which is left as it is"}`,
     );
   }
+  // A crash of the host leaves its signature, never its message (A§11, src/diag/crash.ts).
+  const onCrash = (e: unknown) => recordHostCrash(rt.paths.home, e);
+  process.on("uncaughtExceptionMonitor", onCrash);
+  try {
+    return await serveAppCommand(rt, env, startProcess);
+  } finally {
+    process.off("uncaughtExceptionMonitor", onCrash);
+  }
+}
+
+async function serveAppCommand(
+  rt: Runtime,
+  env: CliEnvironment,
+  startProcess: NonNullable<Runtime["startProcess"]>,
+): Promise<ExitCode> {
   const r = await serveApp({
     home: rt.paths.home,
     version: VERSION,
@@ -288,6 +312,10 @@ async function appCommand(
           )
           .all() as { id: string; target_title: string | null; state: string }[]
       ).map((b) => ({ bindingId: b.id, title: b.target_title ?? "", state: b.state })),
+    // The menu's Export diagnostics… (E-008): the zip at the path the person chose.
+    exportDiagnostics: (path) => {
+      exportDiagnostics(diagnosticsSource(rt), path);
+    },
     io: env.app ?? {
       input: process.stdin,
       write: (line) => process.stdout.write(`${line}\n`),
@@ -323,6 +351,7 @@ export const SUPPORT_COMMANDS: readonly string[] = [
   "links",
   "safe-mode",
   "certification-test",
+  "export",
 ];
 
 /**
@@ -735,6 +764,18 @@ async function run(
     }
     case "links":
       return linksCommand(rt, opts.get("binding"), env);
+    case "export": {
+      const out = opts.get("out");
+      if (out === true || (out !== undefined && (!isAbsolute(out) || !out.endsWith(".zip"))))
+        return usage(env, "lfcp-bridge export [--out </absolute/path.zip>]");
+      const path = out ?? defaultExportPath(rt.paths.home);
+      const { bytes } = exportDiagnostics(diagnosticsSource(rt), path);
+      env.out(`diagnostics exported (${bytes} bytes): ${path}`);
+      env.out(
+        "titles, URLs, paths and error texts are replaced by one-time HMACs; send the file to support yourself",
+      );
+      return EXIT.OK;
+    }
     case "safe-mode":
       if (positional[0] !== "reset") return usage(env, "lfcp-bridge safe-mode reset");
       return safeModeReset(rt, env);
@@ -984,6 +1025,19 @@ function linksCommand(
     );
   }
   return EXIT.OK;
+}
+
+/** What an export reads (A§11): the database, the data directory, macOS's crash reports. */
+function diagnosticsSource(rt: Runtime): DiagnosticsSource {
+  return {
+    db: rt.db,
+    home: rt.paths.home,
+    config: rt.config,
+    version: VERSION,
+    ...(process.platform === "darwin"
+      ? { reports: join(homedir(), "Library", "Logs", "DiagnosticReports") }
+      : {}),
+  };
 }
 
 function usage(env: Pick<CliEnvironment, "err">, line: string): ExitCode {
