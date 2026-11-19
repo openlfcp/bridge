@@ -137,7 +137,7 @@ describe("T§3 R3-1b: Restore authorizes the exact inverse set", () => {
     expect(auths().get(auth)).toMatchObject({ state: "consumed", outcome: "consumed" });
     expect(keys()).toContain("authorization.consumed");
     expect(holds().of("b")).toEqual([]);
-    // The decision waits for its writes (the planner's input, E-041b).
+    // The decision waits for its writes: consuming the authorization does not finish it (E-041b).
     expect(auths().decision(decision)).toMatchObject({ state: "pending" });
     // Consumed once: the same set again is a new anomaly.
     expect(plan(inverse)).toMatchObject({ ok: false, holds: ["guard_mass_status"] });

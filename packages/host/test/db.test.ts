@@ -73,6 +73,7 @@ const LATER_TABLES = [
   "authorizations",
   "decisions",
   "ignored_imports",
+  "decision_items",
 ];
 
 const now = "2026-11-10T00:00:00.000Z";
@@ -535,5 +536,40 @@ describe("migration 7: authorizations, decisions, ignored imports (A§7.1–7.2;
     expect(new Holds(d).of("b1").map((h) => h.reason)).toEqual(["ownership_lost"]);
     migrateTo(d, 7);
     expect(d.prepare("SELECT count(*) AS n FROM decisions").get()).toEqual({ n: 0 });
+  });
+});
+
+describe("migration 8: decision items (A§7.2; E-041b)", () => {
+  it("forward creates the table with its checks; back drops it, the decisions as they were", () => {
+    const d = db({ migrate: false });
+    migrateTo(d, 7);
+    seedV1(d);
+    d.prepare(
+      `INSERT INTO decisions (id, binding_id, anomaly_id, kind, task_ids_json, state, decided_at)
+         VALUES ('d1', 'b1', 'n1', 'prefer_lfcp_status', '["t1"]', 'pending', ?)`,
+    ).run(now);
+    migrateTo(d, 8);
+    d.prepare(
+      "INSERT INTO decision_items (decision_id, task_id, state) VALUES ('d1', 't1', 'active')",
+    ).run();
+    expect(() =>
+      d
+        .prepare(
+          "INSERT INTO decision_items (decision_id, task_id, state) VALUES ('d1', 't2', 'maybe')",
+        )
+        .run(),
+    ).toThrow(/CHECK/);
+    expect(() =>
+      d
+        .prepare(
+          "INSERT INTO decision_items (decision_id, task_id, state) VALUES ('nope', 't1', 'active')",
+        )
+        .run(),
+    ).toThrow(/FOREIGN KEY/);
+    migrateTo(d, 7);
+    expect(tables(d)).not.toContain("decision_items");
+    expect(d.prepare("SELECT state FROM decisions").all()).toEqual([{ state: "pending" }]);
+    migrateTo(d, 8);
+    expect(d.prepare("SELECT count(*) AS n FROM decision_items").get()).toEqual({ n: 0 });
   });
 });
