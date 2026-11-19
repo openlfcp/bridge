@@ -10,6 +10,7 @@
 // conflicts, intents, bootstrap steps, transport state, N8 migrations.
 // Version 3: runs and journal of r2. Version 4: N8 migration details.
 // Version 5: a person's decisions on refused and quarantined intents.
+// Version 6: durable acceptances of anomaly snapshots (A§7.1, E18).
 //
 // Beyond §3: STRICT tables, NOT NULL where a row has no meaning without the
 // value, and foreign keys to installations and bindings (PRAGMA
@@ -331,8 +332,47 @@ const V5: Migration = {
   down: ["DROP TABLE intent_resolutions"],
 };
 
+// Version 6 (A§7.1, E18): a person's answer accepts one anomaly — the snapshot a
+// guard held — instead of the token `hold_accepted:<binding>:<reason>` in meta.
+// Tokens of 0.5 still waiting are not carried over: they are dropped, each with a
+// journal entry (PLAN, migration owners: E-040); the hold they lifted stays lifted,
+// the next pass that sets it again asks again. Down drops the table and keeps no
+// acceptance (a waiting one is asked again by the older bridge).
+const V6: Migration = {
+  version: 6,
+  name: "acceptances",
+  up: [
+    `CREATE TABLE acceptances (
+      id TEXT PRIMARY KEY,
+      binding_id TEXT NOT NULL REFERENCES bindings(id),
+      generation INTEGER NOT NULL DEFAULT 0,
+      reason TEXT NOT NULL,
+      anomaly_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('set','count')),
+      items_json TEXT NOT NULL,
+      effect_set_hash TEXT NOT NULL,
+      bases_json TEXT NOT NULL,
+      answer_id TEXT,
+      state TEXT NOT NULL CHECK (state IN ('pending','consumed','void')),
+      outcome TEXT CHECK (outcome IN ('consumed','vanished','changed')),
+      accepted_at TEXT NOT NULL,
+      ended_at TEXT
+    ) STRICT`,
+    "CREATE INDEX acceptances_pending ON acceptances(binding_id, state)",
+    // binding = the key between "hold_accepted:" and its last ":", reason = after it.
+    `INSERT INTO journal (ts, level, binding_id, task_id, key, params_json)
+       SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'warn', substr(p, 1, length(p) - 1), NULL,
+         'hold.acceptance_dropped', json_object('reason', substr(rest, length(p) + 1), 'acceptedAt', value)
+       FROM (SELECT value, substr(key, 15) AS rest,
+               rtrim(substr(key, 15), replace(substr(key, 15), ':', '')) AS p
+             FROM meta WHERE substr(key, 1, 14) = 'hold_accepted:' ORDER BY key)`,
+    "DELETE FROM meta WHERE substr(key, 1, 14) = 'hold_accepted:'",
+  ],
+  down: ["DROP INDEX acceptances_pending", "DROP TABLE acceptances"],
+};
+
 /** Every migration, in order. */
-export const MIGRATIONS: readonly Migration[] = Object.freeze([V1, V2, V3, V4, V5]);
+export const MIGRATIONS: readonly Migration[] = Object.freeze([V1, V2, V3, V4, V5, V6]);
 
 /** The schema version this build writes. */
 export const SCHEMA_VERSION = MIGRATIONS.length;
