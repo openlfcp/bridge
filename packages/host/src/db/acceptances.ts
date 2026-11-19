@@ -73,7 +73,7 @@ export const itemKey = (i: AnomalyItem): string =>
   [i.direction, i.taskId ?? "", i.externalId ?? "", i.appleId ?? "", i.field].join("\u0000");
 
 /** JSON with sorted object keys: equal values, equal text. */
-function canonical(v: unknown): string {
+export function canonical(v: unknown): string {
   if (v === undefined) return "null";
   if (v === null || typeof v !== "object") return JSON.stringify(v);
   if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
