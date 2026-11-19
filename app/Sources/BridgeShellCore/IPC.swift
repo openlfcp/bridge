@@ -146,6 +146,11 @@ public struct LineBuffer {
         skipping = false
         continue
       }
+      // The limit holds for every line, however the pipe split it.
+      if lineData.count > IPC.maxLine {
+        overlong += 1
+        continue
+      }
       var s = String(decoding: lineData, as: UTF8.self)
       if s.hasSuffix("\r") { s.removeLast() }
       if !s.trimmingCharacters(in: .whitespaces).isEmpty { lines.append(s) }

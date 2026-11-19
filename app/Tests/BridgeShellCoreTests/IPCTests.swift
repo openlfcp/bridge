@@ -82,4 +82,30 @@ final class IPCTests: XCTestCase {
     XCTAssertEqual(r2.lines, [#"{"d":4}"#])
     XCTAssertEqual(r2.overlong, 0)
   }
+
+  /// The same overlong line, split three ways, is always dropped; the next line always arrives.
+  func testTheLimitHoldsHoweverThePipeSplitsALine() {
+    let long = "{\"v\":1,\"type\":\"hello\",\"pad\":\"" + String(repeating: "x", count: IPC.maxLine) + "\"}"
+    let next = #"{"v":1,"type":"hello","version":"t","pid":1}"#
+    let whole = Data((long + "\n" + next + "\n").utf8)
+    let cuts = [
+      whole.count,  // the long line and its "\n" in one chunk
+      IPC.maxLine - 10,  // the buffer just under the limit, then the rest with the "\n"
+      IPC.maxLine + 10,  // past the limit without a "\n", then the rest
+    ]
+    for cut in cuts {
+      var b = LineBuffer()
+      let r1 = b.push(whole.subdata(in: 0..<cut))
+      let r2 = cut < whole.count ? b.push(whole.subdata(in: cut..<whole.count)) : (lines: [String](), overlong: 0)
+      XCTAssertEqual(r1.lines + r2.lines, [next], "cut \(cut)")
+      XCTAssertEqual(r1.overlong + r2.overlong, 1, "cut \(cut)")
+    }
+  }
+
+  func testALineOfExactlyTheLimitPasses() {
+    var b = LineBuffer()
+    let line = String(repeating: "y", count: IPC.maxLine)
+    XCTAssertEqual(b.push(Data((line + "\n").utf8)).lines, [line])
+  }
 }
+
