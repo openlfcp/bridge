@@ -2,7 +2,7 @@
 // support.sock of `run --app`: links, safe-mode reset (refused while doctor names a cause),
 // certification-test (until E-050); the client starts the app when nobody listens, for ≤ 30 s.
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -74,11 +74,12 @@ async function app(server: { up: boolean | undefined }, helperPath = home) {
     close: async () => db.close(),
   } as unknown as Runtime;
   const input = new PassThrough();
+  const written: string[] = [];
   const done = main(["run", "--app"], {
     out: () => {},
     err: () => {},
     runtime: async () => rt,
-    app: { input, write: () => {} },
+    app: { input, write: (l) => void written.push(l) },
     launchAgent05: { path: join(home, "no-agent.plist"), home, launchctl: () => {} },
     support: { uid: UID, peerUid: async () => UID },
   });
@@ -87,6 +88,8 @@ async function app(server: { up: boolean | undefined }, helperPath = home) {
   return {
     db,
     path,
+    input,
+    written,
     async end() {
       input.end();
       expect(await done).toBe(EXIT.OK);
@@ -294,5 +297,48 @@ describe("the thin client (A§7.3)", () => {
     expect(r.code).toBe(EXIT.NEEDS_PERSON);
     expect(r.err).toEqual(["refused: only the user this bridge runs as may use it"]);
     await server.close();
+  });
+});
+
+describe("export (A§11, T§3 canary through run --app)", () => {
+  it("support's export and the menu's export{path}: no canary in either zip", async () => {
+    const CANARY = "CANARY9d1e";
+    const a = await app({ up: true });
+    const now = "2026-11-19T00:00:00.000Z";
+    a.db
+      .prepare(
+        "INSERT INTO installations (id, dir, principal, root, label, created_at) VALUES ('i', ?, 'p', 'r', ?, ?)",
+      )
+      .run(`/Users/${CANARY}`, CANARY, now);
+    a.db
+      .prepare(
+        `INSERT INTO bindings (id, installation_id, resource_id, adapter, transport, target_title, state, created_at)
+         VALUES ('b1', 'i', 'r', 'apple-reminders', 'fake', ?, 'active', ?)`,
+      )
+      .run(`LFCP · ${CANARY}`, now);
+    new Journal(a.db).append("warn", "effect.lost", {
+      bindingId: "b1",
+      params: { error: `Error: ${CANARY}`, cause: { message: CANARY } },
+    });
+    const viaSupport = join(home, "support.zip");
+    const r = await client(a.path, ["export", "--out", viaSupport]);
+    expect(r.code).toBe(EXIT.OK);
+    expect(r.out[0]).toContain(viaSupport);
+    const viaMenu = join(home, "menu.zip");
+    a.input.write(`${JSON.stringify({ v: 1, id: "e", cmd: "export", path: viaMenu })}\n`);
+    for (let i = 0; i < 200 && !existsSync(viaMenu); i++)
+      await new Promise((r) => setTimeout(r, 5));
+    for (const zip of [viaSupport, viaMenu]) {
+      const bytes = readFileSync(zip);
+      expect(bytes.includes(Buffer.from("diagnostics.json"))).toBe(true);
+      expect(bytes.includes(Buffer.from(CANARY))).toBe(false);
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    expect(a.written.map((l) => JSON.parse(l)).find((e) => e.id === "e")).toMatchObject({
+      type: "reply",
+      ok: true,
+      result: { path: viaMenu },
+    });
+    await a.end();
   });
 });
