@@ -95,6 +95,11 @@ interface Basis {
 const basisOf = (i: AnomalyItem, bases: Readonly<Record<string, unknown>>) =>
   (bases[itemKey(i)] ?? {}) as Basis;
 const statusOf = (s: Status) => ({ closed: s.closed, date: s.date ?? null });
+/** The Task's exact status (done and cancelled project alike) with its date: a task.reopen's from. */
+const lfcpStatusOf = (b: Basis, pL: Status) => ({
+  status: b.shadow?.status ?? null,
+  ...statusOf(pL),
+});
 
 export const effectKey = (e: Pick<InverseEffect, "effect" | "taskId" | "field">): string =>
   [e.effect, e.taskId, e.field].join("\u0000");
@@ -152,7 +157,9 @@ export function inverseOf(
         break;
       }
       case "reopen":
-        // A Task completed in LFCP (todo → done): reopen it, the reminder stays open.
+        // A Task completed in LFCP, todo → done, proven by the status agreed before (the
+        // snapshot's `before`): reopen it, the reminder stays open. Any other previous status,
+        // or none known, has no Restore (A§7.2).
         if (
           i.direction !== "to_apple" ||
           pL?.closed !== true ||
@@ -160,11 +167,13 @@ export function inverseOf(
           b.shadow?.status !== "done"
         )
           return { refused: "not a Task completed in LFCP" };
+        if ((i.before as { status?: unknown } | undefined)?.status !== "todo")
+          return { refused: "not proven todo → done" };
         effects.push({
           taskId: task,
           effect: "task_reopen",
           field: "status",
-          from: statusOf(pL),
+          from: lfcpStatusOf(b, pL),
           to: { status: "todo" },
         });
         break;
@@ -235,7 +244,7 @@ function effectOf(
       taskId: task,
       effect: "task_reopen",
       field: "status",
-      from: statusOf(b.pL.status),
+      from: lfcpStatusOf(b, b.pL.status),
       to: { status: "todo" },
     };
   return none;

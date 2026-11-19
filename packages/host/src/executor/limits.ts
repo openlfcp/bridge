@@ -297,12 +297,13 @@ export class Limits {
   #snapshot(bindingId: string, reason: HoldReason, planned: PlannedWork): AnomalySnapshot {
     const items: AnomalyItem[] = [];
     const bases: Record<string, unknown> = {};
-    const intent = (i: NewIntent, field: string, cause: string) => {
+    const intent = (i: NewIntent, field: string, cause: string, before?: unknown) => {
       const item: AnomalyItem = {
         taskId: i.taskId,
         field,
         direction: i.direction,
         cause,
+        ...(before === undefined ? {} : { before }),
         after: i.payload,
       };
       items.push(item);
@@ -329,11 +330,24 @@ export class Limits {
       case "guard_mass_import":
         for (const i of planned.intents) if (isImport(i)) intent(i, "task", "import");
         break;
-      case "guard_mass_status":
+      case "guard_mass_status": {
+        // Before: the exact LFCP status the bridge last agreed on (the base's shadow), the proof of
+        // a todo → done that "Reopen the tasks for everyone" needs (A§7.2).
+        const prior = this.db.prepare(
+          "SELECT lfcp_shadow_json FROM bases WHERE binding_id = ? AND task_id = ? AND field = 'status'",
+        );
         for (const i of planned.intents)
-          if (isStatus(i.fields))
-            intent(i, i.fields.filter((f) => STATUS_FIELDS.has(f)).join(","), "status");
+          if (isStatus(i.fields)) {
+            const r = prior.get(bindingId, i.taskId) as
+              | { lfcp_shadow_json: string | null }
+              | undefined;
+            const was =
+              r?.lfcp_shadow_json == null ? undefined : (JSON.parse(r.lfcp_shadow_json) as unknown);
+            const field = i.fields.filter((f) => STATUS_FIELDS.has(f)).join(",");
+            intent(i, field, "status", was === undefined ? undefined : { status: was });
+          }
         break;
+      }
       case "guard_backlog": {
         // What waits: the open intents (one per Task and direction) and this plan's.
         const open = this.db

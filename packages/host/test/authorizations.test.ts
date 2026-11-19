@@ -53,7 +53,7 @@ const auths = () => new Authorizations(db, now);
 const keys = () => new Journal(db).list().map((e) => e.key);
 const range = (n: number, from = 0) => Array.from({ length: n }, (_, k) => k + from);
 const open = { closed: false, date: null };
-const done = (date = "2026-11-09") => ({ closed: true, date });
+const done = (date: string | null = "2026-11-09") => ({ closed: true, date });
 
 const intent = (
   k: number,
@@ -233,12 +233,25 @@ describe("the other inverse choices (A§7.2)", () => {
     expect(holds().has("b", "guard_mass_status")).toBe(true);
   });
 
-  it("Reopen the tasks for everyone: task.reopen for the Tasks completed in LFCP", () => {
+  describe("Reopen the tasks for everyone: only a proven todo → done, the exact status kept", () => {
+    /** The status the bridge last agreed on for L<k> (the base's exact LFCP shadow). */
+    const agreed = (k: number, status: string) =>
+      db
+        .prepare(
+          "INSERT INTO bases (binding_id, task_id, field, lfcp_proj_json, lfcp_shadow_json, apple_proj_json, updated_at) VALUES ('b', ?, 'status', ?, ?, ?, ?)",
+        )
+        .run(`L${k}`, JSON.stringify(open), JSON.stringify(status), JSON.stringify(open), "x");
+    /** Completed in LFCP (now `done`, no date), the reminder open: the pass would complete it. */
     const completed = (k: number) =>
       intent(
         k,
         "to_apple",
-        { rev: `r${k}`, pL: { status: done() }, pA: { status: open }, shadow: { status: "done" } },
+        {
+          rev: `r${k}`,
+          pL: { status: done(null) },
+          pA: { status: open },
+          shadow: { status: "done" },
+        },
         {
           kind: "update",
           ref: { id: `A${k}` },
@@ -246,18 +259,69 @@ describe("the other inverse choices (A§7.2)", () => {
           expect: { rev: `r${k}` },
         },
       );
-    plan(range(8).map(completed));
-    const r = holds().restore("b", "guard_mass_status", "reopen");
-    if ("refused" in r) throw new Error(r.refused);
-    const reopen = (k: number) =>
+    const reopen = (k: number, status = "done") =>
       intent(
         k,
         "to_lfcp",
-        { rev: `r${k}`, pL: { status: done() }, pA: { status: open } },
+        { rev: `r${k}`, pL: { status: done(null) }, pA: { status: open }, shadow: { status } },
         { resource: "R", intents: [{ intent: "task.reopen", id: `L${k}` }] },
       );
-    expect(plan(range(8).map(reopen))).toEqual({ ok: true, accepted: ["guard_mass_status"] });
-    expect(auths().get(r.authorization?.id as string)).toMatchObject({ outcome: "consumed" });
+    const refusedWith = (refused: string) => {
+      plan(range(8).map(completed));
+      expect(holds().restore("b", "guard_mass_status", "reopen")).toEqual({ refused });
+      expect(holds().has("b", "guard_mass_status")).toBe(true);
+      for (const table of ["authorizations", "decisions"])
+        expect(db.prepare(`SELECT count(*) AS n FROM ${table}`).get()).toEqual({ n: 0 });
+    };
+
+    it("todo → done for all 8: authorized, the inverse task.reopen consumed", () => {
+      for (const k of range(8)) agreed(k, "todo");
+      plan(range(8).map(completed));
+      const r = holds().restore("b", "guard_mass_status", "reopen");
+      if ("refused" in r) throw new Error(r.refused);
+      expect(r.authorization?.effects[0]).toEqual({
+        taskId: "L0",
+        effect: "task_reopen",
+        field: "status",
+        from: { status: "done", closed: true, date: null },
+        to: { status: "todo" },
+      });
+      expect(plan(range(8).map((k) => reopen(k)))).toEqual({
+        ok: true,
+        accepted: ["guard_mass_status"],
+      });
+      expect(auths().get(r.authorization?.id as string)).toMatchObject({ outcome: "consumed" });
+    });
+
+    it("in_progress → done: refused, the hold kept, nothing written", () => {
+      for (const k of range(8)) agreed(k, "in_progress");
+      refusedWith("not proven todo → done");
+    });
+
+    it("a mixed group (7 todo, 1 in_progress): refused", () => {
+      for (const k of range(7)) agreed(k, "todo");
+      agreed(7, "in_progress");
+      refusedWith("not proven todo → done");
+    });
+
+    it("no status agreed before (no history): refused", () => {
+      refusedWith("not proven todo → done");
+    });
+
+    it("done → cancelled between the answer and the pass (the same projection): changed, held again", () => {
+      for (const k of range(8)) agreed(k, "todo");
+      plan(range(8).map(completed));
+      const r = holds().restore("b", "guard_mass_status", "reopen");
+      if ("refused" in r) throw new Error(r.refused);
+      const inverse = [...range(7).map((k) => reopen(k)), reopen(7, "cancelled")];
+      expect(plan(inverse)).toMatchObject({ ok: false, holds: ["guard_mass_status"] });
+      expect(auths().get(r.authorization?.id as string)).toMatchObject({
+        state: "void",
+        outcome: "changed",
+      });
+      expect(auths().decision(r.decision.id)).toMatchObject({ state: "void" });
+      expect(holds().acceptedAt("b", "guard_mass_status")).toBeUndefined();
+    });
   });
 
   it("Create new reminders: the deleted links' unlinks are authorized, the window moves on consumed only", () => {
