@@ -19,7 +19,6 @@ import {
   readFileSync,
   rmSync,
   statSync,
-  writeFileSync,
   writeSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -30,6 +29,7 @@ import { openNodeInstallation, PAIR_EXIT, pair } from "@openlfcp/storage-node";
 import { EXIT, type ExitCode } from "../exit.js";
 import { Pass } from "../reconcile/pass.js";
 import type { Runtime } from "../runtime.js";
+import { takeRunLock } from "./lock.js";
 import { seedInstanceId } from "./process.js";
 
 export interface RunCliEnvironment {
@@ -46,32 +46,7 @@ const STRICT_MS = 24 * 60 * 60_000;
 
 // ------------------------------------------------------------------ run
 
-/** run.lock: one run process. A lock whose pid is gone is stale and taken over. */
-export function takeRunLock(home: string): (() => void) | { readonly held: number } {
-  mkdirSync(home, { recursive: true });
-  const path = join(home, "run.lock");
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      writeFileSync(path, `${process.pid}\n`, { flag: "wx", mode: 0o600 });
-      return () => rmSync(path, { force: true });
-    } catch (e) {
-      if ((e as { code?: string }).code !== "EEXIST") throw e;
-      const pid = Number(readFileSync(path, "utf8").trim());
-      if (Number.isInteger(pid) && pid > 0 && alive(pid)) return { held: pid };
-      rmSync(path, { force: true });
-    }
-  }
-  return { held: -1 };
-}
-
-const alive = (pid: number) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
+export { takeRunLock } from "./lock.js";
 
 const signals = () =>
   new Promise<string>((resolve) => {

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Contents/Library/LaunchAgents/org.openlfcp.bridge.agent.plist: the login item, registered with
+     SMAppService.agent (A§2.3, research/s-1-tcc-shell.md). Exit 0 (Quit, a second copy) is final;
+     a crash is restarted, at most every 30 s. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key><string>org.openlfcp.bridge.agent</string>
+	<key>BundleProgram</key><string>Contents/MacOS/LFCP Bridge</string>
+	<key>AssociatedBundleIdentifiers</key><array><string>org.openlfcp.bridge</string></array>
+	<key>RunAtLoad</key><true/>
+	<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+	<key>ThrottleInterval</key><integer>30</integer>
+	<key>ProcessType</key><string>Interactive</string>
+</dict>
+</plist>

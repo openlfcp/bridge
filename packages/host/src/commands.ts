@@ -3,6 +3,7 @@
 // (exit 2), and `status` lists it the same way.
 
 import { mkdirSync, readFileSync } from "node:fs";
+import { type AppIo, serveApp } from "./app/serve.js";
 import { type BindOutcome, Bootstrap } from "./bootstrap.js";
 import { loadConfig, saveConfig } from "./config.js";
 import { HOLD_REASONS, type HoldReason } from "./db/holds.js";
@@ -30,6 +31,7 @@ import {
   pairCommand,
   runCommand,
   sectionsCommand,
+  takeRunLock,
 } from "./run/cli.js";
 import { bumpControl } from "./run/process.js";
 import { machineRuntime, type Runtime } from "./runtime.js";
@@ -113,6 +115,8 @@ export interface CliEnvironment {
   readonly stdin?: () => string;
   /** The machine (tests pass their own). */
   readonly runtime?: () => Promise<Runtime>;
+  /** `run --app`: the shell's channel (default: stdin and stdout). */
+  readonly app?: AppIo;
 }
 
 /** --name value / --flag parsing for the commands below. */
@@ -159,6 +163,35 @@ export async function main(argv: readonly string[], env: CliEnvironment): Promis
   } finally {
     await rt.close();
   }
+}
+
+/** `run --app` (src/app/serve.ts): the host under LFCP Bridge.app. */
+async function appCommand(rt: Runtime, env: CliEnvironment): Promise<ExitCode> {
+  const startProcess = rt.startProcess;
+  if (startProcess === undefined) {
+    env.err("run --app: not available on this machine");
+    return EXIT.USAGE;
+  }
+  const r = await serveApp({
+    home: rt.paths.home,
+    version: VERSION,
+    lock: () => takeRunLock(rt.paths.home),
+    start: startProcess,
+    sections: () =>
+      (
+        rt.db
+          .prepare(
+            "SELECT id, target_title, state FROM bindings WHERE state <> 'removed' ORDER BY created_at, id",
+          )
+          .all() as { id: string; target_title: string | null; state: string }[]
+      ).map((b) => ({ bindingId: b.id, title: b.target_title ?? "", state: b.state })),
+    io: env.app ?? {
+      input: process.stdin,
+      write: (line) => process.stdout.write(`${line}\n`),
+    },
+    log: env.err,
+  });
+  return typeof r === "string" ? EXIT.OK : EXIT.NEEDS_PERSON;
 }
 
 function bindResult(r: BindOutcome, env: CliEnvironment): ExitCode {
@@ -343,7 +376,7 @@ async function run(
   const stopped = () => stopState(rt.paths.home) !== undefined;
   switch (name) {
     case "run":
-      return runCommand(rt, env);
+      return opts.get("app") === true ? appCommand(rt, env) : runCommand(rt, env);
     case "dry-run":
       return dryRunCommand(rt, positional[0], env);
     case "approve":

@@ -245,11 +245,18 @@ export async function machineProcess(o: {
   readonly paths: BridgePaths;
   /** The verification run's fault injection (LFCP_BRIDGE_FAULT, src/fault.ts); off by default. */
   readonly fault?: typeof LOSE_NEXT_WRITE_ANSWER;
+  /**
+   * Under LFCP Bridge.app (A§2.1–2.2): the app bundle, whose Contents/MacOS/lfcp-reminders-helper
+   * is spawned `direct`, so that Reminders access is the app's (launchd → shell → node → helper).
+   */
+  readonly appBundle?: string;
+  /** The app's host is shutting down: no effect starts, also during the start (BridgeProcess). */
+  readonly shuttingDown?: () => boolean;
 }): Promise<{ readonly process: BridgeProcess; stop(reason?: string): Promise<void> }> {
   const { db, config, paths } = o;
   const journal = new Journal(db);
   const holds = new Holds(db);
-  const appPath = config.helperPath ?? paths.helperApp;
+  const appPath = o.appBundle ?? config.helperPath ?? paths.helperApp;
   let current: HelperLink | undefined;
   let transport: EventKitTransport | undefined;
   const lists = (
@@ -281,6 +288,7 @@ export async function machineProcess(o: {
       // the journal. Passed as a variable: on a base without the option it is simply unused.
       const options = {
         appPath,
+        ...(o.appBundle === undefined ? {} : { launch: "direct" as const }),
         onUnmatched: (line: string) =>
           journal.append("warn", "helper.unmatched", { params: { line: line.slice(0, 200) } }),
       };
@@ -365,6 +373,7 @@ export async function machineProcess(o: {
       // The helper of the moment: another build after a restart is not verified by the old record.
       writesVerified: () => writesVerified(config, helper),
       stopped: () => stopState(paths.home) !== undefined,
+      ...(o.shuttingDown === undefined ? {} : { shuttingDown: o.shuttingDown }),
       // resume --accept helper_unavailable: the supervisor gets a fresh budget (review PR 9b #28).
       onHoldsLifted: (reasons) => {
         if (reasons.has("helper_unavailable")) void reconnector.resume();

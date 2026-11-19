@@ -1,0 +1,56 @@
+name: app
+
+# LFCP Bridge.app (PLAN §E-004, T§2): the shell's L0 tests (swift test in app/) and the L5 smoke of
+# a development build (scripts/app/smoke.sh). Packaging, both slices and the DMG come with E-005.
+on:
+  push:
+    paths: ["app/**", "packages/host/**", "helper/**", "scripts/app/**", "scripts/bundle-host.mjs", "package.json", "pnpm-lock.yaml", ".github/workflows/app.yml"]
+  pull_request:
+    paths: ["app/**", "packages/host/**", "helper/**", "scripts/app/**", "scripts/bundle-host.mjs", "package.json", "pnpm-lock.yaml", ".github/workflows/app.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  swift-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Toolchain
+        run: |
+          sw_vers
+          xcrun swift --version
+      - name: swift test (menu model, IPC, supervisor, URL handoff; fake host)
+        working-directory: app
+        run: swift test
+      - name: swift build -c release (the shell, no test hooks)
+        working-directory: app
+        run: swift build -c release
+
+  # T§2 L5 on a development build: start, status item, host alive, lfcp-bridge:// handoff,
+  # shutdown{update} without STOP. The release build's L5 (both slices, no hooks) is E-005.
+  smoke:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build the development app (native slice, ad-hoc, test hooks)
+        run: TEST_HOOKS=1 scripts/app/build-dev-app.sh "$RUNNER_TEMP/app"
+      - name: L5 smoke
+        run: scripts/app/smoke.sh "$RUNNER_TEMP/app/LFCP Bridge.app"
+      - name: Collect the logs
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/logs"
+          cp -R "$HOME/Library/Logs/org.openlfcp.bridge/." "$RUNNER_TEMP/logs/" 2>/dev/null || true
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: smoke-logs
+          path: ${{ runner.temp }}/logs
+          if-no-files-found: ignore

@@ -4,6 +4,8 @@ dist/
 # Swift helper build output
 helper/.build/
 helper/build/
+# Swift app (shell) build output
+app/.build/
 # macOS
 .DS_Store
 # TypeScript incremental build

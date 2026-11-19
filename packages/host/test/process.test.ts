@@ -3,10 +3,15 @@
 // section replica (offline SectionHost) and the fake account; the live server variant is
 // run.live.test.ts.
 
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { receiptOf } from "@openlfcp/client";
 import { toHex } from "@openlfcp/core";
 import { deleteTask, principalRef, setDue, setTitle, unassign } from "@openlfcp/shared-objects";
 import { afterEach, describe, expect, it } from "vitest";
+import { AppHost } from "../src/app/serve.js";
+import { STOP_FILE } from "../src/db/stop.js";
 import { BridgeProcess, bumpControl, Holds } from "../src/index.js";
 import { markerUrl } from "../src/ownership.js";
 import { type Bridge, bridge } from "./support/bridge.js";
@@ -31,6 +36,7 @@ function processOf(
     /** Overrides of the host port (a key → its value; undefined: the real host's). */
     host?: (key: PropertyKey, target: typeof b.host) => unknown;
     stopped?: () => boolean;
+    shuttingDown?: () => boolean;
     onHoldsLifted?: (reasons: ReadonlySet<string>) => void;
     controlEveryMs?: number;
   } = {},
@@ -67,6 +73,7 @@ function processOf(
     instanceId: INSTANCE,
     writesVerified: () => verified.now,
     stopped: o.stopped ?? (() => false),
+    ...(o.shuttingDown === undefined ? {} : { shuttingDown: o.shuttingDown }),
     timeZone: "UTC",
     debounceMs: 5,
     maxDelayMs: 20,
@@ -700,4 +707,127 @@ describe("review PR 9b r3 #31: a pass sends only its own binding's queue", () =>
       await other.close();
     }
   });
+});
+
+describe("stop: no new effect inside the pass in flight (A§6.3, shutdown{update})", () => {
+  it("the first effect of a pass with two changes finishes; the second is not sent", async () => {
+    b = await bridge();
+    const proc = processOf();
+    await proc.start();
+    await quiet(proc);
+    await b.task("One");
+    await b.task("Two");
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    let started!: () => void;
+    const first = new Promise<void>((r) => {
+      started = r;
+    });
+    const apply = b.t.apply.bind(b.t);
+    let calls = 0;
+    b.t.apply = async (op) => {
+      calls++;
+      if (calls === 1) {
+        started();
+        await held;
+      }
+      return apply(op);
+    };
+    const pass = proc.pass("b");
+    await first;
+    // No STOP file: the process's own stop is the only thing that holds the second effect.
+    const stopping = proc.stop("shutdown: update");
+    release();
+    await pass;
+    await stopping;
+    expect(calls).toBe(1);
+    expect(reminders().length).toBe(1);
+    const states = (
+      b.db.prepare("SELECT state FROM intents ORDER BY created_at").all() as { state: string }[]
+    ).map((r) => r.state);
+    // The second stays prepared, for the recovery of the next start (§5.7).
+    expect(states).toContain("prepared");
+  });
+});
+
+describe("shutdown{update} under the app during the start (A§6.3): the signal reaches the executor", () => {
+  for (const where of [
+    "between two effects of the first pass",
+    "before BridgeProcess.start()",
+  ] as const)
+    it(`${where}: no effect starts after the shutdown`, async () => {
+      b = await bridge();
+      await b.task("One");
+      await b.task("Two");
+      const home = mkdtempSync(join(tmpdir(), "lfcp-app-start-"));
+      let calls = 0;
+      let release: (() => void) | undefined;
+      let reached!: () => void;
+      const atShutdownPoint = new Promise<void>((r) => {
+        reached = r;
+      });
+      const apply = b.t.apply.bind(b.t);
+      b.t.apply = async (op) => {
+        calls++;
+        if (where === "between two effects of the first pass" && calls === 1) {
+          reached();
+          await new Promise<void>((r) => {
+            release = r;
+          });
+        }
+        return apply(op);
+      };
+      let openStart: (() => void) | undefined;
+      const startGate =
+        where === "before BridgeProcess.start()"
+          ? new Promise<void>((r) => {
+              openStart = r;
+              reached();
+            })
+          : Promise.resolve();
+      const events: { type: string; id?: string; ok?: boolean; state?: string }[] = [];
+      const exits: number[] = [];
+      const host = new AppHost({
+        home,
+        version: "t",
+        pid: 1,
+        exit: (c) => void exits.push(c),
+        // As machineProcess: the signal goes to the BridgeProcess; stop() only after the start.
+        start: async (shuttingDown) => {
+          await startGate;
+          const proc = processOf({ shuttingDown });
+          await proc.start();
+          return { stop: (r) => proc.stop(r) };
+        },
+        sections: () => [],
+        write: (l) => events.push(JSON.parse(l)),
+        log: () => {},
+      });
+      const begun = host.begin();
+      await atShutdownPoint;
+      host.input(`${JSON.stringify({ v: 1, id: "s", cmd: "shutdown", reason: "update" })}\n`);
+      for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+      expect(events.find((e) => e.type === "reply")).toMatchObject({ id: "s", ok: true });
+      expect(events.filter((e) => e.type === "status").map((e) => e.state)).toContain("stopping");
+      release?.();
+      openStart?.();
+      await begun;
+      expect(await host.ended).toBe("update");
+      const states = (
+        b.db.prepare("SELECT state FROM intents ORDER BY rowid").all() as { state: string }[]
+      ).map((r) => r.state);
+      if (where === "between two effects of the first pass") {
+        expect(calls).toBe(1);
+        expect(states.filter((x) => x === "prepared")).toHaveLength(1);
+      } else {
+        expect(calls).toBe(0);
+        expect(states).toEqual(["prepared", "prepared"]);
+      }
+      expect(exits).toEqual([]);
+      expect(existsSync(join(home, STOP_FILE))).toBe(false);
+      p = undefined; // stopped by the host
+      rmSync(home, { recursive: true, force: true });
+    });
 });

@@ -88,6 +88,11 @@ export interface BridgeProcessOptions {
   readonly writesVerified: () => boolean;
   /** STOP is set (§7.3). */
   readonly stopped: () => boolean;
+  /**
+   * The app's host is shutting down (src/app/serve.ts), possibly before stop() can be called (the
+   * start, with its first pass, still runs): no effect starts. Only the executor's gate reads it.
+   */
+  readonly shuttingDown?: () => boolean;
   readonly timeZone?: string;
   readonly now?: () => number;
   readonly debounceMs?: number;
@@ -187,7 +192,10 @@ export class BridgeProcess {
     );
     const inst = (installationId: string) => this.#installations.get(installationId);
     const gates: Gates = {
-      stopped: () => options.stopped(),
+      // STOP, or this process stopping (shutdown{update|quit|logout}, SIGTERM): no effect and no
+      // retry starts after stop() — not even inside the pass in flight (A§6.3). Not persistent:
+      // what is left stays prepared for the next start's recovery (§5.7).
+      stopped: () => options.stopped() || this.#stopping || options.shuttingDown?.() === true,
       safeMode: () => this.#runs.safeMode() !== undefined,
       ownershipChecked: (b) => this.#ownership.isChecked(b),
       accessCheckedNow: (i, R) => inst(i)?.access.accessCheckedNow(R) ?? false,
