@@ -1,0 +1,118 @@
+# Spike S-1 (A§2.2, T§3 S-1, PLAN §E-002): does the Reminders access granted to the main app
+# (org.openlfcp.bridge) reach the helper started `direct` by node — chain app → node → helper — when
+# the app is started by `open`, by launchd as its SMAppService agent (`launchctl kickstart`), and by
+# Sparkle after an update N → N+1 from a local appcast? Control: a row only for the helper must give
+# notDetermined. The bundle is S-2's (scripts/spike-s2) with a minimal Swift shell (scripts/spike-s1),
+# signed with a throwaway self-signed "LFCP Bridge Dev" certificate (stable designated requirement).
+# The grant is a row in the user TCC.db (S-3). Green only when every acceptance launch is as expected.
+# Throwaway: lives on branch spike/s1-tcc only (never merged).
+name: spike-s1-tcc
+
+on:
+  push:
+    branches: [spike/s1-tcc]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tcc:
+    name: s1 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel, macos-26]
+    env:
+      NODE_VERSION: 24.22.3
+      SPARKLE_VERSION: 2.10.1
+      SPARKLE_SHA256: 1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27
+      INSTALLED: /Applications/LFCP Bridge.app
+      FEED: http://127.0.0.1:8765/appcast.xml
+    steps:
+      - uses: actions/checkout@v5
+      - name: Paths
+        run: |
+          {
+            echo "OUT=$RUNNER_TEMP/s1-out"; echo "R=$RUNNER_TEMP/s1-results"
+            echo "FEED_DIR=$RUNNER_TEMP/s1-feed"; echo "KEYS=$RUNNER_TEMP/s1-keys"
+          } >> "$GITHUB_ENV"
+      - uses: pnpm/action-setup@v6
+      # Node for building and for the scenario driver only; the .app carries its own.
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Diagnostics
+        run: |
+          mkdir -p "$R" "$FEED_DIR" "$KEYS"
+          sw_vers; uname -m; csrutil status; xcrun swiftc --version
+
+      - name: Throwaway "LFCP Bridge Dev" certificate and Sparkle EdDSA key
+        run: |
+          scripts/spike-s1/dev-cert.sh "$KEYS/dev.keychain-db"
+          echo "KC=$KEYS/dev.keychain-db" >> "$GITHUB_ENV"
+          echo "ED_PUBLIC=$(node scripts/spike-s1/appcast.mjs keygen "$KEYS/ed25519.pem")" >> "$GITHUB_ENV"
+
+      - name: Build N (version 1) and N+1 (version 2)
+        run: |
+          APP_VERSION=1 scripts/spike-s1/build-app.sh "$OUT/n" "$FEED" "$ED_PUBLIC"
+          mkdir -p "$OUT/n1"
+          ditto "$OUT/n/LFCP Bridge.app" "$OUT/n1/LFCP Bridge.app"
+          scripts/spike-s1/build-app.sh --set-version "$OUT/n1/LFCP Bridge.app" 2
+
+      - name: Sign both with "LFCP Bridge Dev"; the shell starts; same designated requirement
+        run: |
+          for v in n n1; do scripts/spike-s1/sign-app.sh "$OUT/$v/LFCP Bridge.app" "$KC"; done
+          if ! "$OUT/n/LFCP Bridge.app/Contents/MacOS/LFCP Bridge" --version; then
+            echo "::warning::shell does not start under library validation; re-signing it with disable-library-validation"
+            echo "shell signed with disable-library-validation" > "$R/shell-dlv.txt"
+            for v in n n1; do SHELL_DLV=1 scripts/spike-s1/sign-app.sh "$OUT/$v/LFCP Bridge.app" "$KC"; done
+            "$OUT/n/LFCP Bridge.app/Contents/MacOS/LFCP Bridge" --version
+          fi
+          for v in n n1; do
+            codesign -d -r- "$OUT/$v/LFCP Bridge.app" 2>&1 | sed -n 's/^designated => //p' > "$R/dr-$v.txt"
+            echo "$v: $(cat "$R/dr-$v.txt")"
+          done
+          [ -s "$R/dr-n.txt" ] && cmp "$R/dr-n.txt" "$R/dr-n1.txt"
+          codesign -dvv "$OUT/n/LFCP Bridge.app" 2>&1 | grep -E '^(Identifier|Authority|TeamIdentifier|CodeDirectory)'
+
+      - name: Install N into /Applications; archive and appcast of N+1
+        run: |
+          ditto "$OUT/n/LFCP Bridge.app" "$INSTALLED"
+          (cd "$OUT/n1" && ditto -c -k --sequesterRsrc --keepParent "LFCP Bridge.app" "$FEED_DIR/LFCP-Bridge-2.zip")
+          node scripts/spike-s1/appcast.mjs item "$FEED_DIR/LFCP-Bridge-2.zip" \
+            http://127.0.0.1:8765/LFCP-Bridge-2.zip 2 0.6.0-spike.s1.2 "$KEYS/ed25519.pem" > "$FEED_DIR/appcast.xml"
+          cat "$FEED_DIR/appcast.xml"; ls -l "$FEED_DIR"
+
+      - name: Scenarios — control, open, launchctl kickstart, Sparkle N → N+1
+        env:
+          RUNNER_LABEL: ${{ matrix.os }}
+        run: node scripts/spike-s1/scenarios.mjs "$INSTALLED" "$FEED_DIR" "$R"
+
+      - name: Records and logs (probes, events, tccd, background tasks)
+        if: always()
+        run: |
+          S="$HOME/Library/Application Support/org.openlfcp.bridge.spike-s1"
+          cp "$S"/*.jsonl "$R/" 2>/dev/null || true
+          log show --last 45m --style compact --predicate 'process == "tccd"' 2>/dev/null \
+            | grep -E 'openlfcp|lfcp-reminders|LFCP Bridge|node' | tail -600 > "$R/tccd.log" || true
+          log show --last 45m --style compact --predicate 'process == "smd" OR process == "backgroundtaskmanagementd"' 2>/dev/null \
+            | grep -i openlfcp | tail -200 > "$R/btm.log" || true
+          echo "== events"; cat "$R/events.jsonl" 2>/dev/null | cut -c1-600 || true
+          echo "== tccd (tail)"; tail -80 "$R/tccd.log" | cut -c1-400
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s1-${{ matrix.os }}
+          path: ${{ env.R }}
+          if-no-files-found: warn
+
+      - name: Remove the throwaway keychain
+        if: always()
+        run: '[ -z "${KC:-}" ] || security delete-keychain "$KC" || true'
