@@ -7,6 +7,9 @@
 #   5. shutdown{reason:update}: the host exits 0, the app exits, no STOP;
 #   6. the same under launchd (kickstart of the SMAppService agent): not restarted for 45 s, longer
 #      than its ThrottleInterval.
+# Before step 1 the runner gets a bridge of 0.5 (PLAN §E-007): its data directory with config.json
+# and the LaunchAgent org.openlfcp.bridge loaded in launchd, its process holding run.lock. Step 1
+# checks that the first start booted it out, removed its plist and kept config.json as it was.
 #
 #   scripts/app/smoke.sh <LFCP Bridge.app built with TEST_HOOKS=1>   (copies it to /Applications)
 #
@@ -64,12 +67,66 @@ ditto "$SRC" "$APP"
 codesign --verify --strict --deep "$APP" || fail "codesign --verify --strict --deep"
 ok "installed in /Applications, signature valid"
 
+echo "== 0. a bridge of 0.5: its data directory and its LaunchAgent, running"
+AGENT05="$HOME/Library/LaunchAgents/org.openlfcp.bridge.plist"
+SERVICE05="gui/$(id -u)/org.openlfcp.bridge"
+[ -e "$AGENT05" ] && fail "$AGENT05 exists: the smoke needs a fresh runner"
+mkdir -p -m 700 "$DATA"
+printf '{\n  "bridgeInstanceId": "0f5e0b1d-5a3c-4c55-9d2e-0a5b05b05b05"\n}\n' >"$DATA/config.json"
+CONFIG05="$(mktemp)"
+cp "$DATA/config.json" "$CONFIG05"
+mkdir -p "$(dirname "$AGENT05")"
+# The 0.5 agent's shape (src/launchd.ts), with a stand-in for `lfcp-bridge run`: it holds run.lock.
+cat >"$AGENT05" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>org.openlfcp.bridge</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>echo \$\$ &gt; "\$LFCP_BRIDGE_HOME/run.lock"; exec /bin/sleep 3600</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>LFCP_BRIDGE_HOME</key>
+		<string>$DATA</string>
+	</dict>
+</dict>
+</plist>
+PLIST
+plutil -lint "$AGENT05" >/dev/null || fail "the 0.5 agent's plist is not valid"
+launchctl bootstrap "gui/$(id -u)" "$AGENT05" || fail "launchctl bootstrap of the 0.5 agent"
+wait_until 15 "the 0.5 agent holds run.lock" test -s "$DATA/run.lock"
+PID05="$(tr -d ' \n' <"$DATA/run.lock")"
+kill -0 "$PID05" 2>/dev/null || fail "the 0.5 agent's process ($PID05) is not running"
+ok "0.5 agent loaded (pid $PID05 in run.lock)"
+
 echo "== 1. start"
 open "$APP"
 wait_until 30 "the app's hooks directory" test -d "$HOOKS"
 wait_until 60 "host hello and a settled status" report_has \
   '.host.hello != "" and (.host.state == "running" or .host.state == "unavailable")'
 cat "$R"
+[ -e "$AGENT05" ] && fail "the 0.5 agent's plist is still there"
+launchctl print "$SERVICE05" >/dev/null 2>&1 && fail "the 0.5 agent is still loaded in launchd"
+kill -0 "$PID05" 2>/dev/null && fail "the 0.5 agent's process ($PID05) still runs"
+cmp -s "$CONFIG05" "$DATA/config.json" || fail "config.json (bridgeInstanceId) changed"
+[ "$(sqlite3 "$DATA/bridge.sqlite" "SELECT count(*) FROM journal WHERE key = 'bridge.launch_agent_05_removed'")" = 1 ] ||
+  fail "no journal entry for the removed 0.5 agent"
+ok "0.5 agent booted out and removed; same data directory and bridgeInstanceId"
 check "status item exists" '.statusItem.exists == true'
 check "status item visible" '.statusItem.visible == true'
 check "status item has its icon" '.statusItem.hasImage == true'
