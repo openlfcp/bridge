@@ -187,7 +187,10 @@ export class BridgeProcess {
     );
     const inst = (installationId: string) => this.#installations.get(installationId);
     const gates: Gates = {
-      stopped: () => options.stopped(),
+      // STOP, or this process stopping (shutdown{update|quit|logout}, SIGTERM): no effect and no
+      // retry starts after stop() — not even inside the pass in flight (A§6.3). Not persistent:
+      // what is left stays prepared for the next start's recovery (§5.7).
+      stopped: () => options.stopped() || this.#stopping,
       safeMode: () => this.#runs.safeMode() !== undefined,
       ownershipChecked: (b) => this.#ownership.isChecked(b),
       accessCheckedNow: (i, R) => inst(i)?.access.accessCheckedNow(R) ?? false,

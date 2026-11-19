@@ -701,3 +701,46 @@ describe("review PR 9b r3 #31: a pass sends only its own binding's queue", () =>
     }
   });
 });
+
+describe("stop: no new effect inside the pass in flight (A§6.3, shutdown{update})", () => {
+  it("the first effect of a pass with two changes finishes; the second is not sent", async () => {
+    b = await bridge();
+    const proc = processOf();
+    await proc.start();
+    await quiet(proc);
+    await b.task("One");
+    await b.task("Two");
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    let started!: () => void;
+    const first = new Promise<void>((r) => {
+      started = r;
+    });
+    const apply = b.t.apply.bind(b.t);
+    let calls = 0;
+    b.t.apply = async (op) => {
+      calls++;
+      if (calls === 1) {
+        started();
+        await held;
+      }
+      return apply(op);
+    };
+    const pass = proc.pass("b");
+    await first;
+    // No STOP file: the process's own stop is the only thing that holds the second effect.
+    const stopping = proc.stop("shutdown: update");
+    release();
+    await pass;
+    await stopping;
+    expect(calls).toBe(1);
+    expect(reminders().length).toBe(1);
+    const states = (
+      b.db.prepare("SELECT state FROM intents ORDER BY created_at").all() as { state: string }[]
+    ).map((r) => r.state);
+    // The second stays prepared, for the recovery of the next start (§5.7).
+    expect(states).toContain("prepared");
+  });
+});
