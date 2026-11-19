@@ -90,6 +90,8 @@ export class AppHost {
   #state: HostState = "starting";
   #reason: string | undefined;
   #queue: Promise<void> = Promise.resolve();
+  /** The support command running now: the shutdown waits for it, within its deadline. */
+  #active: Promise<void> | undefined;
   #ending: EndReason | undefined;
   #ended!: (r: EndReason) => void;
   /** Resolves when the host has shut down in time (the process exits with 0 then). */
@@ -101,7 +103,19 @@ export class AppHost {
       this.#ended = r;
     });
     this.#splitter = new LineSplitter(
-      (line) => this.#enqueue(() => this.#line(line)),
+      (line) => {
+        // A support command may hold the queue for long: a shutdown never waits behind it — its
+        // reply, the stop of effects and the deadline start at once (review #35-3).
+        if (this.#active !== undefined) {
+          const parsed = parseCommand(line);
+          if (parsed.ok && parsed.envelope.command.cmd === "shutdown") {
+            this.#ok(parsed.envelope.id);
+            this.#shutdown(parsed.envelope.command.reason);
+            return;
+          }
+        }
+        void this.#enqueue(() => this.#line(line));
+      },
       () => this.#emit({ type: "reply", id: null, ok: false, error: { code: "bad_line" } }),
     );
   }
@@ -136,12 +150,20 @@ export class AppHost {
       }
       const p = this.#process;
       const job = () => run(argv, io, p);
+      const active = (async () => {
+        try {
+          code = p?.exclusive === undefined ? await job() : await p.exclusive(job);
+        } catch (e) {
+          this.#o.log(`app: support command failed: ${failure(e)}`);
+          io.err("internal error (lfcp-bridge log)");
+          code = EXIT.INTERNAL;
+        }
+      })();
+      this.#active = active;
       try {
-        code = p?.exclusive === undefined ? await job() : await p.exclusive(job);
-      } catch (e) {
-        this.#o.log(`app: support command failed: ${failure(e)}`);
-        io.err("internal error (lfcp-bridge log)");
-        code = EXIT.INTERNAL;
+        await active;
+      } finally {
+        this.#active = undefined;
       }
       // stop / resume change the state the menu shows.
       this.#settle();
@@ -316,6 +338,8 @@ export class AppHost {
       } catch (e) {
         this.#o.log(`app: run process stopped with an error: ${failure(e)}`);
       }
+      // Without a run process nothing above waited for it; it never rejects.
+      await this.#active;
       clearTimeout(deadline);
       this.#ended(why);
     })();

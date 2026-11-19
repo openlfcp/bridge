@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { FakeStore, FakeTransport } from "@openlfcp/bridge-reminders/fake";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AppHost } from "../src/app/serve.js";
+import { AppHost, EXIT_DEADLINE } from "../src/app/serve.js";
 import { listenSupport, SUPPORT_SOCKET } from "../src/app/support.js";
 import { bridgePaths } from "../src/config.js";
 import { openBridgeDatabase } from "../src/db/database.js";
@@ -222,6 +222,71 @@ describe("the host's one queue (L0)", () => {
     );
     expect(ran).toBe(false);
     expect(existsSync(join(home, STOP_FILE))).toBe(false);
+  });
+});
+
+describe("a shutdown during a support command (review #35-2, #35-3)", () => {
+  function held(shutdownWaitMs: number) {
+    let release!: () => void;
+    let entered!: () => void;
+    const inside = new Promise<void>((r) => {
+      entered = r;
+    });
+    const events: { type: string; id?: string; ok?: boolean }[] = [];
+    const exits: number[] = [];
+    const stops: string[] = [];
+    const host = new AppHost({
+      home,
+      version: "t",
+      pid: 1,
+      start: async () => ({ stop: async (why?: string) => void stops.push(why ?? "") }),
+      sections: () => [],
+      write: (l) => events.push(JSON.parse(l)),
+      log: () => {},
+      shutdownWaitMs,
+      exit: (c) => exits.push(c),
+      support: () =>
+        new Promise<number>((r) => {
+          entered();
+          release = () => r(0);
+        }),
+    });
+    return { host, inside, release: () => release(), events, exits, stops };
+  }
+  const shutdownLine = `${JSON.stringify({ v: 1, id: "quit", cmd: "shutdown", reason: "quit" })}\n`;
+
+  it("the shell's shutdown is answered and stops at once; its deadline runs", async () => {
+    const h = held(20);
+    await h.host.begin();
+    const code = h.host.support(["doctor"], { out: () => {}, err: () => {} });
+    await h.inside;
+    h.host.input(shutdownLine);
+    expect(h.events.filter((e) => e.type === "reply")).toEqual([
+      { v: 1, type: "reply", id: "quit", ok: true },
+    ]);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(h.stops).toEqual(["shutdown: quit"]);
+    expect(h.exits).toEqual([EXIT_DEADLINE]);
+    h.release();
+    expect(await code).toBe(0);
+  });
+
+  it("the host ends only after the command in flight, within the deadline", async () => {
+    const h = held(5_000);
+    await h.host.begin();
+    const code = h.host.support(["doctor"], { out: () => {}, err: () => {} });
+    await h.inside;
+    h.host.input(shutdownLine);
+    let ended = false;
+    void h.host.ended.then(() => {
+      ended = true;
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(ended).toBe(false);
+    h.release();
+    expect(await code).toBe(0);
+    expect(await h.host.ended).toBe("quit");
+    expect(h.exits).toEqual([]);
   });
 });
 
