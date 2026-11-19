@@ -17,7 +17,8 @@
 // current set of that guard with the authorization by the table of acceptances (A§7.1): empty →
 // void{vanished}, with no exception (an inverse set is never empty); every item one of the
 // effects with the same `from` (and `to`, `expectRev`) → consumed, with the preparation; anything
-// else → void{changed}, held again whatever the threshold. A void authorization voids its decision.
+// else → void{changed}, held again whatever the threshold. A void authorization voids its decision;
+// a consumed one makes it done (its writes are prepared with the pass, the planner's input ends).
 // It covers only these effects: other holds, STOP, TCC, ownership, `expect.rev` still apply.
 
 import { createHash } from "node:crypto";
@@ -377,7 +378,7 @@ export class Authorizations {
         )
         .run(snap.binding, key, snap.anomalyId, at);
     const id = ulid(this.now());
-    // suppress is done once its reminders are ignored; the others wait for their writes (E-041b).
+    // suppress is done once its reminders are ignored; the others once their authorization is consumed.
     const done = choice === "suppress";
     this.db
       .prepare(
@@ -419,7 +420,12 @@ export class Authorizations {
     ).map(authFrom);
   }
 
-  /** Ends a pending authorization; a void one voids its decision. True when it was pending. */
+  /**
+   * Ends a pending authorization with its decision: a void one voids it; a consumed one makes it
+   * done — the pass that consumes it prepares its writes (in the same transaction), the executor
+   * carries them out as any intent, and the decision is no longer the planner's input (it never
+   * turns a later change of the person's around). True when it was pending.
+   */
   end(id: string, outcome: AcceptanceOutcome): boolean {
     const at = iso(this.now());
     const ended =
@@ -428,13 +434,31 @@ export class Authorizations {
           "UPDATE authorizations SET state = ?, outcome = ?, ended_at = ? WHERE id = ? AND state = 'pending'",
         )
         .run(outcome === "consumed" ? "consumed" : "void", outcome, at, id).changes === 1;
-    if (ended && outcome !== "consumed")
+    if (ended)
       this.db
         .prepare(
-          "UPDATE decisions SET state = 'void', ended_at = ? WHERE authorization_id = ? AND state = 'pending'",
+          "UPDATE decisions SET state = ?, ended_at = ? WHERE authorization_id = ? AND state = 'pending'",
         )
-        .run(at, id);
+        .run(outcome === "consumed" ? "done" : "void", at, id);
     return ended;
+  }
+
+  /** The planner's input (A§7.2): the Tasks of the pending status decisions, by Task. */
+  restoring(binding: string): ReadonlyMap<string, "prefer_lfcp_status" | "reopen"> {
+    const m = new Map<string, "prefer_lfcp_status" | "reopen">();
+    for (const d of this.decisions(binding))
+      if (d.kind === "prefer_lfcp_status" || d.kind === "reopen")
+        for (const t of d.taskIds) m.set(t, d.kind);
+    return m;
+  }
+
+  /** The Tasks of the pending recreate decisions, with the authorization each one waits on. */
+  recreating(binding: string): ReadonlyMap<string, string> {
+    const m = new Map<string, string>();
+    for (const d of this.decisions(binding))
+      if (d.kind === "recreate" && d.authorizationId !== null)
+        for (const t of d.taskIds) m.set(t, d.authorizationId);
+    return m;
   }
 
   decision(id: string): Decision | undefined {
