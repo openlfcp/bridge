@@ -23,6 +23,7 @@
 #   Contents/Resources/node/LICENSE              Node's licence, shipped with its binary
 #   Contents/Resources/host/bridge.mjs           scripts/bundle-host.mjs (+ bridge.mjs.LEGAL.txt)
 #   Contents/Resources/host/package.json         {"type":"module"}
+#   Contents/Resources/bin/lfcp-bridge           app/Support/lfcp-bridge (support CLI, A§7.3)
 #   Contents/Resources/host/node_modules/better-sqlite3/   the production subtree: package.json,
 #       LICENSE, lib/, build/Release/better_sqlite3.node (lipo of the two darwin prebuilds)
 #   Contents/Library/LaunchAgents/org.openlfcp.bridge.agent.plist
@@ -112,6 +113,9 @@ echo "== host bundle"
 (cd "$ROOT" && pnpm build >/dev/null)
 node "$ROOT/scripts/bundle-host.mjs" "$C/Resources/host/bridge.mjs"
 echo '{"type":"module"}' > "$C/Resources/host/package.json"
+# The support CLI (A§7.3): a thin client of the host, sealed with Resources/.
+mkdir -p "$C/Resources/bin"
+install -m 755 "$ROOT/app/Support/lfcp-bridge" "$C/Resources/bin/lfcp-bridge"
 
 echo "== better-sqlite3 production subtree"
 src="$(cd "$ROOT/packages/host" && node -p 'path.dirname(require.resolve("better-sqlite3/package.json"))')"

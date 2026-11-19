@@ -184,23 +184,19 @@ SOCK="$DATA/support.sock"
 wait_until 15 "support.sock" test -S "$SOCK"
 [ "$(stat -f %Lp "$DATA")" = 700 ] || fail "the data directory is $(stat -f %Lp "$DATA"), not 700"
 [ "$(stat -f %Lp "$SOCK")" = 600 ] || fail "support.sock is $(stat -f %Lp "$SOCK"), not 600"
-# A thin client of one request (the bundle's lfcp-bridge is E-006b): status, every line back.
-SUPPORT_OUT="$("$APP/Contents/Resources/node/bin/node" -e '
-const s = require("node:net").connect(process.argv[1]);
-let b = "";
-s.on("connect", () => s.write(JSON.stringify({ v: 1, argv: ["status"] }) + "\n"));
-s.setEncoding("utf8");
-s.on("data", (d) => (b += d));
-s.on("close", () => process.stdout.write(b));
-' "$SOCK")"
+# The bundle's support CLI (Resources/bin/lfcp-bridge), through a symlink as a person may install it.
+mkdir -p "$HOME/.local/bin"
+ln -sf "$APP/Contents/Resources/bin/lfcp-bridge" "$HOME/.local/bin/lfcp-bridge"
+set +e
+SUPPORT_OUT="$("$HOME/.local/bin/lfcp-bridge" status 2>&1)"
+SUPPORT_EXIT=$?
+set -e
 echo "$SUPPORT_OUT"
-echo "$SUPPORT_OUT" | jq -se '.[-1] == {v: 1, type: "exit", code: 0}' >/dev/null ||
-  fail "support status did not exit 0 (a refused peer uid ends with error forbidden)"
-echo "$SUPPORT_OUT" | jq -se 'any(.[]; .type == "out" and (.line | startswith("STOP: no")))' >/dev/null ||
-  fail "support status printed no STOP line"
+[ "$SUPPORT_EXIT" = 0 ] || fail "lfcp-bridge status exited $SUPPORT_EXIT"
+echo "$SUPPORT_OUT" | grep -q '^STOP: no' || fail "lfcp-bridge status printed no STOP line"
 [ "$(sqlite3 "$DATA/bridge.sqlite" "SELECT count(*) FROM journal WHERE key = 'support.command' AND json_extract(params_json, '$.author') = 'support CLI'")" = 1 ] ||
   fail "no journal entry for the support command"
-ok "support status over support.sock: peer uid accepted, exit 0, journaled as support CLI"
+ok "lfcp-bridge status over support.sock: peer uid accepted, exit 0, journaled as support CLI"
 
 echo "== 4. lfcp-bridge:// handoff"
 open "lfcp-bridge://connect?c=smoke#k=$SECRET"
