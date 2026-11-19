@@ -247,6 +247,53 @@ describe("a support command is serialized with the passes (A§7.3, E-006)", () =
     ]);
     expect(both).toEqual(["first", "second"]);
   });
+
+  it("a pass asked before the command enters waits for it and is not waited for (review #35-1)", async () => {
+    b = await bridge();
+    await b.task("Buy milk");
+    const proc = processOf();
+    await proc.start();
+    await quiet(proc);
+    const order: string[] = [];
+    // No await in between: the pass is asked after the gate closed, before the command entered.
+    const command = proc.exclusive(async () => void order.push("command"));
+    const pass = proc.pass("b").then(() => order.push("pass"));
+    await Promise.all([command, pass]);
+    expect(order).toEqual(["command", "pass"]);
+  });
+
+  it("stop waits for a command in flight, also one that fails; none starts after (review #35-2)", async () => {
+    b = await bridge();
+    await b.task("Buy milk");
+    const proc = processOf();
+    await proc.start();
+    await quiet(proc);
+    let fail!: (e: Error) => void;
+    let entered!: () => void;
+    const inside = new Promise<void>((r) => {
+      entered = r;
+    });
+    const command = proc.exclusive(
+      () =>
+        new Promise<void>((_, reject) => {
+          entered();
+          fail = reject;
+        }),
+    );
+    await inside;
+    let stopped = false;
+    const stopping = proc.stop().then(() => {
+      stopped = true;
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(stopped).toBe(false);
+    fail(new Error("refused"));
+    await expect(command).rejects.toThrow("refused");
+    await stopping;
+    expect(stopped).toBe(true);
+    await expect(proc.exclusive(async () => 1)).rejects.toThrow("stopping");
+    p = undefined;
+  });
 });
 
 describe("holds, resume, stop", () => {
