@@ -7,7 +7,13 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "includes": ["**", "!scripts/boundary-fixtures", "!helper/.build", "!helper/build"]
+    "includes": [
+      "**",
+      "!scripts/boundary-fixtures",
+      "!helper/.build",
+      "!helper/build",
+      "!packages/host/test/fixtures/artifact-manifest/artifact-manifest.json"
+    ]
   },
   "formatter": {
     "enabled": true,
