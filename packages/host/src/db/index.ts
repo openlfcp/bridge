@@ -6,6 +6,16 @@ export {
   type AnomalySnapshot,
 } from "./acceptances.js";
 export {
+  type Authorization,
+  Authorizations,
+  compareInverse,
+  type Decision,
+  type InverseEffect,
+  inverseOf,
+  type RestoreChoice,
+  type RestoreRefusal,
+} from "./authorizations.js";
+export {
   type BridgeDatabase,
   MIGRATIONS,
   migrateTo,

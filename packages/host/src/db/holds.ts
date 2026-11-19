@@ -6,6 +6,13 @@
 // records a durable acceptance of its anomaly (acceptances.ts, A§7.1).
 
 import { Acceptances, type AnomalySnapshot, snapshot } from "./acceptances.js";
+import {
+  type Authorization,
+  Authorizations,
+  type Decision,
+  type RestoreChoice,
+  type RestoreRefusal,
+} from "./authorizations.js";
 import type { BridgeDatabase } from "./database.js";
 
 /** The hold reasons D-010 r4 names (§6.5, §7.2, §7.3–7.5, §9); a PR that needs another adds it here. */
@@ -119,6 +126,32 @@ export class Holds {
           new Acceptances(this.db, this.now).record(snap, o.answerId);
         } else this.markAccepted(binding, reason, iso(this.now()));
         return true;
+      })
+      .immediate();
+  }
+
+  /**
+   * The inverse button of a guard's question (A§7.1–7.2): lifts the hold and, in the same
+   * transaction (the caller's, in 0.6 with control_exec), authorizes the exact inverse set of the
+   * anomaly it held and records the decision. Refused — nothing written, the hold stays — when the
+   * hold is not set, has no snapshot (a hold of 0.5) or the choice does not invert its anomaly.
+   */
+  restore(
+    binding: string,
+    reason: HoldReason,
+    choice: RestoreChoice,
+    o: { readonly answerId?: string } = {},
+  ): { readonly authorization?: Authorization; readonly decision: Decision } | RestoreRefusal {
+    check(reason);
+    return this.db
+      .transaction(() => {
+        const held = this.of(binding).find((h) => h.reason === reason);
+        if (held === undefined) return { refused: `${reason} is not held` };
+        const snap = anomalyOf(held.detail);
+        if (snap === undefined) return { refused: "the hold has no snapshot" };
+        const r = new Authorizations(this.db, this.now).record(snap, choice, o.answerId);
+        if (!("refused" in r)) this.lift(binding, reason);
+        return r;
       })
       .immediate();
   }
