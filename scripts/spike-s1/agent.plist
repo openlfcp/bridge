@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Spike S-1: Contents/Library/LaunchAgents/org.openlfcp.bridge.agent.plist, registered with
+     SMAppService.agent (A§2.3). LFCP_SPIKE_TRIGGER lets the shell tell a launchd start apart. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key><string>org.openlfcp.bridge.agent</string>
+	<key>BundleProgram</key><string>Contents/MacOS/LFCP Bridge</string>
+	<key>AssociatedBundleIdentifiers</key><array><string>org.openlfcp.bridge</string></array>
+	<key>RunAtLoad</key><true/>
+	<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+	<key>ThrottleInterval</key><integer>30</integer>
+	<key>ProcessType</key><string>Interactive</string>
+	<key>EnvironmentVariables</key><dict><key>LFCP_SPIKE_TRIGGER</key><string>launchd</string></dict>
+</dict>
+</plist>
