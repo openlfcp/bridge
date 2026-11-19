@@ -11,6 +11,7 @@
 // Version 3: runs and journal of r2. Version 4: N8 migration details.
 // Version 5: a person's decisions on refused and quarantined intents.
 // Version 6: durable acceptances of anomaly snapshots (A§7.1, E18).
+// Version 7: authorizations of exact inverse sets, a person's decisions, ignored imports (A§7.1–7.2).
 //
 // Beyond §3: STRICT tables, NOT NULL where a row has no meaning without the
 // value, and foreign keys to installations and bindings (PRAGMA
@@ -371,8 +372,64 @@ const V6: Migration = {
   down: ["DROP INDEX acceptances_pending", "DROP TABLE acceptances"],
 };
 
+// Version 7 (A§7.1–7.2): a Restore answer ("Reopen the reminders", "Create new reminders"…)
+// authorizes the exact inverse set of the anomaly it answers — the effects with their `from`,
+// `to` and `expectRev` — checked at admission by the table of acceptances; the decision is what
+// the planner does for it; "Keep only in Reminders" keeps its reminders out of the imports.
+// Down drops all three (an older bridge asks again).
+const V7: Migration = {
+  version: 7,
+  name: "authorizations, decisions, ignored imports",
+  up: [
+    `CREATE TABLE authorizations (
+      id TEXT PRIMARY KEY,
+      binding_id TEXT NOT NULL REFERENCES bindings(id),
+      generation INTEGER NOT NULL DEFAULT 0,
+      reason TEXT NOT NULL,
+      anomaly_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind = 'inverse'),
+      effects_json TEXT NOT NULL,
+      effect_set_hash TEXT NOT NULL,
+      answer_id TEXT,
+      state TEXT NOT NULL CHECK (state IN ('pending','consumed','void')),
+      outcome TEXT CHECK (outcome IN ('consumed','vanished','changed')),
+      authorized_at TEXT NOT NULL,
+      ended_at TEXT
+    ) STRICT`,
+    "CREATE INDEX authorizations_pending ON authorizations(binding_id, state)",
+    `CREATE TABLE decisions (
+      id TEXT PRIMARY KEY,
+      binding_id TEXT NOT NULL REFERENCES bindings(id),
+      generation INTEGER NOT NULL DEFAULT 0,
+      anomaly_id TEXT NOT NULL,
+      authorization_id TEXT REFERENCES authorizations(id),
+      kind TEXT NOT NULL CHECK (kind IN ('recreate','suppress','prefer_lfcp_status','reopen')),
+      task_ids_json TEXT NOT NULL,
+      answer_id TEXT,
+      state TEXT NOT NULL CHECK (state IN ('pending','done','void')),
+      decided_at TEXT NOT NULL,
+      ended_at TEXT
+    ) STRICT`,
+    "CREATE INDEX decisions_pending ON decisions(binding_id, state)",
+    `CREATE TABLE ignored_imports (
+      binding_id TEXT NOT NULL REFERENCES bindings(id),
+      key TEXT NOT NULL,
+      anomaly_id TEXT NOT NULL,
+      ignored_at TEXT NOT NULL,
+      PRIMARY KEY (binding_id, key)
+    ) STRICT, WITHOUT ROWID`,
+  ],
+  down: [
+    "DROP TABLE ignored_imports",
+    "DROP INDEX decisions_pending",
+    "DROP TABLE decisions",
+    "DROP INDEX authorizations_pending",
+    "DROP TABLE authorizations",
+  ],
+};
+
 /** Every migration, in order. */
-export const MIGRATIONS: readonly Migration[] = Object.freeze([V1, V2, V3, V4, V5, V6]);
+export const MIGRATIONS: readonly Migration[] = Object.freeze([V1, V2, V3, V4, V5, V6, V7]);
 
 /** The schema version this build writes. */
 export const SCHEMA_VERSION = MIGRATIONS.length;

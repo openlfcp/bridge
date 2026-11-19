@@ -66,7 +66,14 @@ const V2_TABLES = [
   "migrations",
   "transport_state",
 ];
-const LATER_TABLES = ["migration_details", "intent_resolutions", "acceptances"];
+const LATER_TABLES = [
+  "migration_details",
+  "intent_resolutions",
+  "acceptances",
+  "authorizations",
+  "decisions",
+  "ignored_imports",
+];
 
 const now = "2026-11-10T00:00:00.000Z";
 function seedV1(d: BridgeDatabase) {
@@ -490,5 +497,43 @@ describe("migration 6: acceptances (A§7.1, E18; E-040)", () => {
     expect(new Holds(d).of("b1").map((h) => h.reason)).toEqual(["ownership_lost"]);
     migrateTo(d, 6);
     expect(d.prepare("SELECT count(*) AS n FROM acceptances").get()).toEqual({ n: 0 });
+  });
+});
+
+describe("migration 7: authorizations, decisions, ignored imports (A§7.1–7.2; E-041)", () => {
+  it("forward creates the three tables with their checks; back drops them, the rest as it was", () => {
+    const d = db({ migrate: false });
+    migrateTo(d, 6);
+    seedV1(d);
+    migrateTo(d, 7);
+    d.prepare(
+      `INSERT INTO authorizations (id, binding_id, reason, anomaly_id, kind, effects_json, effect_set_hash,
+         state, authorized_at) VALUES ('z1', 'b1', 'guard_mass_status', 'n1', 'inverse', '[]', 'h', 'pending', ?)`,
+    ).run(now);
+    d.prepare(
+      `INSERT INTO decisions (id, binding_id, anomaly_id, authorization_id, kind, task_ids_json, state,
+         decided_at) VALUES ('d1', 'b1', 'n1', 'z1', 'prefer_lfcp_status', '[]', 'pending', ?)`,
+    ).run(now);
+    d.prepare(
+      "INSERT INTO ignored_imports (binding_id, key, anomaly_id, ignored_at) VALUES ('b1', 'ext:E1', 'n2', ?)",
+    ).run(now);
+    const bad = (sql: string) => expect(() => d.prepare(sql).run(now)).toThrow(/CHECK|FOREIGN KEY/);
+    bad(`INSERT INTO authorizations (id, binding_id, reason, anomaly_id, kind, effects_json, effect_set_hash,
+           state, authorized_at) VALUES ('z2', 'b1', 'r', 'n', 'count', '[]', 'h', 'pending', ?)`);
+    bad(`INSERT INTO decisions (id, binding_id, anomaly_id, kind, task_ids_json, state, decided_at)
+           VALUES ('d2', 'b1', 'n', 'delete', '[]', 'pending', ?)`);
+    bad(`INSERT INTO decisions (id, binding_id, anomaly_id, authorization_id, kind, task_ids_json, state,
+           decided_at) VALUES ('d3', 'b1', 'n', 'nope', 'recreate', '[]', 'pending', ?)`);
+    bad(
+      "INSERT INTO ignored_imports (binding_id, key, anomaly_id, ignored_at) VALUES ('nope', 'id:1', 'n', ?)",
+    );
+    // Back to 6: none of the three, the hold and the acceptances table as they were.
+    migrateTo(d, 6);
+    for (const t of ["authorizations", "decisions", "ignored_imports"])
+      expect(tables(d)).not.toContain(t);
+    expect(tables(d)).toContain("acceptances");
+    expect(new Holds(d).of("b1").map((h) => h.reason)).toEqual(["ownership_lost"]);
+    migrateTo(d, 7);
+    expect(d.prepare("SELECT count(*) AS n FROM decisions").get()).toEqual({ n: 0 });
   });
 });
