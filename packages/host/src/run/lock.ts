@@ -1,0 +1,32 @@
+// run.lock (D-010 §2.1): one run process per bridge directory. Its own module, without the SDK, so
+// that `run --app` and its tests can use it alone.
+
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+/** run.lock: one run process. A lock whose pid is gone is stale and taken over. */
+export function takeRunLock(home: string): (() => void) | { readonly held: number } {
+  mkdirSync(home, { recursive: true });
+  const path = join(home, "run.lock");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      writeFileSync(path, `${process.pid}\n`, { flag: "wx", mode: 0o600 });
+      return () => rmSync(path, { force: true });
+    } catch (e) {
+      if ((e as { code?: string }).code !== "EEXIST") throw e;
+      const pid = Number(readFileSync(path, "utf8").trim());
+      if (Number.isInteger(pid) && pid > 0 && alive(pid)) return { held: pid };
+      rmSync(path, { force: true });
+    }
+  }
+  return { held: -1 };
+}
+
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};

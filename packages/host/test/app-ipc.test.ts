@@ -2,12 +2,13 @@
 // pause/resume/answer/export/remove/shutdown/openURL, the events hello/status/reply, STOP only on
 // pause, the URL never in a log line or a reply.
 
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type Event, encodeEvent, LineSplitter, MAX_LINE, parseCommand } from "../src/app/ipc.js";
 import { AppHost, EXIT_DEADLINE, serveApp } from "../src/app/serve.js";
@@ -447,32 +448,55 @@ describe("serveApp and main run --app", () => {
 });
 
 describe("the deadline in a real process", () => {
+  let child: ChildProcess | undefined;
+  afterEach(() => {
+    // Never leave the fixture running, whatever the test did.
+    if (child !== undefined && child.exitCode === null && child.signalCode === null)
+      child.kill("SIGKILL");
+    child = undefined;
+  });
+
   it("a stop that never ends: exit EXIT_DEADLINE after the deadline, run.lock kept, no STOP", async () => {
-    const fixture = fileURLToPath(new URL("./fixtures/app-deadline.mjs", import.meta.url));
-    const child = spawn(process.execPath, [fixture, home, "300"], { stdio: "pipe" });
+    // The fixture from src/ (esbuild, a few ms): independent of dist/ and of any earlier build.
+    const bundle = join(home, "fixture.mjs");
+    await build({
+      entryPoints: [fileURLToPath(new URL("./fixtures/app-deadline.ts", import.meta.url))],
+      outfile: bundle,
+      bundle: true,
+      platform: "node",
+      format: "esm",
+      target: "node24",
+      logLevel: "silent",
+    });
+    const data = join(home, "data");
+    const c = spawn(process.execPath, [bundle, data, "300"], { stdio: "pipe" });
+    child = c;
     let out = "";
     let err = "";
-    child.stdout.on("data", (d) => {
+    c.stdout.on("data", (d) => {
       out += d;
     });
-    child.stderr.on("data", (d) => {
+    c.stderr.on("data", (d) => {
       err += d;
     });
-    for (let i = 0; i < 200 && !out.includes('"state":"running"'); i++)
+    const exited = new Promise<number | null>((r) => c.on("exit", r));
+    for (let i = 0; i < 300 && !out.includes('"state":"running"'); i++)
       await new Promise((r) => setTimeout(r, 10));
-    expect(out).toContain('"state":"running"');
+    expect(out, err).toContain('"state":"running"');
     const t0 = Date.now();
-    child.stdin.write(`${line({ id: "1", cmd: "shutdown", reason: "update" })}\n`);
+    c.stdin.write(`${line({ id: "1", cmd: "shutdown", reason: "update" })}\n`);
     // stdin stays open, as the shell keeps it: only the deadline can end this process.
-    const code = await new Promise<number | null>((r) => child.on("exit", r));
-    expect(code).toBe(EXIT_DEADLINE);
+    const code = await Promise.race([
+      exited,
+      new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 5_000)),
+    ]);
+    expect(code, err).toBe(EXIT_DEADLINE);
     expect(Date.now() - t0).toBeGreaterThanOrEqual(250);
-    expect(Date.now() - t0).toBeLessThan(5_000);
     expect(err).toContain("app: shutdown deadline passed with work still running; exiting");
     expect(err).not.toContain("fixture: ended");
     // Not released under work that still ran: its pid is dead now, the next host takes it over.
-    expect(readFileSync(join(home, "run.lock"), "utf8").trim()).toBe(String(child.pid));
-    expect(typeof takeRunLock(home)).toBe("function");
-    expect(existsSync(join(home, STOP_FILE))).toBe(false);
+    expect(readFileSync(join(data, "run.lock"), "utf8").trim()).toBe(String(c.pid));
+    expect(typeof takeRunLock(data)).toBe("function");
+    expect(existsSync(join(data, STOP_FILE))).toBe(false);
   }, 15_000);
 });
