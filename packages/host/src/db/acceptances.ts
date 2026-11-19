@@ -124,7 +124,8 @@ export function snapshot(
 
 /**
  * The outcome of a pending acceptance against the current set of its reason (A§7.1):
- * `present` is whether the reason's guard fires in this plan.
+ * `present` is whether the reason's guard fires in this plan. An empty current set is
+ * `vanished`, except for an empty accepted set while the guard still fires (`consumed`).
  */
 export function compare(
   accepted: Pick<Acceptance, "kind" | "items" | "bases" | "effectSetHash">,
@@ -133,9 +134,12 @@ export function compare(
 ): AcceptanceOutcome {
   // Nothing of the reason in this plan: the anomaly is gone, whatever the window says (the plan is
   // then admitted by the usual rules). Only an anomaly that was itself empty — a hold the window
-  // alone set — is consumed by an empty plan: the answer accepted exactly that.
+  // alone set — is consumed by an empty plan, and only while the window still fires: the answer
+  // accepted exactly that. Once the guard no longer fires it is vanished, the window unmoved.
   if (current.kind === "set" && current.items.length === 0)
-    return accepted.kind === "set" && accepted.items.length === 0 ? "consumed" : "vanished";
+    return present && accepted.kind === "set" && accepted.items.length === 0
+      ? "consumed"
+      : "vanished";
   // No data to compare: never let it through.
   if (accepted.kind === "opaque" || current.kind === "opaque")
     return current.kind === "opaque" && !present ? "vanished" : "changed";

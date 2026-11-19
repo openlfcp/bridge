@@ -468,4 +468,30 @@ describe("an empty current set is vanished, even while the window fires (A§7.1 
     // The window starts at the consumed answer: one new unlink passes.
     expect(limits().check("b", { intents: [], unlinks: deleted(15) })).toEqual({ ok: true });
   });
+
+  it("two empty sets once the guard no longer fires → vanished: the window keeps the hour's unlinks", () => {
+    // Six unaccepted unlinks: four 59 min ago, two a minute ago.
+    for (let k = 0; k < 4; k++)
+      new Journal(db, () => t - 59 * 60_000).append("info", "link.unlinked", { bindingId: "b" });
+    for (let k = 0; k < 2; k++)
+      new Journal(db, () => t - 60_000).append("info", "link.unlinked", { bindingId: "b" });
+    expect(limits().admit("b", { intents: [], unlinks: [] })).toMatchObject({
+      holds: ["guard_mass_unlink"],
+    });
+    expect(anomaly("guard_mass_unlink")).toMatchObject({ kind: "set", items: [] });
+    holds().accept("b", "guard_mass_unlink");
+    // Two minutes later the four old ones left the hour: 2, the guard no longer fires.
+    t += 2 * 60_000;
+    expect(limits().check("b", { intents: [], unlinks: [] })).toEqual({ ok: true });
+    expect(limits().admit("b", { intents: [], unlinks: [] })).toEqual({ ok: true });
+    expect(db.prepare("SELECT state, outcome FROM acceptances").all()).toEqual([
+      { state: "void", outcome: "vanished" },
+    ]);
+    expect(holds().acceptedAt("b", "guard_mass_unlink")).toBeUndefined();
+    // The two still in the hour count: two new unlinks make 4 > 3.
+    expect(limits().check("b", { intents: [], unlinks: deleted(15, 16) })).toMatchObject({
+      ok: false,
+      holds: ["guard_mass_unlink"],
+    });
+  });
 });
