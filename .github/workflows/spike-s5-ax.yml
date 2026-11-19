@@ -43,7 +43,7 @@ jobs:
         if: always()
         run: |
           log show --last 20m --style compact --predicate 'process == "tccd"' 2>/dev/null \
-            | grep -iE 'accessibility|s5-ax|s5probe' | tail -400 > "$R/tccd.log" || true
+            | grep -E 's5-ax|s5probe|S5Probe|kTCCServiceAccessibility' | grep -v heard | tail -400 > "$R/tccd.log" || true
           echo "== app events"; cat "$R/app-state/events.jsonl" 2>/dev/null || true
           echo "== tccd (tail)"; tail -60 "$R/tccd.log" | cut -c1-400
       - uses: actions/upload-artifact@v4
