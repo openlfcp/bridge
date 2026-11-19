@@ -1,0 +1,81 @@
+name: L3
+
+# T§2 L3: the L2 scenarios on the real EventKit store — the bridge harness through
+# EventKitTransport and the helper app (launched as the bridge launches it: open + FIFOs), on a
+# hosted macOS runner whose Reminders access is a user TCC.db row per app (spike S-3,
+# scripts/l3/tcc-grant.sh). The tests are every packages/*/test/**/*.l3.test.ts; with REQUIRE_L3
+# a missing setup fails them instead of skipping (no L3 id is skipped, T§4).
+#
+# E-041c: macos-15 and the R3-1b scenarios (packages/host/test/restore.l3.test.ts). E-053 adds
+# the runners to the matrix (macos-15-intel, macos-26), the scenario list and its report.
+on:
+  workflow_dispatch:
+  # Its own files changed: the L3 setup is checked where it changes (workflow_dispatch reaches only
+  # a workflow already on main).
+  push:
+    paths: [".github/workflows/l3.yml", "scripts/l3/**", "packages/*/test/**/*.l3.test.ts", "packages/host/test/support/**"]
+  pull_request:
+    paths: [".github/workflows/l3.yml", "scripts/l3/**", "packages/*/test/**/*.l3.test.ts", "packages/host/test/support/**"]
+  schedule:
+    # Nightly (T§2: L3 at night).
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  l3:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      L3_OUT: ${{ github.workspace }}/build/l3/out
+      L3_HELPER_APP: ${{ github.workspace }}/helper/build/LFCP Reminders Helper.app
+      L3_PERSON_APP: ${{ github.workspace }}/build/l3/LFCP L3 Person.app
+      REQUIRE_L3: "1"
+    steps:
+      - uses: actions/checkout@v5
+      # The TypeScript SDK at the commit in sdk-ts.lock, packed into vendor/sdk-ts/
+      # (docs/devel/sdk-pin.md), as in ci.yml.
+      - id: sdk-ts-lock
+        run: echo "commit=$(jq -er .commit sdk-ts.lock)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          repository: openlfcp/sdk-ts
+          ref: ${{ steps.sdk-ts-lock.outputs.commit }}
+          path: vendor/sdk-ts-src
+          sparse-checkout: packages
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: node scripts/sdk-ts-pack.mjs --checkout vendor/sdk-ts-src
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: macOS
+        run: sw_vers; uname -m
+      - name: Build the helper app (native architecture, ad-hoc)
+        working-directory: helper
+        run: ARCHS="$(uname -m)" scripts/build-app.sh
+      - name: Build the person app
+        run: scripts/l3/build-person.sh
+      - name: Reminders access for both apps (user TCC.db rows; each must report fullAccess)
+        run: scripts/l3/tcc-grant.sh "$L3_HELPER_APP" "$L3_PERSON_APP"
+      - name: L3 tests
+        run: pnpm exec vitest run .l3.test.ts --reporter=default --reporter=junit --outputFile.junit="$L3_OUT/junit.xml"
+      - name: Remove the verification lists
+        if: always()
+        run: |
+          [ -d "$L3_PERSON_APP" ] || exit 0
+          open -n -W -g -a "$L3_PERSON_APP" --stdout "$L3_OUT/cleanup.json" --args cleanup || true
+          cat "$L3_OUT/cleanup.json" 2>/dev/null || true
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: l3-${{ matrix.runner }}
+          path: build/l3/out
+          if-no-files-found: ignore
