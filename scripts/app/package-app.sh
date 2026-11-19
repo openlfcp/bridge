@@ -155,7 +155,21 @@ mkdir -p "$stage"
 ditto "$APP" "$stage/LFCP Bridge.app"
 ln -s /Applications "$stage/Applications"
 # ULFO (lzfse): opens on every macOS the app supports (≥ 10.11).
-hdiutil create -volname "LFCP Bridge" -srcfolder "$stage" -fs HFS+ -format ULFO -ov "$DMG" >/dev/null
+# hdiutil create on hosted runners now and then fails with "Resource busy" (another disk image
+# job of the system holds the device): retry that, and only that, a few times.
+for attempt in 1 2 3 4 5; do
+  if log="$(hdiutil create -volname "LFCP Bridge" -srcfolder "$stage" -fs HFS+ -format ULFO \
+    -ov "$DMG" 2>&1)"; then
+    break
+  fi
+  echo "$log" >&2
+  if ! grep -q 'Resource busy' <<< "$log" || [ "$attempt" = 5 ]; then
+    echo "package-app: hdiutil create failed (attempt $attempt)" >&2
+    exit 1
+  fi
+  echo "package-app: hdiutil create: Resource busy (attempt $attempt of 5), again in $((attempt * 10)) s" >&2
+  sleep $((attempt * 10))
+done
 # An ad-hoc signature means nothing on a disk image; a real identity signs it (E-052 notarizes it).
 if [ "$IDENTITY" != - ]; then codesign "${dmg_flags[@]}" "$DMG"; fi
 hdiutil verify "$DMG" >/dev/null
