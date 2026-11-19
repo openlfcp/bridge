@@ -18,7 +18,8 @@ import { bridgePaths, loadConfig, saveConfig } from "./config.js";
 import { HOLD_REASONS, type HoldReason } from "./db/holds.js";
 import { Journal } from "./db/journal.js";
 import { resume, stop, stopState } from "./db/stop.js";
-import { doctor, worst } from "./doctor.js";
+import { type Check, doctor, worst } from "./doctor.js";
+import { Runs } from "./executor/safe-mode.js";
 import { EXIT, type ExitCode } from "./exit.js";
 import {
   installLaunchAgent,
@@ -111,6 +112,19 @@ export const COMMANDS: readonly CommandInfo[] = Object.freeze([
   { name: "migrate", summary: "N8: status, resume, abort", pr: "13", ready: true },
   { name: "service", summary: "install or uninstall the LaunchAgent", pr: "9", ready: true },
   { name: "log", summary: "the log", pr: "9", ready: true },
+  { name: "links", summary: "the links of the bindings (--binding <b>)", pr: "E-006", ready: true },
+  {
+    name: "safe-mode",
+    summary: "safe-mode reset: off after doctor finds no cause",
+    pr: "E-006",
+    ready: true,
+  },
+  {
+    name: "certification-test",
+    summary: "on|off: the certification test mode (E-050)",
+    pr: "E-006",
+    ready: true,
+  },
 ] satisfies CommandInfo[]);
 
 export const VERSION = "0.5.0";
@@ -287,7 +301,8 @@ async function appCommand(
         (process.env.LFCP_BRIDGE_APP
           ? shellPeerUid(shellExecutable(process.env.LFCP_BRIDGE_APP))
           : undefined),
-      run: (argv, io, p) => supportCommand(rt, argv, io, p),
+      run: (argv, io, p) =>
+        supportCommand(rt, argv, io, p, process.env.LFCP_BRIDGE_APP || undefined),
     },
   });
   return typeof r === "string" ? EXIT.OK : EXIT.NEEDS_PERSON;
@@ -305,6 +320,9 @@ export const SUPPORT_COMMANDS: readonly string[] = [
   "migrate",
   "resume",
   "stop",
+  "links",
+  "safe-mode",
+  "certification-test",
 ];
 
 /**
@@ -317,6 +335,7 @@ async function supportCommand(
   argv: readonly string[],
   io: SupportIo,
   p: RunningProcess | undefined,
+  appBundle?: string,
 ): Promise<ExitCode> {
   const [name = "", sub] = argv;
   const journal = new Journal(rt.db, Date.now, undefined, SUPPORT_AUTHOR);
@@ -334,6 +353,9 @@ async function supportCommand(
     const support: Runtime = {
       ...rt,
       journal,
+      // doctor's helper is the app itself: the helper runs from its bundle (A§2.1).
+      ...(appBundle === undefined ? {} : { config: { ...rt.config, helperPath: appBundle } }),
+      serverConnected: () => p?.connected?.(),
       async openTransport() {
         if (p?.transport === undefined)
           throw new Error(
@@ -349,7 +371,9 @@ async function supportCommand(
       code = EXIT.NEEDS_PERSON;
     }
   }
-  const command = name === "quarantine" || name === "migrate" ? `${name} ${sub ?? ""}` : name;
+  const command = ["quarantine", "migrate", "safe-mode", "certification-test"].includes(name)
+    ? `${name} ${sub ?? ""}`
+    : name;
   journal.append(code === EXIT.OK ? "info" : "warn", "support.command", {
     params: { command: command.trim(), exit: code },
   });
@@ -704,34 +728,22 @@ async function run(
       return EXIT.OK;
     }
     case "doctor": {
-      let transport: Awaited<ReturnType<Runtime["openTransport"]>> | undefined;
-      try {
-        transport = await rt.openTransport();
-      } catch {}
-      if (
-        opts.get("request-access") === true &&
-        transport !== undefined &&
-        transport.status().state !== "ok"
-      ) {
-        env.out(
-          "A system dialog asks for access to Reminders for “LFCP Reminders Helper”: choose Allow.",
-        );
-        await (transport as { requestAccess?: () => Promise<unknown> }).requestAccess?.();
-      }
-      // Read-only (review PR 9 P2-2): doctor reports markers through inspectMarkers; holds are
-      // set by the run loop's OwnershipGuard, never by a diagnosis.
-      const checks = await doctor({
-        db: rt.db,
-        home: rt.paths.home,
-        helperApp: rt.config.helperPath ?? rt.paths.helperApp,
-        instanceId: rt.config.bridgeInstanceId,
-        ...(transport === undefined ? {} : { transport }),
-        ...(rt.verifySignature === undefined ? {} : { verifySignature: rt.verifySignature }),
-      });
+      const checks = await doctorChecks(rt, opts.get("request-access") === true, env);
       for (const c of checks) env.out(`${c.status.padEnd(4)}  ${c.name}: ${c.detail}`);
       const w = worst(checks);
       return w === "fail" ? EXIT.NEEDS_PERSON : EXIT.OK;
     }
+    case "links":
+      return linksCommand(rt, opts.get("binding"), env);
+    case "safe-mode":
+      if (positional[0] !== "reset") return usage(env, "lfcp-bridge safe-mode reset");
+      return safeModeReset(rt, env);
+    case "certification-test":
+      if (positional[0] !== "on" && positional[0] !== "off")
+        return usage(env, "lfcp-bridge certification-test on|off");
+      // A§9.4: the instance's certification_test flag comes with E-050.
+      env.err(`certification-test ${positional[0]}: not available in this build (E-050)`);
+      return EXIT.USAGE;
     case "service": {
       const action = positional[0];
       if (action === "install") {
@@ -876,6 +888,102 @@ function migrationResult(m: MigrationRow, env: CliEnvironment): ExitCode {
     default:
       return EXIT.OK;
   }
+}
+
+/** doctor's checks (read-only), with the TCC request when asked. */
+async function doctorChecks(
+  rt: Runtime,
+  requestAccess: boolean,
+  env: Pick<CliEnvironment, "out">,
+): Promise<readonly Check[]> {
+  let transport: Awaited<ReturnType<Runtime["openTransport"]>> | undefined;
+  try {
+    transport = await rt.openTransport();
+  } catch {}
+  if (requestAccess && transport !== undefined && transport.status().state !== "ok") {
+    env.out(
+      "A system dialog asks for access to Reminders for “LFCP Reminders Helper”: choose Allow.",
+    );
+    await (transport as { requestAccess?: () => Promise<unknown> }).requestAccess?.();
+  }
+  // Read-only (review PR 9 P2-2): doctor reports markers through inspectMarkers; holds are
+  // set by the run loop's OwnershipGuard, never by a diagnosis.
+  const server = rt.serverConnected?.();
+  return doctor({
+    db: rt.db,
+    home: rt.paths.home,
+    helperApp: rt.config.helperPath ?? rt.paths.helperApp,
+    instanceId: rt.config.bridgeInstanceId,
+    ...(transport === undefined ? {} : { transport }),
+    ...(rt.verifySignature === undefined ? {} : { verifySignature: rt.verifySignature }),
+    ...(server === undefined ? {} : { server }),
+  });
+}
+
+/** The doctor checks whose failure keeps Safe Mode on (A§7.3: TCC, helper, server). */
+export const SAFE_MODE_CAUSES: readonly string[] = ["reminders access", "helper", "server"];
+
+/**
+ * `safe-mode reset` (A§7.3): Safe Mode off only after doctor finds no active cause; else refused
+ * with the cause. Serialized with the passes and journaled by the support queue.
+ */
+async function safeModeReset(rt: Runtime, env: CliEnvironment): Promise<ExitCode> {
+  const runs = new Runs(rt.db);
+  if (runs.safeMode() === undefined) {
+    env.out("Safe Mode is not on");
+    return EXIT.OK;
+  }
+  const causes = (await doctorChecks(rt, false, env)).filter(
+    (c) => c.status === "fail" && SAFE_MODE_CAUSES.includes(c.name),
+  );
+  if (causes.length > 0) {
+    rt.journal.append("warn", "safe_mode.reset_refused", {
+      params: { causes: causes.map((c) => c.name) },
+    });
+    for (const c of causes) env.err(`safe-mode reset refused: ${c.name}: ${c.detail}`);
+    env.err("fix the cause (lfcp-bridge doctor), then safe-mode reset again");
+    return EXIT.NEEDS_PERSON;
+  }
+  runs.safeModeOff();
+  bumpControl(rt.db);
+  env.out("Safe Mode off: the next pass runs");
+  return EXIT.OK;
+}
+
+/** `links [--binding <b>]`: the links of the bindings, with the reminder ids the commands take. */
+function linksCommand(
+  rt: Runtime,
+  binding: string | true | undefined,
+  env: CliEnvironment,
+): ExitCode {
+  const of = typeof binding === "string";
+  const rows = rt.db
+    .prepare(
+      `SELECT binding_id, task_id, state, state_reason, origin, rem_external_id, rem_id_cache,
+              rem_title_snapshot FROM links${of ? " WHERE binding_id = ?" : ""}
+        ORDER BY binding_id, task_id`,
+    )
+    .all(...(of ? [binding] : [])) as {
+    binding_id: string;
+    task_id: string;
+    state: string;
+    state_reason: string | null;
+    origin: string;
+    rem_external_id: string | null;
+    rem_id_cache: string | null;
+    rem_title_snapshot: string | null;
+  }[];
+  if (rows.length === 0) {
+    env.out(of ? `no links of ${binding}` : "no links");
+    return EXIT.OK;
+  }
+  for (const l of rows) {
+    const reminder = l.rem_id_cache ?? l.rem_external_id;
+    env.out(
+      `${l.binding_id}  ${l.task_id}  ${l.state}${l.state_reason ? ` (${l.state_reason})` : ""}  ${l.origin}${reminder === null ? "" : `  reminder ${reminder}`}${l.rem_title_snapshot === null ? "" : ` "${l.rem_title_snapshot}"`}`,
+    );
+  }
+  return EXIT.OK;
 }
 
 function usage(env: Pick<CliEnvironment, "err">, line: string): ExitCode {

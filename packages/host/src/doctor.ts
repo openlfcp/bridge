@@ -26,6 +26,8 @@ export interface DoctorDeps {
   readonly transport?: RemindersTransport;
   /** codesign --verify of the helper app (injected; false when it fails). */
   readonly verifySignature?: (app: string) => boolean;
+  /** The run process's server connection (the app's host); the check is left out without it. */
+  readonly server?: boolean;
   readonly now?: () => number;
 }
 
@@ -92,6 +94,13 @@ export async function doctor(d: DoctorDeps): Promise<readonly Check[]> {
         : `${s.reason}: System Settings → Privacy & Security → Reminders (doctor --request-access asks)`,
     );
   }
+
+  if (d.server !== undefined)
+    add(
+      "server",
+      d.server ? "ok" : "fail",
+      d.server ? "connected" : "not connected to the LFCP server (network, or the server is down)",
+    );
 
   const bindings = d.db
     .prepare(

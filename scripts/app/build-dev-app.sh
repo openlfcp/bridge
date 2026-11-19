@@ -11,6 +11,7 @@
 #   Contents/Resources/node/bin/node             the node running this script (v24, .node-version)
 #   Contents/Resources/host/bridge.mjs           scripts/bundle-host.mjs
 #   Contents/Resources/host/package.json         {"type":"module"}
+#   Contents/Resources/bin/lfcp-bridge           app/Support/lfcp-bridge (support CLI, A§7.3)
 #   Contents/Resources/host/node_modules/better-sqlite3/   package.json, lib/, this arch's .node
 #   Contents/Library/LaunchAgents/org.openlfcp.bridge.agent.plist
 set -euo pipefail
@@ -53,6 +54,9 @@ echo "== host bundle"
 (cd "$ROOT" && pnpm build >/dev/null)
 node "$ROOT/scripts/bundle-host.mjs" "$C/Resources/host/bridge.mjs"
 echo '{"type":"module"}' > "$C/Resources/host/package.json"
+# The support CLI (A§7.3): a thin client of the host, sealed with Resources/.
+mkdir -p "$C/Resources/bin"
+install -m 755 "$ROOT/app/Support/lfcp-bridge" "$C/Resources/bin/lfcp-bridge"
 
 echo "== better-sqlite3"
 src="$(cd "$ROOT/packages/host" && node -p 'path.dirname(require.resolve("better-sqlite3/package.json"))')"

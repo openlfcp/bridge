@@ -35,6 +35,8 @@ export interface RunningProcess {
   readonly transport?: BootstrapTransport;
   /** Runs a support command serialized with its passes (BridgeProcess.exclusive). */
   exclusive?<T>(fn: () => Promise<T>): Promise<T>;
+  /** Every installation connected to its server; undefined without installations. */
+  connected?(): boolean | undefined;
 }
 
 export interface Runtime {
@@ -46,6 +48,8 @@ export interface Runtime {
   /** The started transport (helper write mode off; the bootstrap switches it). */
   openTransport(): Promise<BootstrapTransport>;
   resolveSection(name: string): Promise<ResolvedSection | undefined>;
+  /** The run process's server connection (doctor's "server"); undefined when not known here. */
+  readonly serverConnected?: () => boolean | undefined;
   readonly launchctl: Launchctl;
   readonly node: string;
   readonly cli: string;

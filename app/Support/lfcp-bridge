@@ -1,0 +1,11 @@
+#!/bin/sh
+# lfcp-bridge — the support CLI of LFCP Bridge.app (A§7.3), Contents/Resources/bin/lfcp-bridge.
+# A thin client of the running app's host (support.sock): it starts the app when it is not
+# running, and never opens Reminders or the bridge's database itself. Works through a symlink.
+#
+#   lfcp-bridge status | doctor | links | quarantine … | bind … | migrate … | resume … | stop
+#               | safe-mode reset | certification-test on|off
+set -eu
+self="$(realpath "$0")"
+resources="$(cd "$(dirname "$self")/.." && pwd -P)"
+exec "$resources/node/bin/node" "$resources/host/bridge.mjs" --support-client "$@"

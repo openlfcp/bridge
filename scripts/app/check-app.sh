@@ -61,6 +61,7 @@ for want in "MacOS/LFCP Bridge" "MacOS/lfcp-reminders-helper" "Resources/node/bi
   "Resources/host/node_modules/better-sqlite3/build/Release/better_sqlite3.node"; do
   [ -f "$C/$want" ] || bad "missing $want"
 done
+[ -x "$C/Resources/bin/lfcp-bridge" ] || bad "missing or not executable: Resources/bin/lfcp-bridge"
 for f in "${machos[@]}"; do
   rel="${f#"$C/"}"
   archs="$(xcrun lipo -archs "$f" 2>&1)"
