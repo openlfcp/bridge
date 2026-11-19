@@ -6,7 +6,8 @@ import { join } from "node:path";
 
 /** run.lock: one run process. A lock whose pid is gone is stale and taken over. */
 export function takeRunLock(home: string): (() => void) | { readonly held: number } {
-  mkdirSync(home, { recursive: true });
+  // The data directory is the person's alone (A§7.3): 0700 also when run.lock is what creates it.
+  mkdirSync(home, { recursive: true, mode: 0o700 });
   const path = join(home, "run.lock");
   for (let attempt = 0; attempt < 2; attempt++) {
     try {

@@ -4,7 +4,15 @@
 // losing a row, and run.lock keeps a second host out.
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -396,5 +404,33 @@ describe("run --app never touches bridge.sqlite under another run (L2)", () => {
     expect(existsSync(paths.launchAgent)).toBe(false);
     expect(schemaOf(paths.database)).toBe(SCHEMA_VERSION);
     expect(next.err.join("\n")).toContain("the LaunchAgent of lfcp-bridge 0.5 was removed");
+  }, 20_000);
+});
+
+describe("the data directory of a first run --app (L2)", () => {
+  it("is created 0700 under umask 022, by run.lock before the runtime", async () => {
+    const paths = bridgePaths(
+      {
+        LFCP_BRIDGE_HOME: join(
+          dir,
+          "user",
+          "Library",
+          "Application Support",
+          "org.openlfcp.bridge",
+        ),
+      },
+      join(dir, "user"),
+    );
+    expect(existsSync(paths.home)).toBe(false);
+    const umask = process.umask(0o022);
+    try {
+      const app = startApp(paths, () => {});
+      await app.running();
+      app.shutdown();
+      expect(await app.done).toBe(EXIT.OK);
+    } finally {
+      process.umask(umask);
+    }
+    expect(statSync(paths.home).mode & 0o777).toBe(0o700);
   }, 20_000);
 });
