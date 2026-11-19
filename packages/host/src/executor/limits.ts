@@ -1,4 +1,4 @@
-// Limits (A§8; D-010 §7.2): a binding that is about to do far more
+// Limits (A§8, E16; D-010 §7.2): a binding that is about to do far more
 // than a person would stops with a hold before anything of its pass is
 // prepared. A sliding window of 1 h counts what was prepared in it (prepared
 // and executed alike) and the link transitions journaled in it, plus what the
@@ -8,7 +8,7 @@
 // |-----------------------------------------|-------------------------------------------------------|-------------------|
 // | unlinks + out_of_filter + task_gone     | > max(3, 10 % of the links); in strict (24 h after    | guard_mass_unlink |
 // |                                         | approve, bindings.strict_until) > 1                   |                   |
-// | new Tasks from Apple                    | > 10 an hour (> 3 in strict)                          | guard_mass_import |
+// | new Tasks from Apple                    | > 10 an hour, in strict too (E16; was > 3)            | guard_mass_import |
 // | status changes                          | > 50 % of the links in one pass, with ≥ 6 links       | guard_mass_status |
 // | count drop                              | `linked` on either side fell > 50 %, from ≥ 5         | guard_count_drop  |
 // | backlog                                 | > 200 open intents                                    | guard_backlog     |
@@ -44,7 +44,7 @@ export interface LimitConfig {
   readonly unlinksMin: number;
   readonly unlinksShare: number;
   readonly unlinksStrict: number;
-  /** New Tasks from Apple in the window; in strict. */
+  /** New Tasks from Apple in the window; in strict (E16: the same as outside it). */
   readonly imports: number;
   readonly importsStrict: number;
   /** Status changes of one pass: at most statusShare × links, checked from statusMinLinks links. */
@@ -58,14 +58,14 @@ export interface LimitConfig {
   readonly backlog: number;
 }
 
-/** r2 §7.2. */
+/** A§8 (E16). */
 export const LIMITS: LimitConfig = Object.freeze({
   windowMs: 60 * 60_000,
   unlinksMin: 3,
   unlinksShare: 0.1,
   unlinksStrict: 1,
   imports: 10,
-  importsStrict: 3,
+  importsStrict: 10,
   statusShare: 0.5,
   statusMinLinks: 6,
   countDropShare: 0.5,
