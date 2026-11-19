@@ -30,6 +30,7 @@
 
 import type { AppleItem, ListRef, RemindersTransport } from "@openlfcp/bridge-reminders";
 import { type Plan, type Transition, taskLink } from "@openlfcp/bridge-reminders/adapter";
+import { Authorizations } from "../db/authorizations.js";
 import type { BridgeDatabase } from "../db/database.js";
 import { type HoldReason, Holds } from "../db/holds.js";
 import { Journal } from "../db/journal.js";
@@ -171,6 +172,9 @@ export class LinkApplier {
     };
     // From the admission to the prepared intents, one transaction (all of it is synchronous): an
     // acceptance this pass consumes (A§7.1) is consumed with its work, or stays pending.
+    // "Create new reminders from these tasks" (A§7.2), waiting on its authorization.
+    const answers = new Authorizations(db, this.#now);
+    const recreating = answers.recreating(bindingId);
     return db
       .transaction((): LinkApplyResult => {
         const admitted = new Limits(db, undefined, this.#now).admit(
@@ -188,7 +192,13 @@ export class LinkApplier {
           ).run(o.runId);
         if (stopped.length > 0) return { kind: "held", holds: stopped };
 
-        // 3. Apply: the link transitions, then the intents.
+        // 3. Apply: the link transitions, then the intents. A deleted link a recreate answer
+        // authorized — consumed with this pass — gets a new projection instead of unlinked.
+        const recreated = new Set(
+          [...recreating]
+            .filter(([, auth]) => answers.get(auth)?.state === "consumed")
+            .map(([task]) => task),
+        );
         const out: LinkOutcome[] = [];
         for (const t of plan.transitions) {
           const result = this.#one(
@@ -197,6 +207,7 @@ export class LinkApplier {
             t,
             located.get(t.taskId),
             accepted.includes("guard_mass_unlink"),
+            recreated.has(t.taskId),
           );
           out.push({ taskId: t.taskId, transition: t.kind, result });
         }
@@ -231,6 +242,7 @@ export class LinkApplier {
     t: Transition,
     where: Located | undefined,
     accepted = false,
+    recreate = false,
   ): string {
     const db = this.#o.db;
     const at = new Date(this.#now()).toISOString();
@@ -290,6 +302,19 @@ export class LinkApplier {
             if (!setState("linked", null, [...from, "linked"])) return "skipped";
             if (t.kind === "return_find") dropBases();
             return "linked";
+          }
+          if (t.kind === "apple_missing" && recreate) {
+            // B11: the next pass projects the Task anew (a new reminder; notes, alarms and
+            // recurrence are not restored). The link's tombstone would keep it unlinked.
+            const r = db
+              .prepare(
+                "DELETE FROM links WHERE binding_id = ? AND task_id = ? AND state = 'linked'",
+              )
+              .run(bindingId, t.taskId);
+            if (r.changes !== 1) return "skipped";
+            dropBases();
+            journal("info", "link.recreated", { reason: "deleted_in_apple" });
+            return "removed";
           }
           if (t.kind === "apple_missing") {
             if (!setState("unlinked", "deleted_in_apple", from)) return "skipped";
