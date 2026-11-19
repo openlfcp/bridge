@@ -11,9 +11,10 @@
 // | ⊆ the accepted one, same before/bases        | consumed         |
 // | anything else                                | void{changed}    |
 //
-// A `count` snapshot (guard_count_drop, guard_backlog, a plan that gives no
-// items) has no set: it is present while its guard fires — consumed then,
-// void{vanished} when it does not (the 0.5 behaviour of an accept).
+// guard_count_drop holds the links its side stopped counting, guard_backlog
+// the open intents and the planned ones. An `opaque` snapshot (a hold of 0.5,
+// a plan that gives only a number) has nothing to compare: it never lets a
+// non-empty set through — void{changed}, held again, asked again.
 
 import { createHash } from "node:crypto";
 import { ulid } from "../executor/intents.js";
@@ -39,7 +40,7 @@ export interface AnomalySnapshot {
   readonly binding: string;
   readonly generation: number;
   readonly reason: HoldReason;
-  readonly kind: "set" | "count";
+  readonly kind: "set" | "opaque";
   readonly items: readonly AnomalyItem[];
   /** The hash of the held set (items' identity, cause, before and bases). */
   readonly effectSetHash: string;
@@ -56,7 +57,7 @@ export interface Acceptance {
   readonly generation: number;
   readonly reason: HoldReason;
   readonly anomalyId: string;
-  readonly kind: "set" | "count";
+  readonly kind: "set" | "opaque";
   readonly items: readonly AnomalyItem[];
   readonly effectSetHash: string;
   readonly bases: Readonly<Record<string, unknown>>;
@@ -89,7 +90,7 @@ const tie = (i: AnomalyItem, bases: Readonly<Record<string, unknown>>) =>
   canonical([i.cause, i.before, i.rev, bases[itemKey(i)]]);
 
 export function effectSetHash(
-  kind: "set" | "count",
+  kind: "set" | "opaque",
   reason: string,
   items: readonly AnomalyItem[],
   bases: Readonly<Record<string, unknown>>,
@@ -104,7 +105,7 @@ export function effectSetHash(
 export function snapshot(
   binding: string,
   reason: HoldReason,
-  kind: "set" | "count",
+  kind: "set" | "opaque",
   items: readonly AnomalyItem[] = [],
   bases: Readonly<Record<string, unknown>> = {},
   generation = 0,
@@ -123,16 +124,20 @@ export function snapshot(
 
 /**
  * The outcome of a pending acceptance against the current set of its reason (A§7.1):
- * `present` is whether the reason's guard fires in this plan (for a `count` snapshot).
+ * `present` is whether the reason's guard fires in this plan.
  */
 export function compare(
   accepted: Pick<Acceptance, "kind" | "items" | "bases" | "effectSetHash">,
   current: Pick<AnomalySnapshot, "kind" | "items" | "bases" | "effectSetHash">,
   present: boolean,
 ): AcceptanceOutcome {
-  if (accepted.kind === "count" || current.kind === "count")
-    return present ? "consumed" : "vanished";
-  if (current.items.length === 0) return "vanished";
+  // Nothing of the reason in this plan: gone (or, while the guard still fires on its window
+  // alone, nothing of it to let through — consumed, the window starts anew).
+  const empty = current.kind === "set" && current.items.length === 0;
+  if (empty) return present ? "consumed" : "vanished";
+  // No data to compare: never let it through.
+  if (accepted.kind === "opaque" || current.kind === "opaque")
+    return current.kind === "opaque" && !present ? "vanished" : "changed";
   if (current.effectSetHash === accepted.effectSetHash) return "consumed";
   const was = new Map(accepted.items.map((i) => [itemKey(i), tie(i, accepted.bases)]));
   for (const i of current.items)
@@ -146,7 +151,7 @@ interface Row {
   generation: number;
   reason: HoldReason;
   anomaly_id: string;
-  kind: "set" | "count";
+  kind: "set" | "opaque";
   items_json: string;
   effect_set_hash: string;
   bases_json: string;

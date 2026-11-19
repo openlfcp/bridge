@@ -88,11 +88,17 @@ export interface PlannedWork {
   readonly intents: readonly NewIntent[];
   /**
    * Planned transitions to unlinked, out_of_filter or task_gone: each one (the items of the
-   * anomaly), or only their number (a dry run; held as a `count` anomaly).
+   * anomaly), or only their number (a dry run; held as an `opaque` anomaly).
    */
   readonly unlinks: number | readonly PlannedUnlink[];
   /** New Tasks from Apple the pass would make, beyond its intents (a dry-run's count, §6.2). */
   readonly imports?: number;
+  /**
+   * The links `linked` now that this pass no longer counts on each side (Task gone, out of the
+   * filter, unreadable; the reminder missing): what a guard_count_drop holds. Without it the
+   * count drop is `opaque`.
+   */
+  readonly uncounted?: { readonly apple: readonly string[]; readonly lfcp: readonly string[] };
 }
 
 export type Admission =
@@ -255,7 +261,7 @@ export class Limits {
     return { holds, counts };
   }
 
-  /** What `reason` holds in `planned` now: its items (A§7.1), or a count. */
+  /** What `reason` holds in `planned` now: its items (A§7.1), or `opaque` when the plan gives none. */
   #snapshot(bindingId: string, reason: HoldReason, planned: PlannedWork): AnomalySnapshot {
     const items: AnomalyItem[] = [];
     const bases: Record<string, unknown> = {};
@@ -272,7 +278,11 @@ export class Limits {
     };
     switch (reason) {
       case "guard_mass_unlink":
-        if (typeof planned.unlinks === "number") return snapshot(bindingId, reason, "count");
+        // Only a number: nothing to compare, unless it is none.
+        if (typeof planned.unlinks === "number") {
+          if (planned.unlinks > 0) return snapshot(bindingId, reason, "opaque");
+          break;
+        }
         for (const u of planned.unlinks)
           items.push({
             taskId: u.taskId,
@@ -292,8 +302,48 @@ export class Limits {
           if (isStatus(i.fields))
             intent(i, i.fields.filter((f) => STATUS_FIELDS.has(f)).join(","), "status");
         break;
+      case "guard_backlog": {
+        // What waits: the open intents (one per Task and direction) and this plan's.
+        const open = this.db
+          .prepare(
+            "SELECT id, task_id, direction, basis_json FROM intents WHERE binding_id = ? AND state IN ('prepared','effecting','applied') ORDER BY id",
+          )
+          .all(bindingId) as {
+          id: string;
+          task_id: string;
+          direction: string;
+          basis_json: string;
+        }[];
+        for (const o of open) {
+          const item: AnomalyItem = {
+            taskId: o.task_id,
+            field: "open",
+            direction: o.direction,
+            cause: "backlog",
+            rev: o.id,
+          };
+          items.push(item);
+          bases[itemKey(item)] = JSON.parse(o.basis_json) as unknown;
+        }
+        for (const i of planned.intents) intent(i, `plan:${i.kind}`, "backlog");
+        break;
+      }
+      case "guard_count_drop": {
+        // The links each side stopped counting (A§8: `linked` of the side, previous → this pass).
+        if (planned.uncounted === undefined) return snapshot(bindingId, reason, "opaque");
+        for (const side of ["apple", "lfcp"] as const)
+          for (const taskId of [...planned.uncounted[side]].sort())
+            items.push({
+              taskId,
+              field: "linked",
+              direction: side,
+              cause: "count_drop",
+              before: "linked",
+            });
+        break;
+      }
       default:
-        return snapshot(bindingId, reason, "count");
+        return snapshot(bindingId, reason, "opaque");
     }
     return snapshot(bindingId, reason, "set", items, bases);
   }
@@ -309,7 +359,8 @@ export class Limits {
       bindingId,
       ["guard_count_drop"],
       { [side]: current, [`${side}Before`]: previous },
-      (reason) => snapshot(bindingId, reason, "count"),
+      // Only the counts: nothing to compare (the pass's own count drop comes through admit).
+      (reason) => snapshot(bindingId, reason, "opaque"),
     );
     return true;
   }

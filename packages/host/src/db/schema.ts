@@ -348,7 +348,7 @@ const V6: Migration = {
       generation INTEGER NOT NULL DEFAULT 0,
       reason TEXT NOT NULL,
       anomaly_id TEXT NOT NULL,
-      kind TEXT NOT NULL CHECK (kind IN ('set','count')),
+      kind TEXT NOT NULL CHECK (kind IN ('set','opaque')),
       items_json TEXT NOT NULL,
       effect_set_hash TEXT NOT NULL,
       bases_json TEXT NOT NULL,

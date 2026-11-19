@@ -309,11 +309,17 @@ describe("Limits (r2 §7.2)", () => {
     expect(holds.hasAccepted("b", "guard_mass_unlink")).toBe(false);
     // Two guards, one accepted: held, and the acceptance is not used up meanwhile.
     expect(holds.accept("b", "guard_mass_import")).toBe(true);
-    const both = limits.admit("b", { intents: eleven, unlinks: 0 }, ["guard_count_drop"]);
+    // The count drop's links (A§7.1: what it holds).
+    const uncounted = { apple: ["L0", "L1", "L2"], lfcp: [] };
+    const both = limits.admit("b", { intents: eleven, unlinks: 0, uncounted }, [
+      "guard_count_drop",
+    ]);
     expect(both).toMatchObject({ ok: false, holds: ["guard_count_drop"] });
     expect(holds.hasAccepted("b", "guard_mass_import")).toBe(true);
     expect(holds.accept("b", "guard_count_drop")).toBe(true);
-    expect(limits.admit("b", { intents: eleven, unlinks: 0 }, ["guard_count_drop"])).toMatchObject({
+    expect(
+      limits.admit("b", { intents: eleven, unlinks: 0, uncounted }, ["guard_count_drop"]),
+    ).toMatchObject({
       ok: true,
     });
     expect(holds.hasAccepted("b", "guard_mass_import")).toBe(false);

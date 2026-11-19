@@ -115,14 +115,12 @@ describe("T§3 R3-1a: an answer accepts the anomaly, not the next one", () => {
 
   it("2 came back, none new (3 ⊆ 5) → consumed, acceptedAt moved", () => {
     const id = answered();
-    const before = holds().acceptedAt("b", "guard_mass_unlink");
     expect(limits().admit("b", { intents: [], unlinks: deleted(2, 3, 4) })).toEqual({
       ok: true,
       accepted: ["guard_mass_unlink"],
     });
     expect(acceptances().get(id)).toMatchObject({ state: "consumed", outcome: "consumed" });
     expect(holds().acceptedAt("b", "guard_mass_unlink")).toBe(new Date(t).toISOString());
-    expect(String(holds().acceptedAt("b", "guard_mass_unlink")) > String(before)).toBe(true);
     expect(keys()).toContain("acceptance.consumed");
   });
 
@@ -203,21 +201,80 @@ describe("other snapshots", () => {
     });
   });
 
-  it("count drop: a count anomaly — consumed while it fires, vanished when it does not", () => {
-    expect(limits().countDrop("b", "apple", 10, 2)).toBe(true);
-    expect(anomaly("guard_count_drop")).toMatchObject({ kind: "count", items: [] });
-    holds().accept("b", "guard_count_drop");
-    expect(limits().admit("b", { intents: [], unlinks: 0 }, ["guard_count_drop"])).toEqual({
+  it("count drop: the side and the links it stopped counting — the same → consumed; another side or other links → changed", () => {
+    const drop = (apple: number[], lfcp: number[] = []) =>
+      limits().admit(
+        "b",
+        {
+          intents: [],
+          unlinks: 0,
+          uncounted: { apple: apple.map((k) => `L${k}`), lfcp: lfcp.map((k) => `L${k}`) },
+        },
+        ["guard_count_drop"],
+      );
+    const answer = () => {
+      expect(drop([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10])).toMatchObject({
+        holds: ["guard_count_drop"],
+      });
+      expect(anomaly("guard_count_drop").items).toHaveLength(11);
+      holds().accept("b", "guard_count_drop");
+    };
+    answer();
+    expect(drop([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10])).toEqual({
       ok: true,
       accepted: ["guard_count_drop"],
     });
-    limits().countDrop("b", "apple", 10, 2);
+    // The other side dropped instead (the Tasks are gone, not the reminders).
+    answer();
+    const lfcp = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    expect(drop(lfcp, lfcp)).toMatchObject({ ok: false, holds: ["guard_count_drop"] });
+    expect(keys().filter((k) => k === "acceptance.changed")).toHaveLength(1);
+    // Other reminders missing.
     holds().accept("b", "guard_count_drop");
-    expect(limits().admit("b", { intents: [], unlinks: 0 })).toEqual({ ok: true });
-    expect(new Journal(db).list().filter((e) => e.key === "acceptance.vanished")).toHaveLength(1);
+    expect(drop([9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19])).toMatchObject({ ok: false });
+    expect(keys().filter((k) => k === "acceptance.changed")).toHaveLength(2);
+    // The count came back: vanished.
+    holds().accept("b", "guard_count_drop");
+    expect(
+      limits().admit("b", { intents: [], unlinks: 0, uncounted: { apple: [], lfcp: [] } }),
+    ).toEqual({ ok: true });
+    expect(keys()).toContain("acceptance.vanished");
   });
 
-  it("a guard's hold of 0.5 (no snapshot) is accepted as a count anomaly; other holds only lift", () => {
+  it("backlog: the waiting intents — the same → consumed; replaced by others → changed", () => {
+    const creates = (p: string) =>
+      Array.from(
+        { length: 201 },
+        (_, j): NewIntent => ({
+          bindingId: "b",
+          taskId: `${p}${j}`,
+          installationId: "i",
+          direction: "to_apple",
+          kind: "create",
+          fields: ["title"],
+          basis: null,
+          payload: { kind: "create", title: `${p}${j}` },
+        }),
+      );
+    expect(limits().admit("b", { intents: creates("A"), unlinks: 0 })).toMatchObject({
+      holds: ["guard_backlog"],
+    });
+    expect(anomaly("guard_backlog").items).toHaveLength(201);
+    holds().accept("b", "guard_backlog");
+    expect(limits().admit("b", { intents: creates("B"), unlinks: 0 })).toMatchObject({
+      ok: false,
+      holds: ["guard_backlog"],
+    });
+    expect(acceptances().pending("b")).toEqual([]);
+    expect(keys()).toContain("acceptance.changed");
+    holds().accept("b", "guard_backlog");
+    expect(limits().admit("b", { intents: creates("B"), unlinks: 0 })).toEqual({
+      ok: true,
+      accepted: ["guard_backlog"],
+    });
+  });
+
+  it("an opaque anomaly (a hold of 0.5, a bare count) lets nothing through: asked again; other holds only lift", () => {
     holds().set("b", "guard_mass_unlink", { links: 20, unlinks: 5 });
     holds().set("b", "helper_stall", { stalls: 2 });
     expect(holds().accept("b", "guard_mass_unlink")).toBe(true);
@@ -226,10 +283,24 @@ describe("other snapshots", () => {
       acceptances()
         .pending("b")
         .map((a) => [a.reason, a.kind]),
-    ).toEqual([["guard_mass_unlink", "count"]]);
-    expect(limits().admit("b", { intents: [], unlinks: deleted(0, 1, 2, 3, 4) })).toMatchObject({
+    ).toEqual([["guard_mass_unlink", "opaque"]]);
+    // Below the threshold too: no data to compare, changed.
+    expect(limits().admit("b", { intents: [], unlinks: deleted(0, 1) })).toMatchObject({
+      ok: false,
+      holds: ["guard_mass_unlink"],
+    });
+    expect(anomaly("guard_mass_unlink").kind).toBe("set");
+    holds().accept("b", "guard_mass_unlink");
+    expect(limits().admit("b", { intents: [], unlinks: deleted(0, 1) })).toMatchObject({
       ok: true,
       accepted: ["guard_mass_unlink"],
+    });
+    // countDrop() knows only the counts: opaque, never consumed while it fires.
+    expect(limits().countDrop("b", "apple", 10, 2)).toBe(true);
+    expect(anomaly("guard_count_drop")).toMatchObject({ kind: "opaque", items: [] });
+    holds().accept("b", "guard_count_drop");
+    expect(limits().admit("b", { intents: [], unlinks: 0 }, ["guard_count_drop"])).toMatchObject({
+      ok: false,
     });
   });
 

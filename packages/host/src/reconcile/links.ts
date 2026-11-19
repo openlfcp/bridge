@@ -146,13 +146,36 @@ export class LinkApplier {
       else if (t.kind === "apple_missing" && where?.kind === "absent")
         unlinks.push({ taskId: t.taskId, cause: "deleted_in_apple", ...externalId() });
     }
+    // What guard_count_drop holds: the links `linked` now that this plan no longer counts, per side
+    // (as the plan counts linkedLfcp / linkedApple).
+    const linkedNow = new Set(
+      (
+        db
+          .prepare("SELECT task_id FROM links WHERE binding_id = ? AND state = 'linked'")
+          .all(bindingId) as { task_id: string }[]
+      ).map((r) => r.task_id),
+    );
+    const lfcpGone = new Set<string>();
+    const appleGone = new Set<string>();
+    for (const t of plan.transitions)
+      if (t.kind === "task_gone" || t.kind === "out_of_filter" || t.kind === "quarantine")
+        lfcpGone.add(t.taskId);
+      else if (t.kind === "apple_missing") appleGone.add(t.taskId);
+    for (const w of plan.waiting)
+      if (w.waiting === "apple_incomplete") appleGone.add(w.taskId);
+      else lfcpGone.add(w.taskId);
+    for (const id of lfcpGone) appleGone.add(id);
+    const uncounted = {
+      apple: [...appleGone].filter((id) => linkedNow.has(id)),
+      lfcp: [...lfcpGone].filter((id) => linkedNow.has(id)),
+    };
     // From the admission to the prepared intents, one transaction (all of it is synchronous): an
     // acceptance this pass consumes (A§7.1) is consumed with its work, or stays pending.
     return db
       .transaction((): LinkApplyResult => {
         const admitted = new Limits(db, undefined, this.#now).admit(
           bindingId,
-          { intents: plan.intents, unlinks },
+          { intents: plan.intents, unlinks, uncounted },
           o.guards?.includes("guard_count_drop") ? ["guard_count_drop"] : [],
         );
         const stopped: HoldReason[] = admitted.ok ? [] : [...admitted.holds];

@@ -124,6 +124,36 @@ describe("E5: deleted or moved in Apple → unlinked (B4); many at once → hold
     ]);
   });
 
+  it("A§7.1: a failure after part of the accepted pass was prepared rolls all of it back; the acceptance waits", async () => {
+    b = await bridge();
+    const tasks = [];
+    for (const t of ["A", "B", "C", "D", "E"]) tasks.push(await b.task(t));
+    await b.sync();
+    for (const r of b.reminders().filter((x) => x.title !== "E")) b.person.delete(r.ref);
+    b.person.create(b.list.id, "New in Reminders");
+    expect((await b.sync()).applied).toMatchObject({ kind: "held" });
+    const holds = new Holds(b.db);
+    for (const h of holds.of("b")) holds.accept("b", h.reason);
+    // The import's pending link fails after its intent was prepared and the unlinks applied.
+    b.db.exec(
+      "CREATE TRIGGER abort_pending AFTER INSERT ON links BEGIN SELECT RAISE(ABORT, 'abort'); END",
+    );
+    await expect(b.sync()).rejects.toThrow(/abort/);
+    for (const t of tasks) expect(b.link(t.id)?.state).toBe("linked");
+    const imports = "SELECT count(*) AS n FROM intents WHERE kind = 'create_task'";
+    expect(b.db.prepare(imports).get()).toEqual({ n: 0 });
+    expect(b.db.prepare("SELECT DISTINCT state FROM acceptances").all()).toEqual([
+      { state: "pending" },
+    ]);
+    b.db.exec("DROP TRIGGER abort_pending");
+    expect((await b.sync()).applied.kind).toBe("applied");
+    expect(tasks.filter((t) => b.link(t.id)?.state === "unlinked")).toHaveLength(4);
+    expect(b.db.prepare(imports).get()).toEqual({ n: 1 });
+    expect(b.db.prepare("SELECT DISTINCT state FROM acceptances").all()).toEqual([
+      { state: "consumed" },
+    ]);
+  });
+
   it("in strict mode (24 h after approve) more than one is already a hold", async () => {
     b = await bridge({ strict: true });
     const a = await b.task("A");

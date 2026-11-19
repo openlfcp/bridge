@@ -101,8 +101,8 @@ export class Holds {
    * `resume --accept <hold>`, the answer [Yes] (A§7.1, E18): lifts the hold and accepts the
    * anomaly it held — its snapshot (the hold's detail `anomaly`) becomes a pending acceptance,
    * checked by every admission of the binding's plans (Limits.admit). A guard's hold without a
-   * snapshot (set by 0.5, or by a guard without items) is accepted as a `count` anomaly. True when
-   * the hold was set.
+   * snapshot (set by 0.5) is accepted as an `opaque` anomaly, which lets nothing through: the next
+   * pass that fires it asks again. True when the hold was set.
    */
   accept(binding: string, reason: HoldReason, o: { readonly answerId?: string } = {}): boolean {
     check(reason);
@@ -112,12 +112,11 @@ export class Holds {
         // (review PR 9b #24).
         const held = this.of(binding).find((h) => h.reason === reason);
         if (held === undefined || !this.lift(binding, reason)) return false;
-        const at = iso(this.now());
         if (reason.startsWith("guard_")) {
-          const snap = anomalyOf(held.detail) ?? snapshot(binding, reason, "count");
+          const snap = anomalyOf(held.detail) ?? snapshot(binding, reason, "opaque");
           new Acceptances(this.db, this.now).record(snap, o.answerId);
         }
-        this.markAccepted(binding, reason, at);
+        this.markAccepted(binding, reason, iso(this.now()));
         return true;
       })
       .immediate();
