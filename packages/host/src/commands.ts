@@ -163,6 +163,61 @@ export interface CliEnvironment {
   readonly support?: { readonly uid?: number; readonly peerUid?: PeerUid };
 }
 
+/** A person's decision on an unknown bootstrap outcome (A§7.3), in either syntax. */
+const BIND_USAGE =
+  "lfcp-bridge bind --resolve-list <binding> <list id>|none | --resolve-marker <binding> <marker id>|none | --retry-marker <binding>";
+
+/**
+ * `bind` on an existing binding. A§7.3 (0.6): `--resolve-list <b> <listId|none>`,
+ * `--resolve-marker <b> <markerId|none>`, `--retry-marker <b>`. 0.5, still accepted:
+ * `--binding <b> --resolve-list <id>`, `--binding <b> --resolve-marker <id>`,
+ * `--binding <b> --retry-marker`, and `--binding <b>` alone (continue the bootstrap).
+ * undefined: not a decision (`bind <section>` binds a new one).
+ */
+function bindDecision(
+  positional: readonly string[],
+  opts: ReadonlyMap<string, string | true>,
+):
+  | {
+      readonly bindingId: string;
+      readonly kind: "resolve-list" | "resolve-marker" | "retry-marker" | "resume";
+      readonly choice?: string;
+    }
+  | undefined {
+  const kinds = ["resolve-list", "resolve-marker", "retry-marker"] as const;
+  const binding = opts.get("binding");
+  if (typeof binding === "string") {
+    for (const kind of kinds) {
+      const v = opts.get(kind);
+      if (v === undefined) continue;
+      return {
+        bindingId: binding,
+        kind,
+        ...(typeof v === "string" ? { choice: v } : {}),
+      };
+    }
+    return { bindingId: binding, kind: "resume" };
+  }
+  for (const kind of kinds) {
+    const v = opts.get(kind);
+    if (v === undefined) continue;
+    // The binding is the option's value; a missing one is a usage error, never `bind <section>`.
+    return {
+      bindingId: typeof v === "string" ? v : "",
+      kind,
+      ...(positional[0] === undefined ? {} : { choice: positional[0] }),
+    };
+  }
+  return undefined;
+}
+
+/** Only these `bind`s go through support.sock: binding a section is the plugin's (A§7.3). */
+function isBindDecision(args: readonly string[]): boolean {
+  const { positional, opts } = options(args);
+  const d = bindDecision(positional, opts);
+  return d !== undefined && d.kind !== "resume";
+}
+
 /** --name value / --flag parsing for the commands below. */
 function options(args: readonly string[]): {
   positional: string[];
@@ -339,16 +394,13 @@ async function supportCommand(
 ): Promise<ExitCode> {
   const [name = "", sub] = argv;
   const journal = new Journal(rt.db, Date.now, undefined, SUPPORT_AUTHOR);
-  const bindOpts = ["resolve-list", "resolve-marker", "retry-marker"];
   let code: ExitCode;
   if (!SUPPORT_COMMANDS.includes(name)) {
     io.err(`not a support command: ${name} (${SUPPORT_COMMANDS.join(", ")})`);
     code = EXIT.USAGE;
-  } else if (name === "bind" && !bindOpts.some((k) => options(argv.slice(1)).opts.has(k))) {
-    code = usage(
-      io,
-      "lfcp-bridge bind --binding <binding> --resolve-list <id>|none | --resolve-marker <id>|none | --retry-marker",
-    );
+  } else if (name === "bind" && !isBindDecision(argv.slice(1))) {
+    // Only decisions on an unknown outcome (A§7.3): binding a section is the plugin's.
+    code = usage(io, BIND_USAGE);
   } else {
     const support: Runtime = {
       ...rt,
@@ -394,16 +446,12 @@ function bindResult(r: BindOutcome, env: CliEnvironment): ExitCode {
               r.candidates ?? []
             )
               .map((c) => `  ${c.id}  ${c.title}`)
-              .join(
-                "\n",
-              )}\nChoose: lfcp-bridge bind --binding ${r.bindingId} --resolve-list <id>|none`
+              .join("\n")}\nChoose: lfcp-bridge bind --resolve-list ${r.bindingId} <id>|none`
           : `binding ${r.bindingId}: whether the ownership marker was written is unknown. Markers with its url in the list:\n${(
               r.markers ?? []
             )
               .map((m) => `  ${m.ref.id ?? m.ref.externalId}  ${m.title}`)
-              .join(
-                "\n",
-              )}\nChoose: lfcp-bridge bind --binding ${r.bindingId} --resolve-marker <id>|none`,
+              .join("\n")}\nChoose: lfcp-bridge bind --resolve-marker ${r.bindingId} <id>|none`,
       );
       return EXIT.NEEDS_PERSON;
     case "refused":
@@ -600,16 +648,20 @@ async function run(
         instanceId: rt.config.bridgeInstanceId,
         stopped,
       });
-      const bindingId = opts.get("binding");
-      if (typeof bindingId === "string") {
-        const choice = opts.get("resolve-list");
-        if (typeof choice === "string")
-          return bindResult(await boot.resolveList(bindingId, choice), env);
-        const marker = opts.get("resolve-marker");
-        if (typeof marker === "string")
-          return bindResult(await boot.resolveMarker(bindingId, marker), env);
-        if (opts.get("retry-marker") === true)
-          return bindResult(await boot.retryMarker(bindingId), env);
+      const decision = bindDecision(positional, opts);
+      if (decision !== undefined) {
+        const { bindingId, kind, choice } = decision;
+        if (bindingId === "") return usage(env, BIND_USAGE);
+        if (kind === "resolve-list" || kind === "resolve-marker") {
+          if (choice === undefined) return usage(env, BIND_USAGE);
+          return bindResult(
+            await (kind === "resolve-list"
+              ? boot.resolveList(bindingId, choice)
+              : boot.resolveMarker(bindingId, choice)),
+            env,
+          );
+        }
+        if (kind === "retry-marker") return bindResult(await boot.retryMarker(bindingId), env);
         return bindResult(await boot.resume(bindingId), env);
       }
       const section = name === "verify" ? opts.get("section") : positional[0];
