@@ -10,7 +10,7 @@ import { supportClient } from "../../src/app/client.js";
 import { SUPPORT_SOCKET } from "../../src/app/support.js";
 import type { BootstrapTransport } from "../../src/bootstrap.js";
 import { EXIT, main } from "../../src/index.js";
-import type { Runtime } from "../../src/runtime.js";
+import type { RunningProcess, Runtime } from "../../src/runtime.js";
 
 const UID = process.getuid?.() ?? 501;
 
@@ -33,11 +33,16 @@ export interface SupportHost {
 /**
  * The host of `run --app` over `rt` (its data directory, database, config), with `transport` as
  * the run process's. `connected` is the run process's server connection (doctor's "server").
+ * `process` starts a real run process instead (a BridgeProcess: its passes, gates and control
+ * look), for scenarios whose completion is the work going on after the command.
  */
 export async function supportHost(
   rt: Runtime,
   transport: BootstrapTransport,
-  o: { readonly connected?: () => boolean | undefined } = {},
+  o: {
+    readonly connected?: () => boolean | undefined;
+    readonly process?: () => Promise<RunningProcess>;
+  } = {},
 ): Promise<SupportHost> {
   let opened = 0;
   const runtime: Runtime = {
@@ -46,12 +51,14 @@ export async function supportHost(
       opened++;
       throw new Error("a support command opened a second transport");
     },
-    startProcess: async () => ({
-      stop: async () => {},
-      transport,
-      exclusive: <T>(fn: () => Promise<T>) => fn(),
-      connected: o.connected ?? (() => undefined),
-    }),
+    startProcess:
+      o.process ??
+      (async () => ({
+        stop: async () => {},
+        transport,
+        exclusive: <T>(fn: () => Promise<T>) => fn(),
+        connected: o.connected ?? (() => undefined),
+      })),
     // The test owns the database.
     close: async () => {},
   };
