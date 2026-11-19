@@ -4,7 +4,9 @@
 #   2. the host runs: node + bridge.mjs run --app from the bundle, child of the shell, said hello;
 #   3. control: Pause syncing writes STOP, Resume removes it (so step 5's check can fail);
 #   4. lfcp-bridge:// reaches the host, and the URL is in no log or data file;
-#   5. shutdown{reason:update}: the host exits 0, the app exits, no STOP, nothing restarts.
+#   5. shutdown{reason:update}: the host exits 0, the app exits, no STOP;
+#   6. the same under launchd (kickstart of the SMAppService agent): not restarted for 45 s, longer
+#      than its ThrottleInterval.
 #
 #   scripts/app/smoke.sh <LFCP Bridge.app built with TEST_HOOKS=1>   (copies it to /Applications)
 #
@@ -135,9 +137,33 @@ grep -qF "app: shutting down (update)" "$LOGS/host.log" || fail "host.log has no
 grep -qF "host: exited after shutdown (0)" "$LOGS/shell.log" || fail "shell.log has no exit after shutdown"
 [ ! -e "$DATA/run.lock" ] || fail "run.lock left behind"
 sleep 5
-[ "$(app_count)" = 0 ] || fail "LFCP Bridge runs again after a clean exit"
+[ "$(app_count)" = 0 ] || fail "LFCP Bridge runs again 5 s after a clean exit"
 pgrep -f "$APP/Contents/Resources/node/bin/node" >/dev/null && fail "a host still runs"
-ok "nothing restarted after the clean exit"
+ok "no copy runs 5 s after the clean exit of the copy started by open"
+
+echo "== 6. under launchd: a clean exit is final (KeepAlive {SuccessfulExit:false}, ThrottleInterval 30)"
+LABEL="gui/$(id -u)/org.openlfcp.bridge.agent"
+launchctl kickstart "$LABEL" || fail "launchctl kickstart $LABEL"
+wait_until 60 "the app under launchd: host hello and a settled status" report_has \
+  '.host.hello != "" and (.host.state == "running" or .host.state == "unavailable")'
+AGENT_PID="$(jq -r .pid "$R")"
+launchctl print "$LABEL" | grep -Eq "^[[:space:]]*pid = $AGENT_PID\$" ||
+  fail "pid $AGENT_PID is not the agent's process: $(launchctl print "$LABEL" | grep -E 'pid =|state =')"
+ok "the agent's process is the app (pid $AGENT_PID)"
+AGENT_HOST="$(jq -r .host.pid "$R")"
+touch "$HOOKS/shutdown-update"
+wait_until 90 "the agent's app exited" bash -c "! kill -0 $AGENT_PID 2>/dev/null"
+check "host exited 0 under launchd" '.shutdown.reason == "update" and .shutdown.hostExit == 0'
+wait_until 10 "its host exited" bash -c "! kill -0 $AGENT_HOST 2>/dev/null"
+[ ! -e "$DATA/STOP" ] || fail "shutdown{update} wrote STOP"
+# Longer than ThrottleInterval (30 s) with a margin: launchd would have started it again by now.
+sleep 45
+[ "$(app_count)" = 0 ] || fail "launchd started LFCP Bridge again after a clean exit"
+if launchctl print "$LABEL" | grep -Eq "^[[:space:]]*pid = "; then
+  fail "the agent runs again: $(launchctl print "$LABEL" | grep -E 'pid =|state =')"
+fi
+echo "SMOKE info: $(launchctl print "$LABEL" | grep -E 'last exit code' | head -1 | xargs)"
+ok "45 s after the agent's clean exit, launchd has not started it again"
 
 if grep -rlaF "$SECRET" "$LOGS" "$DATA"; then fail "the URL's secret is in the files above"; fi
 echo "== SMOKE: all checks passed"
