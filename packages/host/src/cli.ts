@@ -2,7 +2,12 @@
 // lfcp-bridge: the command line of the bridge (D-010 §2).
 
 import { readFileSync } from "node:fs";
+import { initializeAutomerge } from "@openlfcp/shared-objects";
 import { main } from "./commands.js";
+
+// The .app's bundle carries Automerge's /slim entry (scripts/bundle-host.mjs): its wasm is ready
+// only after this. From node_modules it is ready on import and this does nothing.
+await initializeAutomerge();
 
 const argv = process.argv.slice(2);
 // `run --app` (src/app/serve.ts): stdout is the shell's channel, so every other line goes to stderr.
