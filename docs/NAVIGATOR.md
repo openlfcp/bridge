@@ -21,6 +21,7 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 |---|---|---|
 | `src/cli.ts`, `src/commands.ts`, `src/exit.ts` | the command table and exit codes; later commands answer "not available in this build" | 1 |
 | `src/self-test.ts` | `bridge.mjs --self-test` of the packaged host (T§2 L5): the bundle's node and better-sqlite3, sqlite (WAL), Automerge, helper `ping` (memory backend) | E-005 |
+| `src/artifact/manifest.ts` | the detached artifact manifest (A§9.1): canonical JSON, Ed25519, shape, bundle walk, Mach-O slices, comparison with a bundle; built by `release.yml`, read by the write gate | E-052 |
 | `src/db/` | `bridge.sqlite` on better-sqlite3 (WAL, synchronous=FULL, foreign keys): `schema.ts` (migrations over `user_version`, each with its `down`), `database.ts` (open, `migrateTo`, newer schema refused), `holds.ts` (a set per binding), `journal.ts`, `stop.ts` (the STOP file) | 2 |
 | `src/lfcp/section-host.ts` | SectionHost: one SyncClient per coordinator (with the SDK's 429 upgrade probe); restore/rebuild of checkpoints, applier, snapshot binding (load only, never publish), sync driver, outbound; `commitGuarded` is the only commit; `onNodesChanged`; `isLive` / `generation` | 3a |
 | `src/lfcp/commit-guard.ts` | the atomic basis check (§5.8): a wrapper of `CommitBinding.stage` with a guard registry by array object; unguarded stage → `UnguardedCommitError`, failed check → `BasisChangedError` | 3a |
@@ -84,6 +85,7 @@ SDK's bridge API directly, with no fallbacks of its own: `openNodeInstallation`
 | `unit` | vitest |
 | `helper` (`helper.yml`) | HelperCore tests, the app, smoke, sign-dev tests, the sign-release dry run, SwiftPM |
 | `helper-protocol` (`helper.yml`) | `transport-eventkit` against the helper (memory backend): unit tests, `transportContract`, open + FIFO |
+| `build`, `draft` (`release.yml`) | the release chain (`docs/devel/release-chain.md`): sign, notarize (Developer ID), manifest, DMG, draft release |
 | `swift-test`, `smoke` (`app.yml`) | the shell's `swift test`; L5 smoke of a development `.app` (`scripts/app/smoke.sh`) |
 | `crash`, `e2e` | with PRs 7, 9 |
 
@@ -91,6 +93,7 @@ SDK's bridge API directly, with no fallbacks of its own: `openNodeInstallation`
 
 | Document | What |
 |---|---|
+| `docs/devel/release-chain.md` | the release chain (E-052): `release.yml` order, dry-run vs Developer ID, secrets of the environment `release`, the artifact manifest |
 | `docs/devel/testing/helper-live-checklist.md` | the owner's live EventKit check of the helper (TCC, `live-check.mjs`, `sign-dev.sh`), linked to the R-001 live run |
 | `docs/devel/testing/verification-run.md` | the owner's first live run of the bridge (R-023): pair, verify, dry-run, approve, run, the checklist on iPhone and in Obsidian |
 
@@ -114,8 +117,10 @@ SDK's bridge API directly, with no fallbacks of its own: `openNodeInstallation`
 |---|---|
 | `scripts/bundle-host.mjs` | the host as one ESM file for the app (esbuild; better-sqlite3 external, Automerge `/slim` with its wasm inlined, initialized by `cli.ts`) |
 | `scripts/app/build-dev-app.sh`, `scripts/app/smoke.sh` | a development `LFCP Bridge.app` (native slice, ad-hoc; `TEST_HOOKS=1` for the smoke's hooks) and its L5 smoke |
-| `scripts/app/package-app.sh`, `scripts/app/node-darwin.sha256` | the release `LFCP Bridge.app` and its DMG: universal, Node pinned by `.node-version` and these SHA-256, better-sqlite3 subtree, signed inside out (ad-hoc or `SIGN_IDENTITY`), Sparkle keys in `Info.plist` |
+| `scripts/app/package-app.sh`, `scripts/app/make-dmg.sh`, `scripts/app/node-darwin.sha256` | the release `LFCP Bridge.app` and its DMG (`PACKAGE_DMG=0`: the app only, for `release.yml`): universal, Node pinned by `.node-version` and these SHA-256, better-sqlite3 subtree, signed inside out (ad-hoc or `SIGN_IDENTITY`), Sparkle keys in `Info.plist` |
 | `scripts/app/check-app.sh`, `scripts/app/check-no-test-hooks.sh` | T§2 L5 on the packaged app where it lies: Info.plist, universal Mach-O loadable on 15.0, signature and entitlements, Node and ABI, no test hooks, `bridge.mjs --self-test` |
+| `scripts/release/artifact-manifest.mjs` | the artifact manifest (A§9.1): `keygen`, `build` after the staple, `cdhashes` before/after, `check` of a bundle against it |
+| `scripts/release/signing-keychain.sh`, `scripts/release/notarize.sh` | `release.yml`'s throwaway keychain (Developer ID from secrets, or a self-signed Dev identity) and notarytool + stapler |
 | `scripts/sdk-ts-pack.mjs` | the SDK pin: packs the eight `@openlfcp/*` packages of the sdk-ts commit in `sdk-ts.lock` into `vendor/sdk-ts/`, byte-identical on every system (`docs/devel/sdk-pin.md`); `--self-test` |
 | `scripts/check-release-deps.mjs` | refuses a release whose SDK is not exact npm versions (`sdk-ts.lock`, `file:`/`link:`, overrides); run by `sign-release.sh` and by `app.yml` on tags, for E-052 |
 | `scripts/bridge-db.mjs` | `status` / `backup` / `migrate --to <N>` of `bridge.sqlite` (up and down; needs STOP and no `run`; backs up to a new file first, never over one); `--self-test` |
