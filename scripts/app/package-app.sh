@@ -35,6 +35,7 @@ WORK="$OUT/work"
 ARCHS=(arm64 x86_64)
 MIN_MACOS=15.0
 VERSION="${VERSION:-$(node -p 'require(process.argv[1]).version' "$ROOT/packages/host/package.json")}"
+BUILD_NUMBER="${BUILD_NUMBER:-1}"
 IDENTITY="${SIGN_IDENTITY:--}"
 DMG="$OUT/LFCP-Bridge-$VERSION.dmg"
 
@@ -69,7 +70,7 @@ P="$C/Info.plist"
 cp "$ROOT/app/Support/Info.plist" "$P"
 pb() { /usr/libexec/PlistBuddy -c "$1" "$P"; }
 pb "Set :CFBundleShortVersionString $VERSION"
-pb "Set :CFBundleVersion ${BUILD_NUMBER:-1}"
+pb "Set :CFBundleVersion $BUILD_NUMBER"
 if [ -n "${SU_FEED_URL:-}" ]; then pb "Add :SUFeedURL string $SU_FEED_URL"; fi
 if [ -n "${SU_PUBLIC_ED_KEY:-}" ]; then pb "Add :SUPublicEDKey string $SU_PUBLIC_ED_KEY"; fi
 plutil -lint "$P" >/dev/null
