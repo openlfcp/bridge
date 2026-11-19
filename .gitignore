@@ -11,3 +11,6 @@ app/.build/
 # TypeScript incremental build
 *.tsbuildinfo
 .tsbuildinfo
+
+# The SDK packed from the commit in sdk-ts.lock (scripts/sdk-ts-pack.mjs)
+/vendor/

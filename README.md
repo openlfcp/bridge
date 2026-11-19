@@ -86,15 +86,16 @@ adapter's `transport` and `capabilities`.
 Node 24 (`.node-version`) and pnpm 10.
 
 ```sh
-pnpm install
+node scripts/sdk-ts-pack.mjs   # the SDK pin: needs a clone of openlfcp/sdk-ts in ../sdk-ts
+pnpm install --frozen-lockfile
 pnpm build        # tsc -b
 pnpm lint         # biome, package boundaries
 pnpm typecheck    # tsc -b, and the tests' types
 pnpm test         # vitest
 ```
 
-The LFCP SDK comes from npm at exact versions (`@openlfcp/*` 0.6.0, pinned for transitive
-dependencies too by `pnpm.overrides`).
+Until `@openlfcp/*` 0.7.0 is on npm, the LFCP SDK is built from the sdk-ts commit in
+`sdk-ts.lock` and packed into `vendor/sdk-ts/`: [docs/devel/sdk-pin.md](docs/devel/sdk-pin.md).
 
 ## License
 

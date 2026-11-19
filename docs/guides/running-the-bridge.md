@@ -41,7 +41,9 @@ You need:
 - Node 24 (`.node-version`) and pnpm 10 (`corepack enable`).
 
 ```sh
+git clone https://github.com/openlfcp/sdk-ts.git sdk-ts   # the SDK pin (docs/devel/sdk-pin.md)
 git clone https://github.com/openlfcp/bridge.git && cd bridge
+node scripts/sdk-ts-pack.mjs
 pnpm install --frozen-lockfile
 pnpm build
 alias lfcp-bridge="node $PWD/packages/host/dist/cli.js"
@@ -169,7 +171,8 @@ lfcp-bridge doctor                            # what blocks, and what to do
 3. Update and build:
 
    ```sh
-   git pull && pnpm install --frozen-lockfile && pnpm build
+   git pull && git -C ../sdk-ts fetch && node scripts/sdk-ts-pack.mjs &&
+     pnpm install --frozen-lockfile && pnpm build
    ```
 
 4. If the helper changed (`helper/` in the diff), rebuild and sign it, then copy it to

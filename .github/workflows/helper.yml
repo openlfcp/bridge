@@ -2,9 +2,9 @@ name: helper
 
 on:
   push:
-    paths: ["helper/**", "packages/reminders/**", "packages/transport-eventkit/**", "package.json", "pnpm-lock.yaml", "tsconfig*.json", "vitest.config.ts", ".github/workflows/helper.yml"]
+    paths: ["helper/**", "packages/reminders/**", "packages/transport-eventkit/**", "package.json", "pnpm-lock.yaml", "sdk-ts.lock", "scripts/sdk-ts-pack.mjs", "tsconfig*.json", "vitest.config.ts", ".github/workflows/helper.yml"]
   pull_request:
-    paths: ["helper/**", "packages/reminders/**", "packages/transport-eventkit/**", "package.json", "pnpm-lock.yaml", "tsconfig*.json", "vitest.config.ts", ".github/workflows/helper.yml"]
+    paths: ["helper/**", "packages/reminders/**", "packages/transport-eventkit/**", "package.json", "pnpm-lock.yaml", "sdk-ts.lock", "scripts/sdk-ts-pack.mjs", "tsconfig*.json", "vitest.config.ts", ".github/workflows/helper.yml"]
 
 jobs:
   helper:
@@ -45,11 +45,25 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
+      # The TypeScript SDK: until @openlfcp/* 0.7.0 is on npm, the eight packages of
+      # openlfcp/sdk-ts at the commit in sdk-ts.lock, packed by scripts/sdk-ts-pack.mjs into
+      # vendor/sdk-ts/; pnpm-lock.yaml holds each tarball's integrity (docs/devel/sdk-pin.md).
+      - id: sdk-ts-lock
+        run: echo "commit=$(jq -er .commit sdk-ts.lock)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          repository: openlfcp/sdk-ts
+          ref: ${{ steps.sdk-ts-lock.outputs.commit }}
+          # Under vendor/ (gitignored): out of biome's and the boundary check's way.
+          path: vendor/sdk-ts-src
+          # Only what the packages build from (with the root files).
+          sparse-checkout: packages
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .node-version
           cache: pnpm
+      - run: node scripts/sdk-ts-pack.mjs --checkout vendor/sdk-ts-src
       - run: pnpm install --frozen-lockfile
       - name: Build the helper app (native architecture)
         working-directory: helper

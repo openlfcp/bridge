@@ -5,13 +5,14 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@openlfcp/client': 0.6.0
-  '@openlfcp/core': 0.6.0
-  '@openlfcp/crypto': 0.6.0
-  '@openlfcp/shared-objects': 0.6.0
-  '@openlfcp/storage': 0.6.0
-  '@openlfcp/storage-node': 0.6.0
-  '@openlfcp/wire': 0.6.0
+  '@openlfcp/core': file:vendor/sdk-ts/openlfcp-core-0.6.0.tgz
+  '@openlfcp/crypto': file:vendor/sdk-ts/openlfcp-crypto-0.6.0.tgz
+  '@openlfcp/storage': file:vendor/sdk-ts/openlfcp-storage-0.6.0.tgz
+  '@openlfcp/wire': file:vendor/sdk-ts/openlfcp-wire-0.6.0.tgz
+  '@openlfcp/storage-idb': file:vendor/sdk-ts/openlfcp-storage-idb-0.6.0.tgz
+  '@openlfcp/shared-objects': file:vendor/sdk-ts/openlfcp-shared-objects-0.6.0.tgz
+  '@openlfcp/client': file:vendor/sdk-ts/openlfcp-client-0.6.0.tgz
+  '@openlfcp/storage-node': file:vendor/sdk-ts/openlfcp-storage-node-0.6.0.tgz
 
 importers:
 
@@ -45,30 +46,30 @@ importers:
         specifier: workspace:*
         version: link:../transport-eventkit
       '@openlfcp/client':
-        specifier: 0.6.0
-        version: 0.6.0
+        specifier: file:../../vendor/sdk-ts/openlfcp-client-0.6.0.tgz
+        version: file:vendor/sdk-ts/openlfcp-client-0.6.0.tgz
       '@openlfcp/core':
-        specifier: 0.6.0
-        version: 0.6.0
+        specifier: file:../../vendor/sdk-ts/openlfcp-core-0.6.0.tgz
+        version: file:vendor/sdk-ts/openlfcp-core-0.6.0.tgz
       '@openlfcp/shared-objects':
-        specifier: 0.6.0
-        version: 0.6.0
+        specifier: file:../../vendor/sdk-ts/openlfcp-shared-objects-0.6.0.tgz
+        version: file:vendor/sdk-ts/openlfcp-shared-objects-0.6.0.tgz
       '@openlfcp/storage':
-        specifier: 0.6.0
-        version: 0.6.0
+        specifier: file:../../vendor/sdk-ts/openlfcp-storage-0.6.0.tgz
+        version: file:vendor/sdk-ts/openlfcp-storage-0.6.0.tgz
       '@openlfcp/storage-node':
-        specifier: 0.6.0
-        version: 0.6.0
+        specifier: file:../../vendor/sdk-ts/openlfcp-storage-node-0.6.0.tgz
+        version: file:vendor/sdk-ts/openlfcp-storage-node-0.6.0.tgz
       better-sqlite3:
         specifier: 13.0.3
         version: 13.0.3
     devDependencies:
       '@openlfcp/crypto':
-        specifier: 0.6.0
-        version: 0.6.0
+        specifier: file:../../vendor/sdk-ts/openlfcp-crypto-0.6.0.tgz
+        version: file:vendor/sdk-ts/openlfcp-crypto-0.6.0.tgz
       '@openlfcp/wire':
-        specifier: 0.6.0
-        version: 0.6.0
+        specifier: file:../../vendor/sdk-ts/openlfcp-wire-0.6.0.tgz
+        version: file:vendor/sdk-ts/openlfcp-wire-0.6.0.tgz
       '@types/better-sqlite3':
         specifier: 9.6.0
         version: 9.6.0
@@ -325,33 +326,40 @@ packages:
     resolution: {integrity: sha512-+P9981IiAnVh+rmcubozzVwrEy3XsN/tMhTnvsjV9VDaYpOnNCqWqKo2FLWxbu92YHfjGIlE5XnW175UK+ln+Q==}
     engines: {node: '>= 20.19.0'}
 
-  '@openlfcp/client@0.6.0':
-    resolution: {integrity: sha512-+kNMSNHcWD3Vszfvmp+vvxgOG9Krm27L6nELpcn9slLEfFHGmGhKNxobcuRJkwh7P8nGlpZZv3/nTGXDohzR8Q==}
+  '@openlfcp/client@file:vendor/sdk-ts/openlfcp-client-0.6.0.tgz':
+    resolution: {integrity: sha512-4sJr9f3At0N0X+YJsTvwGCZtgGy+j8QBWS/Sq2+uK8aAP+3S3Go3qp+S8tW94SEFceNCqqHHZ6uPUGYRyzpeIw==, tarball: file:vendor/sdk-ts/openlfcp-client-0.6.0.tgz}
+    version: 0.6.0
     engines: {node: '>=24'}
 
-  '@openlfcp/core@0.6.0':
-    resolution: {integrity: sha512-Z6teKBLA67D2qu9QHcboKLdfzuzTxgThh5GGVWY8KlTifjeBEQCVZmQ6XZeV68uC9N8p03LL1wk0cKddMaL45g==}
+  '@openlfcp/core@file:vendor/sdk-ts/openlfcp-core-0.6.0.tgz':
+    resolution: {integrity: sha512-bCQV40VqO1/1sJtqkUdqBo1sWg7e5NkzEihY033n2SOxz6czqIzEomSZX9kZU1LSZ2rlhRnuBktutm4toC8YNA==, tarball: file:vendor/sdk-ts/openlfcp-core-0.6.0.tgz}
+    version: 0.6.0
     engines: {node: '>=24'}
 
-  '@openlfcp/crypto@0.6.0':
-    resolution: {integrity: sha512-2ls83SAJC2Z99LxKZc85D9uFJK2hHJ1av8N6gCN2h+0NIJj8z2vX6Gg8XH6lxo3laCx9A3sO6oWY1levWo6TmA==}
+  '@openlfcp/crypto@file:vendor/sdk-ts/openlfcp-crypto-0.6.0.tgz':
+    resolution: {integrity: sha512-cd0JmGwFAfsOZBiMcmjH32XMUrNjgHUiHAV9gG9OeUlrS92wJGULwlrPQ3NiF9+Sv0oUgFNP4B1EhRFwEXlLuw==, tarball: file:vendor/sdk-ts/openlfcp-crypto-0.6.0.tgz}
+    version: 0.6.0
     engines: {node: '>=24'}
 
-  '@openlfcp/shared-objects@0.6.0':
-    resolution: {integrity: sha512-pGRIAOo+nDb7Kk9ZD6ufo/TapFFu0R1R2nlsXk9Tejk9HOyqqRxWeJgkqefx0Ih3s6Veig6xjg/gxTqShkEhzw==}
+  '@openlfcp/shared-objects@file:vendor/sdk-ts/openlfcp-shared-objects-0.6.0.tgz':
+    resolution: {integrity: sha512-wl6BIQe1SqI5bHGYQyyVqFW8jVTfeEfP66JfKb8ExDbT4ym0669oFIH9NtmMGBpjhhRLnChgvr4f+SVsd39V4Q==, tarball: file:vendor/sdk-ts/openlfcp-shared-objects-0.6.0.tgz}
+    version: 0.6.0
     engines: {node: '>=24'}
 
-  '@openlfcp/storage-node@0.6.0':
-    resolution: {integrity: sha512-2JGHqHjaFhkpkB72sMv7NTxstHhic6wovdgtOb9+7buZo6OKAkAeiSU2zbTzXiu9BeP844desQSupCE0XWAUhw==}
+  '@openlfcp/storage-node@file:vendor/sdk-ts/openlfcp-storage-node-0.6.0.tgz':
+    resolution: {integrity: sha512-SBAfwloQYdkO/MsUX44mO3Wwrry4rKNdSFmAtEE0QvAyFeiqmlsVOUplKOPDrib7Lw9kvqK/n50SlHvjsjv5jA==, tarball: file:vendor/sdk-ts/openlfcp-storage-node-0.6.0.tgz}
+    version: 0.6.0
     engines: {node: '>=24'}
     hasBin: true
 
-  '@openlfcp/storage@0.6.0':
-    resolution: {integrity: sha512-1kxzyOlWyyBQhhc5An2WpZcYAGc3K9PwByuscTXqG0KVlm1gqASZUrDHNmaM4LavWt+9cVeFn6Au7ubpbrNicA==}
+  '@openlfcp/storage@file:vendor/sdk-ts/openlfcp-storage-0.6.0.tgz':
+    resolution: {integrity: sha512-BvpG5zFM+fbTZCKMpJ0/oaPYGUFNEZ1XAu1IICeUUqysdGbZ+gp8UH4UW1C7r/BmwdkbqQ4az8EDbGZj1n36gA==, tarball: file:vendor/sdk-ts/openlfcp-storage-0.6.0.tgz}
+    version: 0.6.0
     engines: {node: '>=24'}
 
-  '@openlfcp/wire@0.6.0':
-    resolution: {integrity: sha512-al66092SG7D1gnOw+TwjC8G3fBfzcdADn6h/sCB0RxbWxe9o1eWO8uZM8e4TaM14wP7la6z3OYNNlwy5IZh7pw==}
+  '@openlfcp/wire@file:vendor/sdk-ts/openlfcp-wire-0.6.0.tgz':
+    resolution: {integrity: sha512-xviLm8ZspeWvpDHx8+lNT8hSXfx6tYHcddWn6SpXK6NEmG4ByFvni35+k6UQsQdjpGlTYtgP2yyhceBZaonaHA==, tarball: file:vendor/sdk-ts/openlfcp-wire-0.6.0.tgz}
+    version: 0.6.0
     engines: {node: '>=24'}
 
   '@oxc-project/types@0.156.0':
@@ -903,49 +911,49 @@ snapshots:
       '@noble/curves': 2.4.0
       '@noble/hashes': 2.4.0
 
-  '@openlfcp/client@0.6.0':
+  '@openlfcp/client@file:vendor/sdk-ts/openlfcp-client-0.6.0.tgz':
     dependencies:
-      '@openlfcp/core': 0.6.0
-      '@openlfcp/crypto': 0.6.0
-      '@openlfcp/storage': 0.6.0
-      '@openlfcp/wire': 0.6.0
+      '@openlfcp/core': file:vendor/sdk-ts/openlfcp-core-0.6.0.tgz
+      '@openlfcp/crypto': file:vendor/sdk-ts/openlfcp-crypto-0.6.0.tgz
+      '@openlfcp/storage': file:vendor/sdk-ts/openlfcp-storage-0.6.0.tgz
+      '@openlfcp/wire': file:vendor/sdk-ts/openlfcp-wire-0.6.0.tgz
 
-  '@openlfcp/core@0.6.0': {}
+  '@openlfcp/core@file:vendor/sdk-ts/openlfcp-core-0.6.0.tgz': {}
 
-  '@openlfcp/crypto@0.6.0':
+  '@openlfcp/crypto@file:vendor/sdk-ts/openlfcp-crypto-0.6.0.tgz':
     dependencies:
       '@noble/ciphers': 2.4.0
       '@noble/curves': 2.4.0
       '@noble/hashes': 2.4.0
-      '@openlfcp/core': 0.6.0
+      '@openlfcp/core': file:vendor/sdk-ts/openlfcp-core-0.6.0.tgz
       '@panva/hpke-noble': 1.1.8(hpke@1.1.8)
       hpke: 1.1.8
 
-  '@openlfcp/shared-objects@0.6.0':
+  '@openlfcp/shared-objects@file:vendor/sdk-ts/openlfcp-shared-objects-0.6.0.tgz':
     dependencies:
       '@automerge/automerge': 3.5.0
-      '@openlfcp/core': 0.6.0
-      '@openlfcp/crypto': 0.6.0
+      '@openlfcp/core': file:vendor/sdk-ts/openlfcp-core-0.6.0.tgz
+      '@openlfcp/crypto': file:vendor/sdk-ts/openlfcp-crypto-0.6.0.tgz
       fflate: 0.8.3
 
-  '@openlfcp/storage-node@0.6.0':
+  '@openlfcp/storage-node@file:vendor/sdk-ts/openlfcp-storage-node-0.6.0.tgz':
     dependencies:
-      '@openlfcp/client': 0.6.0
-      '@openlfcp/core': 0.6.0
-      '@openlfcp/crypto': 0.6.0
-      '@openlfcp/shared-objects': 0.6.0
-      '@openlfcp/storage': 0.6.0
-      '@openlfcp/wire': 0.6.0
+      '@openlfcp/client': file:vendor/sdk-ts/openlfcp-client-0.6.0.tgz
+      '@openlfcp/core': file:vendor/sdk-ts/openlfcp-core-0.6.0.tgz
+      '@openlfcp/crypto': file:vendor/sdk-ts/openlfcp-crypto-0.6.0.tgz
+      '@openlfcp/shared-objects': file:vendor/sdk-ts/openlfcp-shared-objects-0.6.0.tgz
+      '@openlfcp/storage': file:vendor/sdk-ts/openlfcp-storage-0.6.0.tgz
+      '@openlfcp/wire': file:vendor/sdk-ts/openlfcp-wire-0.6.0.tgz
       better-sqlite3: 13.0.3
 
-  '@openlfcp/storage@0.6.0':
+  '@openlfcp/storage@file:vendor/sdk-ts/openlfcp-storage-0.6.0.tgz':
     dependencies:
-      '@openlfcp/core': 0.6.0
+      '@openlfcp/core': file:vendor/sdk-ts/openlfcp-core-0.6.0.tgz
 
-  '@openlfcp/wire@0.6.0':
+  '@openlfcp/wire@file:vendor/sdk-ts/openlfcp-wire-0.6.0.tgz':
     dependencies:
-      '@openlfcp/core': 0.6.0
-      '@openlfcp/crypto': 0.6.0
+      '@openlfcp/core': file:vendor/sdk-ts/openlfcp-core-0.6.0.tgz
+      '@openlfcp/crypto': file:vendor/sdk-ts/openlfcp-crypto-0.6.0.tgz
 
   '@oxc-project/types@0.156.0': {}
 

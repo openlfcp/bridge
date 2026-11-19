@@ -63,7 +63,9 @@ Pure: no I/O, no host; the host gives it a view and gets a plan.
 
 ## The SDK
 
-`@openlfcp/*` from npm at 0.6.0, exact versions (with `pnpm.overrides`). The host uses the
+Until `@openlfcp/*` 0.7.0 is on npm: the sdk-ts commit in `sdk-ts.lock`, packed into
+`vendor/sdk-ts/` by `scripts/sdk-ts-pack.mjs` and locked by integrity in `pnpm-lock.yaml`
+(`docs/devel/sdk-pin.md`); a release refuses the pin (`scripts/check-release-deps.mjs`). The host uses the
 SDK's bridge API directly, with no fallbacks of its own: `openNodeInstallation`
 (storage-node: identity sessions kept alive 60 s, the 429 upgrade probe), `pairedResources`,
 `storePairedResources` and `deviceIdentity` (client), `sectionEnd` (shared-objects/sections).
@@ -114,6 +116,8 @@ SDK's bridge API directly, with no fallbacks of its own: `openNodeInstallation`
 | `scripts/app/build-dev-app.sh`, `scripts/app/smoke.sh` | a development `LFCP Bridge.app` (native slice, ad-hoc; `TEST_HOOKS=1` for the smoke's hooks) and its L5 smoke |
 | `scripts/app/package-app.sh`, `scripts/app/node-darwin.sha256` | the release `LFCP Bridge.app` and its DMG: universal, Node pinned by `.node-version` and these SHA-256, better-sqlite3 subtree, signed inside out (ad-hoc or `SIGN_IDENTITY`), Sparkle keys in `Info.plist` |
 | `scripts/app/check-app.sh`, `scripts/app/check-no-test-hooks.sh` | T§2 L5 on the packaged app where it lies: Info.plist, universal Mach-O loadable on 15.0, signature and entitlements, Node and ABI, no test hooks, `bridge.mjs --self-test` |
+| `scripts/sdk-ts-pack.mjs` | the SDK pin: packs the eight `@openlfcp/*` packages of the sdk-ts commit in `sdk-ts.lock` into `vendor/sdk-ts/`, byte-identical on every system (`docs/devel/sdk-pin.md`); `--self-test` |
+| `scripts/check-release-deps.mjs` | refuses a release whose SDK is not exact npm versions (`sdk-ts.lock`, `file:`/`link:`, overrides); run by `sign-release.sh` and by `app.yml` on tags, for E-052 |
 | `scripts/bridge-db.mjs` | `status` / `backup` / `migrate --to <N>` of `bridge.sqlite` (up and down; needs STOP and no `run`; backs up to a new file first, never over one); `--self-test` |
 | `scripts/check-runbook.mjs` | checks the `lfcp-bridge …` commands of the guides against the CLI sources (`--src` for another tree): command ready, flags read by the code, required flags, N8's migration ports |
 | `helper/scripts/sign-release.sh` | release signing: Developer ID, hardened runtime, `Support/release.entitlements`, notarytool submit + staple; changes no keychain without `--add-to-search-list` |

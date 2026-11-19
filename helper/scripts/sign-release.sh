@@ -20,6 +20,7 @@
 #   --no-build                sign the existing build/LFCP Reminders Helper.app
 #   --out <dir>               the build directory (default build)
 #
+# The SDK must come from npm (scripts/check-release-deps.mjs), or nothing is signed.
 # This script never creates, imports, unlocks or deletes anything in a keychain, and never changes
 # the keychain search list unless --add-to-search-list is given. Passwords are never arguments: an
 # app-specific password lives in the notarytool profile, an API key in its .p8 file.
@@ -49,7 +50,7 @@ while [ $# -gt 0 ]; do
     --api-issuer) need "$@"; api_issuer="$2"; shift 2 ;;
     --no-build) build=0; shift ;;
     --out) need "$@"; OUT="$2"; shift 2 ;;
-    -h | --help) sed -n '2,29p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,30p' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -79,6 +80,10 @@ elif [ -n "$profile$api_key$api_key_id$api_issuer" ]; then
 fi
 [ -f "$ENTITLEMENTS" ] || die "missing $ENTITLEMENTS"
 APP="$OUT/$APP_NAME"
+
+# A release is built from the @openlfcp/* npm packages only: the development pin of the SDK
+# (sdk-ts.lock, file: tarballs) refuses it before anything is looked up, built or signed.
+node ../scripts/check-release-deps.mjs || die "the SDK is pinned to an sdk-ts commit, not npm: no release"
 
 # The identity must be there (read-only lookup) before anything is built or changed.
 find_args=(find-identity -v -p codesigning)
