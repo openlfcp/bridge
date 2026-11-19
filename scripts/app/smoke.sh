@@ -179,6 +179,29 @@ wait_until 15 "STOP removed after resume" test ! -e "$DATA/STOP"
 wait_until 15 "status after resume" report_has '.host.state != "paused"'
 ok "resume: STOP removed"
 
+echo "== 3a. support.sock (A§7.3, PLAN §E-006): 0700/0600, the peer's uid told by the shell"
+SOCK="$DATA/support.sock"
+wait_until 15 "support.sock" test -S "$SOCK"
+[ "$(stat -f %Lp "$DATA")" = 700 ] || fail "the data directory is $(stat -f %Lp "$DATA"), not 700"
+[ "$(stat -f %Lp "$SOCK")" = 600 ] || fail "support.sock is $(stat -f %Lp "$SOCK"), not 600"
+# A thin client of one request (the bundle's lfcp-bridge is E-006b): status, every line back.
+SUPPORT_OUT="$("$APP/Contents/Resources/node/bin/node" -e '
+const s = require("node:net").connect(process.argv[1]);
+let b = "";
+s.on("connect", () => s.write(JSON.stringify({ v: 1, argv: ["status"] }) + "\n"));
+s.setEncoding("utf8");
+s.on("data", (d) => (b += d));
+s.on("close", () => process.stdout.write(b));
+' "$SOCK")"
+echo "$SUPPORT_OUT"
+echo "$SUPPORT_OUT" | jq -se '.[-1] == {v: 1, type: "exit", code: 0}' >/dev/null ||
+  fail "support status did not exit 0 (a refused peer uid ends with error forbidden)"
+echo "$SUPPORT_OUT" | jq -se 'any(.[]; .type == "out" and (.line | startswith("STOP: no")))' >/dev/null ||
+  fail "support status printed no STOP line"
+[ "$(sqlite3 "$DATA/bridge.sqlite" "SELECT count(*) FROM journal WHERE key = 'support.command' AND json_extract(params_json, '$.author') = 'support CLI'")" = 1 ] ||
+  fail "no journal entry for the support command"
+ok "support status over support.sock: peer uid accepted, exit 0, journaled as support CLI"
+
 echo "== 4. lfcp-bridge:// handoff"
 open "lfcp-bridge://connect?c=smoke#k=$SECRET"
 wait_until 20 "the URL reached the host" report_has '.urls.forwarded == 1 and .urls.waiting == 0'
