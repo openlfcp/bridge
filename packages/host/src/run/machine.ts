@@ -245,11 +245,16 @@ export async function machineProcess(o: {
   readonly paths: BridgePaths;
   /** The verification run's fault injection (LFCP_BRIDGE_FAULT, src/fault.ts); off by default. */
   readonly fault?: typeof LOSE_NEXT_WRITE_ANSWER;
+  /**
+   * Under LFCP Bridge.app (A§2.1–2.2): the app bundle, whose Contents/MacOS/lfcp-reminders-helper
+   * is spawned `direct`, so that Reminders access is the app's (launchd → shell → node → helper).
+   */
+  readonly appBundle?: string;
 }): Promise<{ readonly process: BridgeProcess; stop(reason?: string): Promise<void> }> {
   const { db, config, paths } = o;
   const journal = new Journal(db);
   const holds = new Holds(db);
-  const appPath = config.helperPath ?? paths.helperApp;
+  const appPath = o.appBundle ?? config.helperPath ?? paths.helperApp;
   let current: HelperLink | undefined;
   let transport: EventKitTransport | undefined;
   const lists = (
@@ -281,6 +286,7 @@ export async function machineProcess(o: {
       // the journal. Passed as a variable: on a base without the option it is simply unused.
       const options = {
         appPath,
+        ...(o.appBundle === undefined ? {} : { launch: "direct" as const }),
         onUnmatched: (line: string) =>
           journal.append("warn", "helper.unmatched", { params: { line: line.slice(0, 200) } }),
       };

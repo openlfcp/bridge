@@ -161,7 +161,15 @@ export async function machineRuntime(env: NodeJS.ProcessEnv = process.env): Prom
     openInstallations: () => installationPorts(db),
     startProcess: async () => {
       const fault = faultFromEnv(env);
-      return machineProcess({ db, config, paths, ...(fault === undefined ? {} : { fault }) });
+      // LFCP_BRIDGE_APP: set by the shell of LFCP Bridge.app to its bundle (A§2.1).
+      const appBundle = env.LFCP_BRIDGE_APP;
+      return machineProcess({
+        db,
+        config,
+        paths,
+        ...(fault === undefined ? {} : { fault }),
+        ...(appBundle ? { appBundle } : {}),
+      });
     },
     verifySignature: (app) => {
       try {
