@@ -101,6 +101,7 @@ export const JOURNAL_TEXT: Readonly<Record<string, (p: JournalParams) => string>
     `Stopped: more changes than a person makes (${String(p.holds ?? "")}). Usually the filter got narrower or the list became unavailable — not that you deleted these tasks`,
   "safe_mode.on": () => "Safe Mode: the bridge crashed twice at start",
   "safe_mode.off": () => "Safe Mode turned off",
+  "support.command": (p) => `support: lfcp-bridge ${String(p.command)} → exit ${String(p.exit)}`,
   "delivery.rejected": () => "LFCP refused a change made from Reminders",
   "delivery.partial": () => "LFCP accepted only part of a change made from Reminders",
 };
@@ -130,6 +131,8 @@ export class Journal {
     private readonly now: () => number = Date.now,
     /** The process run, recorded in each entry's parameters. */
     private readonly runId?: string,
+    /** Who acted, recorded in each entry's parameters (support commands: "support CLI", A§7.3). */
+    private readonly author?: string,
   ) {}
 
   /** Appends one entry; returns its id. */
@@ -144,7 +147,13 @@ export class Journal {
   ): number {
     if (!(level in RANK)) throw new RangeError(`unknown journal level ${level}`);
     const params =
-      this.runId === undefined ? extra.params : { ...(extra.params ?? {}), run: this.runId };
+      this.runId === undefined && this.author === undefined
+        ? extra.params
+        : {
+            ...(extra.params ?? {}),
+            ...(this.runId === undefined ? {} : { run: this.runId }),
+            ...(this.author === undefined ? {} : { author: this.author }),
+          };
     const r = this.db
       .prepare(
         `INSERT INTO journal (ts, level, binding_id, task_id, key, params_json)

@@ -28,6 +28,15 @@ export interface ResolvedSection {
   readonly title: string;
 }
 
+/** The run process as `run --app` holds it (src/app/serve.ts). */
+export interface RunningProcess {
+  stop(reason?: string): Promise<void>;
+  /** Its transport: support commands use it, never a second one (A§7.3). */
+  readonly transport?: BootstrapTransport;
+  /** Runs a support command serialized with its passes (BridgeProcess.exclusive). */
+  exclusive?<T>(fn: () => Promise<T>): Promise<T>;
+}
+
 export interface Runtime {
   readonly paths: BridgePaths;
   readonly db: BridgeDatabase;
@@ -61,7 +70,7 @@ export interface Runtime {
   readonly startProcess?: (
     /** `run --app`: the host is shutting down — no effect starts, also during the start. */
     shuttingDown?: () => boolean,
-  ) => Promise<{ stop(reason?: string): Promise<void> }>;
+  ) => Promise<RunningProcess>;
   close(): Promise<void>;
 }
 

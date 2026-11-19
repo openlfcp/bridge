@@ -23,6 +23,8 @@
 // is dead, so the next host takes it over.
 
 import { resume, stop, stopState } from "../db/stop.js";
+import { EXIT } from "../exit.js";
+import type { RunningProcess } from "../runtime.js";
 import {
   type Command,
   type ErrorCode,
@@ -33,6 +35,7 @@ import {
   parseCommand,
   type SectionStatus,
 } from "./ipc.js";
+import { listenSupport, type PeerUid, type SupportIo } from "./support.js";
 
 export const SHUTDOWN_WAIT_MS = 60_000;
 /** The exit code when the shutdown deadline passed with work still running. */
@@ -41,7 +44,14 @@ export const EXIT_DEADLINE = 1;
 /** Why the host ends: a shutdown command's reason, the shell gone, or a signal. */
 export type EndReason = "update" | "quit" | "logout" | "stdin_closed" | "SIGTERM" | "SIGINT";
 
-type RunProcess = { stop(reason?: string): Promise<void> };
+type RunProcess = RunningProcess;
+
+/** Runs one support command (commands.ts) with the run process of the moment, if any. */
+export type SupportRun = (
+  argv: readonly string[],
+  io: SupportIo,
+  process: RunProcess | undefined,
+) => Promise<number>;
 
 export interface AppHostOptions {
   /** The bridge's directory (STOP lives there). */
@@ -62,6 +72,8 @@ export interface AppHostOptions {
   readonly shutdownWaitMs?: number;
   /** Ends the process at the deadline (default process.exit); tests record it. */
   readonly exit?: (code: number) => void;
+  /** The support commands (support.sock); without it they are refused. */
+  readonly support?: SupportRun;
 }
 
 /** A safe detail for a failed command: the error's code, never its message (paths, values). */
@@ -104,6 +116,38 @@ export class AppHost {
   /** Bytes from stdin. */
   input(chunk: string): void {
     this.#splitter.push(chunk);
+  }
+
+  /**
+   * A support command (A§7.3): in the one queue of commands, serialized with the passes. It waits
+   * for a start in progress outside the queue (pause and shutdown never wait behind it).
+   */
+  async support(argv: readonly string[], io: SupportIo): Promise<number> {
+    await this.#starting;
+    let code: number = EXIT.INTERNAL;
+    await this.#enqueue(async () => {
+      const run = this.#o.support;
+      if (this.#ending !== undefined || run === undefined) {
+        io.err(
+          run === undefined ? "support commands are not available" : "the bridge is shutting down",
+        );
+        code = EXIT.STOPPED;
+        return;
+      }
+      const p = this.#process;
+      const job = () => run(argv, io, p);
+      try {
+        code = p?.exclusive === undefined ? await job() : await p.exclusive(job);
+      } catch (e) {
+        this.#o.log(`app: support command failed: ${failure(e)}`);
+        io.err("internal error (lfcp-bridge log)");
+        code = EXIT.INTERNAL;
+      }
+      // stop / resume change the state the menu shows.
+      this.#settle();
+      this.#status();
+    });
+    return code;
   }
 
   /** stdin closed, or a signal: at once, not behind the queue. */
@@ -303,6 +347,13 @@ export async function serveApp(o: {
   readonly signals?: boolean;
   readonly shutdownWaitMs?: number;
   readonly exit?: (code: number) => void;
+  /** support.sock (src/app/support.ts) and its commands. */
+  readonly support?: {
+    readonly path: string;
+    readonly uid: number;
+    readonly peerUid: PeerUid | undefined;
+    readonly run: SupportRun;
+  };
 }): Promise<EndReason | { readonly held: number }> {
   const lock = o.lock();
   if (typeof lock !== "function") {
@@ -319,7 +370,22 @@ export async function serveApp(o: {
     log: o.log,
     ...(o.shutdownWaitMs === undefined ? {} : { shutdownWaitMs: o.shutdownWaitMs }),
     ...(o.exit === undefined ? {} : { exit: o.exit }),
+    ...(o.support === undefined ? {} : { support: o.support.run }),
   });
+  // Not fatal: the menu works without it; support sees the log line.
+  const server =
+    o.support === undefined
+      ? undefined
+      : await listenSupport({
+          path: o.support.path,
+          uid: o.support.uid,
+          peerUid: o.support.peerUid,
+          run: (argv, io) => host.support(argv, io),
+          log: o.log,
+        }).catch((e: unknown) => {
+          o.log(`run --app: support socket unavailable: ${failure(e)} ${(e as Error).message}`);
+          return undefined;
+        });
   const onData = (chunk: Buffer | string) => host.input(String(chunk));
   const onEnd = () => void host.end("stdin_closed");
   const onSignal = (s: NodeJS.Signals) => void host.end(s as EndReason);
@@ -335,6 +401,7 @@ export async function serveApp(o: {
     o.io.input.off("end", onEnd);
     o.io.input.pause();
     if (o.signals !== false) for (const s of SIGNALS) process.off(s, onSignal);
+    await server?.close();
     lock();
   }
 }
