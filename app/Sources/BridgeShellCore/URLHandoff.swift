@@ -52,9 +52,9 @@ public final class URLHandoff {
     flush()
   }
 
-  /// The supervisor's phases: anything but running (exit, back-off, shutdown) is not ready.
+  /// The supervisor's phases: every change, .running included, ends readiness; only a hello that
+  /// comes after it sets it again (a late hello of an exited host must not open the next one).
   public func hostPhase(_ phase: HostSupervisor.Phase) {
-    if case .running = phase { return }
     ready = false
   }
 

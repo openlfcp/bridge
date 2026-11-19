@@ -149,6 +149,22 @@ final class URLHandoffTests: XCTestCase {
     XCTAssertEqual(handoff.forwarded, 1)
   }
 
+  func testALateHelloOfAnExitedHostDoesNotOpenTheNextOne() {
+    supervisor.start()
+    let first = launcher.last
+    first.onExit(1)
+    hello(first)  // delivered after its exit, before the next launch
+    scheduler.advance(1)
+    let second = launcher.last
+    XCTAssertFalse(first === second)
+    handoff.open([URL(string: secret)!])
+    XCTAssertEqual(urls(second), [], "no openURL before the second host's own hello")
+    XCTAssertEqual(handoff.waiting, 1)
+    hello(second)
+    XCTAssertEqual(urls(second), [secret])
+    XCTAssertEqual(handoff.waiting, 0)
+  }
+
   func testAHostThatExitedAfterHelloIsNotReadyAnyMore() {
     supervisor.start()
     hello(launcher.last)
