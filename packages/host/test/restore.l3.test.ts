@@ -34,7 +34,7 @@ async function linked(rig: EventKitRig, n: number) {
   const tasks = [];
   for (let k = 0; k < n; k++) tasks.push(await bb.task(`T${k}`));
   const first = await bb.sync();
-  expect(first.outcomes.every((o) => o.kind === "finalized")).toBe(true);
+  expect(first.outcomes).toEqual(Array.from({ length: n }, () => ({ kind: "finalized" })));
   for (const t of tasks) expect(bb.link(t.id)?.state).toBe("linked");
   const items = await rig.until((i) => i.length === n, `${n} reminders`);
   const byTitle = new Map(items.map((i) => [i.title, i]));
@@ -58,7 +58,7 @@ describe.skipIf(skip !== undefined)("T§3 R3-1b on EventKit (L3)", { timeout: 30
     expect(r.prepared.map((i: Intent) => [i.direction, i.kind, i.fields])).toEqual(
       Array.from({ length: 8 }, () => ["to_apple", "update", ["status"]]),
     );
-    expect(r.outcomes.every((o) => o.kind === "finalized")).toBe(true);
+    expect(r.outcomes).toEqual(Array.from({ length: 8 }, () => ({ kind: "finalized" })));
     expect(rows(bb, "SELECT state, outcome FROM authorizations")).toEqual([
       { state: "consumed", outcome: "consumed" },
     ]);
@@ -102,7 +102,7 @@ describe.skipIf(skip !== undefined)("T§3 R3-1b on EventKit (L3)", { timeout: 30
     expect(next.prepared.map((i: Intent) => [i.direction, i.kind])).toEqual(
       Array.from({ length: 4 }, () => ["to_apple", "create"]),
     );
-    expect(next.outcomes.every((o) => o.kind === "finalized")).toBe(true);
+    expect(next.outcomes).toEqual(Array.from({ length: 4 }, () => ({ kind: "finalized" })));
     for (const t of tasks) expect(bb.link(t.id)?.state).toBe("linked");
     const items = await rig.until((i) => i.length === 12, "12 reminders");
     expect(items.filter((i) => gone.has(i.ref.id))).toEqual([]);

@@ -110,6 +110,8 @@ export async function eventKitRig(title: string): Promise<EventKitRig> {
     id: transport.id,
     transport,
     list,
+    // Its writes are not verified on a runner: the binding is a verification one (D-010 §7.6).
+    verification: true,
     person: {
       complete: async (id) => void (await person("complete", id)),
       reopen: async (id) => void (await person("reopen", id)),
