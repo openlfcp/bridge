@@ -26,11 +26,17 @@ for arch in $(xcrun lipo -archs "$SHELL_EXE"); do
   slice="$tmp/shell-$arch"
   xcrun lipo -thin "$arch" "$SHELL_EXE" -output "$slice" 2>/dev/null || cp "$SHELL_EXE" "$slice"
   # nm -a: the symbol table as linked (a stripped binary has none: the strings below remain).
-  n="$(xcrun nm -a "$slice" 2>/dev/null | grep -c 'TestHooks' || true)"
-  if [ "$n" -gt 0 ]; then found+=("$arch: $n TestHooks symbol(s)"); fi
-  for s in "TestHooks" "test hooks: on (L5 smoke build)"; do
-    if strings -a "$slice" | grep -qF -- "$s"; then found+=("$arch: string '$s'"); fi
-  done
+  # Swift's mangled names of the type and its members (LFCPBridge9TestHooksO…); not the debug
+  # map's source file entry, which names TestHooks.swift even when the file compiles to nothing.
+  syms="$(xcrun nm -a "$slice" 2>/dev/null | grep 'LFCPBridge9TestHooks' || true)"
+  if [ -n "$syms" ]; then
+    found+=("$arch: $(echo "$syms" | wc -l | tr -d ' ') TestHooks symbol(s), e.g. $(echo "$syms" | head -1)")
+  fi
+  # The type's name in Swift's metadata is a C string of its own; the log line is the hooks' own.
+  if strings -a "$slice" | grep -qx 'TestHooks'; then found+=("$arch: type name 'TestHooks'"); fi
+  if strings -a "$slice" | grep -qF 'test hooks: on (L5 smoke build)'; then
+    found+=("$arch: string 'test hooks: on (L5 smoke build)'")
+  fi
 done
 in_shell=${#found[@]}
 version="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")"
