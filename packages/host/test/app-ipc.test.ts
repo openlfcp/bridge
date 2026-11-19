@@ -2,13 +2,15 @@
 // pause/resume/answer/export/remove/shutdown/openURL, the events hello/status/reply, STOP only on
 // pause, the URL never in a log line or a reply.
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type Event, encodeEvent, LineSplitter, MAX_LINE, parseCommand } from "../src/app/ipc.js";
-import { AppHost, serveApp } from "../src/app/serve.js";
+import { AppHost, EXIT_DEADLINE, serveApp } from "../src/app/serve.js";
 import { bridgePaths } from "../src/config.js";
 import { openBridgeDatabase } from "../src/db/database.js";
 import { STOP_FILE, stopState } from "../src/db/stop.js";
@@ -155,17 +157,29 @@ describe("encodeEvent and LineSplitter", () => {
 });
 
 /** An AppHost over a fake run process, with what it wrote and logged. */
-function harness(o: { failStart?: number; stopMs?: number; shutdownWaitMs?: number } = {}) {
+function harness(
+  o: {
+    failStart?: number;
+    stopMs?: number;
+    shutdownWaitMs?: number;
+    /** The start waits for this before it returns. */
+    startGate?: Promise<void>;
+    home?: string;
+  } = {},
+) {
   const events: (Event & { v: number })[] = [];
   const logs: string[] = [];
   const stops: string[] = [];
+  const exits: number[] = [];
   let starts = 0;
   const host = new AppHost({
-    home,
+    home: o.home ?? home,
     version: "0.6.0-test",
     pid: 4242,
+    exit: (code) => void exits.push(code),
     start: async () => {
       starts++;
+      if (o.startGate) await o.startGate;
       if (starts <= (o.failStart ?? 0)) throw new Error("helper did not start");
       return {
         stop: async (reason) => {
@@ -186,7 +200,7 @@ function harness(o: { failStart?: number; stopMs?: number; shutdownWaitMs?: numb
   };
   const replies = () => events.filter((e) => e.type === "reply");
   const statuses = () => events.filter((e) => e.type === "status").map((e) => e.state);
-  return { host, events, logs, stops, send, replies, statuses, starts: () => starts };
+  return { host, events, logs, stops, exits, send, replies, statuses, starts: () => starts };
 }
 
 describe("AppHost", () => {
@@ -246,12 +260,70 @@ describe("AppHost", () => {
     expect(existsSync(join(home, STOP_FILE))).toBe(false);
   });
 
-  it("does not wait for in-flight work longer than its limit", async () => {
+  it("past the deadline it exits with EXIT_DEADLINE and does not report a clean end", async () => {
     const h = harness({ stopMs: 5_000, shutdownWaitMs: 20 });
     await h.host.begin();
+    let ended = false;
+    void h.host.ended.then(() => {
+      ended = true;
+    });
     await h.send({ id: "1", cmd: "shutdown", reason: "update" });
-    expect(await h.host.ended).toBe("update");
-    expect(h.logs).toContain("app: in-flight work did not finish in time; exiting");
+    await new Promise((r) => setTimeout(r, 60));
+    expect(h.exits).toEqual([EXIT_DEADLINE]);
+    expect(ended).toBe(false);
+    expect(h.logs).toContain("app: shutdown deadline passed with work still running; exiting");
+  });
+
+  it("a shutdown during a start that hangs is not queued behind it; the deadline still holds", async () => {
+    const h = harness({ startGate: new Promise(() => {}), shutdownWaitMs: 30 });
+    void h.host.begin();
+    await h.send({ id: "1", cmd: "shutdown", reason: "update" });
+    expect(h.replies()).toEqual([{ v: 1, type: "reply", id: "1", ok: true }]);
+    expect(h.statuses()).toEqual(["starting", "stopping"]);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(h.exits).toEqual([EXIT_DEADLINE]);
+  });
+
+  it("stdin closing during a start: what the start brings is stopped, then the end", async () => {
+    let release!: () => void;
+    const h = harness({
+      startGate: new Promise<void>((r) => {
+        release = r;
+      }),
+    });
+    void h.host.begin();
+    const ended = h.host.end("stdin_closed");
+    expect(h.statuses()).toEqual(["starting", "stopping"]);
+    await h.send({ id: "2", cmd: "pause" });
+    expect(h.replies().at(-1)).toMatchObject({ id: "2", error: { code: "shutting_down" } });
+    release();
+    expect(await ended).toBe("stdin_closed");
+    expect(h.stops).toEqual(["shutdown: stdin_closed"]);
+    expect(h.exits).toEqual([]);
+    expect(existsSync(join(home, STOP_FILE))).toBe(false);
+  });
+
+  it("commands do not wait for a start in progress", async () => {
+    const h = harness({ startGate: new Promise(() => {}) });
+    void h.host.begin();
+    await h.send({ id: "1", cmd: "pause" });
+    await h.send({ id: "2", cmd: "openURL", url: SECRET_URL });
+    expect(h.replies().map((r) => [r.id, r.ok])).toEqual([
+      ["1", true],
+      ["2", true],
+    ]);
+  });
+
+  it("a command that throws gets reply failed (its code, no message) and the queue goes on", async () => {
+    const h = harness({ home: join(home, "missing", "dir") });
+    await h.host.begin();
+    await h.send({ id: "1", cmd: "pause" });
+    await h.send({ id: "2", cmd: "openURL", url: SECRET_URL });
+    expect(h.replies()).toEqual([
+      { v: 1, type: "reply", id: "1", ok: false, error: { code: "failed", detail: "ENOENT" } },
+      { v: 1, type: "reply", id: "2", ok: true, result: { handled: false } },
+    ]);
+    expect(h.logs.join("\n")).not.toContain(home);
   });
 
   it("a run process that failed to start is unavailable; resume tries again", async () => {
@@ -372,4 +444,35 @@ describe("serveApp and main run --app", () => {
     expect(existsSync(join(home, "run.lock"))).toBe(false);
     expect(err.join("\n")).not.toContain("very-secret-link-key");
   });
+});
+
+describe("the deadline in a real process", () => {
+  it("a stop that never ends: exit EXIT_DEADLINE after the deadline, run.lock kept, no STOP", async () => {
+    const fixture = fileURLToPath(new URL("./fixtures/app-deadline.mjs", import.meta.url));
+    const child = spawn(process.execPath, [fixture, home, "300"], { stdio: "pipe" });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (d) => {
+      out += d;
+    });
+    child.stderr.on("data", (d) => {
+      err += d;
+    });
+    for (let i = 0; i < 200 && !out.includes('"state":"running"'); i++)
+      await new Promise((r) => setTimeout(r, 10));
+    expect(out).toContain('"state":"running"');
+    const t0 = Date.now();
+    child.stdin.write(`${line({ id: "1", cmd: "shutdown", reason: "update" })}\n`);
+    // stdin stays open, as the shell keeps it: only the deadline can end this process.
+    const code = await new Promise<number | null>((r) => child.on("exit", r));
+    expect(code).toBe(EXIT_DEADLINE);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(250);
+    expect(Date.now() - t0).toBeLessThan(5_000);
+    expect(err).toContain("app: shutdown deadline passed with work still running; exiting");
+    expect(err).not.toContain("fixture: ended");
+    // Not released under work that still ran: its pid is dead now, the next host takes it over.
+    expect(readFileSync(join(home, "run.lock"), "utf8").trim()).toBe(String(child.pid));
+    expect(typeof takeRunLock(home)).toBe("function");
+    expect(existsSync(join(home, STOP_FILE))).toBe(false);
+  }, 15_000);
 });
