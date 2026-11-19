@@ -1,13 +1,19 @@
 // A bridge on one binding for end-to-end tests: bridge.sqlite, a section in an
 // offline SectionHost (its replica is real; lfcp_live is the test's to set),
-// a FakeStore account with the list, the fake transport, the executor with
+// a FakeStore account with the list, the fake transport (or a rig's: L3 on EventKit), the executor with
 // the adapter's handler, the pass and the link applier. `sync()` is one pass
 // as apply will run it once PR 9 opens it: plan → link transitions → intents.
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type AppleItem, type ListInfo, type ListRef, localDate } from "@openlfcp/bridge-reminders";
+import {
+  type AppleItem,
+  type ListInfo,
+  type ListRef,
+  localDate,
+  type RemindersTransport,
+} from "@openlfcp/bridge-reminders";
 import type { FilterMode } from "@openlfcp/bridge-reminders/adapter";
 import { FakePerson, FakeStore, FakeTransport } from "@openlfcp/bridge-reminders/fake";
 import { receiptOf } from "@openlfcp/client";
@@ -27,10 +33,24 @@ import {
 } from "../../src/index.js";
 import { installation, memory, offline, ownedSection } from "./lfcp.js";
 
+/**
+ * Another account than the fake one (L3: EventKit, ./eventkit.ts): its transport, already open,
+ * and the binding's list in it. The executor writes through it (`permit`); it is closed with the
+ * bridge.
+ */
+export interface BridgeRig {
+  readonly id: string;
+  readonly transport: RemindersTransport;
+  readonly list: ListInfo;
+  close(): Promise<void>;
+}
+
 export interface BridgeOptions {
   readonly filter?: FilterMode;
   /** strict_until in the future (24 h after approve, §7.2). */
   readonly strict?: boolean;
+  /** The account (default: a FakeStore through the fake transport). */
+  readonly rig?: BridgeRig;
 }
 
 export async function bridge(o: BridgeOptions = {}) {
@@ -41,7 +61,7 @@ export async function bridge(o: BridgeOptions = {}) {
   const store = new FakeStore();
   store.today = () => localDate("2026-11-10");
   const person = new FakePerson(store);
-  const list: ListInfo = person.createList("LFCP · Inbox");
+  const list: ListInfo = o.rig?.list ?? person.createList("LFCP · Inbox");
   const m = memory();
   const URL = "ws://127.0.0.1:9/v1/ws";
   const { R } = await ownedSection(me, m.storage, m.secrets, URL);
@@ -60,20 +80,24 @@ export async function bridge(o: BridgeOptions = {}) {
   ).run(now);
   db.prepare(
     `INSERT INTO bindings (id, installation_id, resource_id, adapter, transport, target_ref, filter_mode, state,
-       strict_until, created_at) VALUES ('b', 'i', ?, 'apple-reminders', 'fake', ?, ?, 'active', ?, ?)`,
+       strict_until, created_at) VALUES ('b', 'i', ?, 'apple-reminders', ?, ?, ?, 'active', ?, ?)`,
   ).run(
     toHex(R),
+    o.rig?.id ?? "fake",
     list.id,
     o.filter ?? "all",
     o.strict === true ? new Date(Date.now() + 86_400_000).toISOString() : null,
     now,
   );
   const t = new FakeTransport(store);
-  await t.open({
-    installationKey: "i",
-    state: transportStateKV(db, "fake", "i"),
-    scope: { listTitlePrefixes: ["LFCP · "], listIds: [list.id as ListRef] },
-  });
+  if (o.rig === undefined)
+    await t.open({
+      installationKey: "i",
+      state: transportStateKV(db, "fake", "i"),
+      scope: { listTitlePrefixes: ["LFCP · "], listIds: [list.id as ListRef] },
+    });
+  /** What the bridge reads and writes through: the fake transport, or the rig's. */
+  const transport: RemindersTransport = o.rig?.transport ?? t;
   const TZ = "UTC";
   const port = offlineTestPort({
     commitGuarded: (c: Parameters<SectionHost["commitGuarded"]>[0]) => host.commitGuarded(c),
@@ -83,7 +107,7 @@ export async function bridge(o: BridgeOptions = {}) {
   const executor = (crash?: CrashPoint) =>
     new Executor({
       db,
-      transport: t,
+      transport,
       lfcp: port,
       gates: {
         stopped: () => false,
@@ -94,7 +118,8 @@ export async function bridge(o: BridgeOptions = {}) {
         connected: () => false,
       },
       handler: bridgeHandler({ timeZone: TZ }),
-      effects: { enabled: true },
+      // The rig's account is a test's own (L3: verification lists only, the helper's gate).
+      effects: { enabled: true, ...(o.rig === undefined ? {} : { permit: () => true }) },
       ...(crash === undefined
         ? {}
         : {
@@ -108,13 +133,13 @@ export async function bridge(o: BridgeOptions = {}) {
   const lfcp = { live: true };
   const pass = new Pass({
     db,
-    transport: t,
+    transport,
     lfcp: { replica: (r: ResourceId) => host.replica(r), isLive: () => lfcp.live },
     me: async () => principalRef(root),
     createdBy: async () => root,
     timeZone: TZ,
   });
-  const links = new LinkApplier({ db, transport: t });
+  const links = new LinkApplier({ db, transport });
 
   let previous: string | undefined;
   const api = {
@@ -126,6 +151,7 @@ export async function bridge(o: BridgeOptions = {}) {
     R,
     root,
     t,
+    transport,
     e,
     pass,
     links,
@@ -205,6 +231,7 @@ export async function bridge(o: BridgeOptions = {}) {
       return { plan: r.plan, applied, prepared, outcomes };
     },
     async close() {
+      await o.rig?.close();
       await host.stop();
       db.close();
       rmSync(dir, { recursive: true, force: true });
