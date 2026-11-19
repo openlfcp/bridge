@@ -250,6 +250,8 @@ export async function machineProcess(o: {
    * is spawned `direct`, so that Reminders access is the app's (launchd → shell → node → helper).
    */
   readonly appBundle?: string;
+  /** The app's host is shutting down: no effect starts, also during the start (BridgeProcess). */
+  readonly shuttingDown?: () => boolean;
 }): Promise<{ readonly process: BridgeProcess; stop(reason?: string): Promise<void> }> {
   const { db, config, paths } = o;
   const journal = new Journal(db);
@@ -371,6 +373,7 @@ export async function machineProcess(o: {
       // The helper of the moment: another build after a restart is not verified by the old record.
       writesVerified: () => writesVerified(config, helper),
       stopped: () => stopState(paths.home) !== undefined,
+      ...(o.shuttingDown === undefined ? {} : { shuttingDown: o.shuttingDown }),
       // resume --accept helper_unavailable: the supervisor gets a fresh budget (review PR 9b #28).
       onHoldsLifted: (reasons) => {
         if (reasons.has("helper_unavailable")) void reconnector.resume();

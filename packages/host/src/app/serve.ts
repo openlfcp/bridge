@@ -48,8 +48,11 @@ export interface AppHostOptions {
   readonly home: string;
   readonly version: string;
   readonly pid: number;
-  /** Starts the run process (Runtime.startProcess). */
-  readonly start: () => Promise<RunProcess>;
+  /**
+   * Starts the run process (Runtime.startProcess). `shuttingDown` turns true at the shutdown: the
+   * executor starts no effect from then on, also inside the start's own first pass.
+   */
+  readonly start: (shuttingDown: () => boolean) => Promise<RunProcess>;
   /** The bindings for the status event. */
   readonly sections: () => readonly SectionStatus[];
   /** One line to stdout (without "\n"). */
@@ -149,7 +152,7 @@ export class AppHost {
     this.#reason = undefined;
     const run = (async () => {
       try {
-        const p = await this.#o.start();
+        const p = await this.#o.start(() => this.#ending !== undefined);
         if (this.#ending !== undefined) {
           // Started after the shutdown: stop it at once (bounded by the shutdown's deadline).
           this.#o.log("app: run process started after shutdown; stopping it");
@@ -259,7 +262,8 @@ export class AppHost {
       (this.#o.exit ?? ((code: number) => process.exit(code)))(EXIT_DEADLINE);
     }, this.#o.shutdownWaitMs ?? SHUTDOWN_WAIT_MS);
     void (async () => {
-      // A start in progress is waited for (it cannot be cancelled midway); what it brought is stopped.
+      // A start in progress is waited for (it cannot be cancelled midway); its effects are already
+      // held by the shuttingDown signal given to it. What it brought is stopped after it.
       await this.#starting;
       const p = this.#process;
       this.#process = undefined;

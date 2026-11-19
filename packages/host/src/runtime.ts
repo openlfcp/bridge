@@ -58,7 +58,10 @@ export interface Runtime {
     close(): void;
   }>;
   /** Starts the run process (PR 9b); its stop stops it all. */
-  readonly startProcess?: () => Promise<{ stop(reason?: string): Promise<void> }>;
+  readonly startProcess?: (
+    /** `run --app`: the host is shutting down — no effect starts, also during the start. */
+    shuttingDown?: () => boolean,
+  ) => Promise<{ stop(reason?: string): Promise<void> }>;
   close(): Promise<void>;
 }
 
@@ -159,7 +162,7 @@ export async function machineRuntime(env: NodeJS.ProcessEnv = process.env): Prom
       return undefined;
     },
     openInstallations: () => installationPorts(db),
-    startProcess: async () => {
+    startProcess: async (shuttingDown) => {
       const fault = faultFromEnv(env);
       // LFCP_BRIDGE_APP: set by the shell of LFCP Bridge.app to its bundle (A§2.1).
       const appBundle = env.LFCP_BRIDGE_APP;
@@ -169,6 +172,7 @@ export async function machineRuntime(env: NodeJS.ProcessEnv = process.env): Prom
         paths,
         ...(fault === undefined ? {} : { fault }),
         ...(appBundle ? { appBundle } : {}),
+        ...(shuttingDown === undefined ? {} : { shuttingDown }),
       });
     },
     verifySignature: (app) => {
