@@ -1,17 +1,29 @@
 // The commands of PR 9 through `main` with a test runtime (fake transport, temp home, no launchctl).
+// The support commands of A§7.3 (status, doctor, stop, resume, migrate) go through support.sock
+// instead (E-006: the bundle's thin client, the host's queue, the run process's transport).
 
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakePerson, FakeStore, FakeTransport } from "@openlfcp/bridge-reminders/fake";
 import { MemoryKV } from "@openlfcp/bridge-reminders/transport";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { LIST_PREFIX, VERIFY_PREFIX } from "../src/bootstrap.js";
 import { bridgePaths, loadConfig } from "../src/config.js";
 import { EXIT, Holds, Journal, main, openBridgeDatabase } from "../src/index.js";
 import type { MigrationPorts } from "../src/migration.js";
 import type { Runtime } from "../src/runtime.js";
 import { VERIFICATION_STEPS } from "../src/verification.js";
+import { type SupportHost, supportHost } from "./support/socket.js";
+
+/** The support hosts of a test: ended after it, none of them opened a transport of its own. */
+const hosts: SupportHost[] = [];
+afterEach(async () => {
+  for (const h of hosts.splice(0)) {
+    expect(h.transportsOpened()).toBe(0);
+    await h.close();
+  }
+});
 
 /**
  * The helper's write gate (Server.swift requireWrites): every command opens a new transport whose
@@ -96,7 +108,22 @@ async function machine(ports?: MigrationPorts, extra: Partial<Runtime> = {}) {
     });
     return { code, out: out.join("\n"), err: err.join("\n") };
   };
-  return { call, db, store, person: new FakePerson(store), paths, ctl };
+  let host: SupportHost | undefined;
+  /** A support command through support.sock (the host starts at the first one). */
+  const support = async (...argv: string[]) => {
+    if (host === undefined) {
+      const t = gated(new FakeTransport(store));
+      await t.open({
+        installationKey: "i",
+        state: kv,
+        scope: { listTitlePrefixes: [LIST_PREFIX, VERIFY_PREFIX], listIds: [] },
+      });
+      host = await supportHost(rt(), t);
+      hosts.push(host);
+    }
+    return host.call(...argv);
+  };
+  return { call, support, db, store, person: new FakePerson(store), paths, ctl };
 }
 
 describe("lfcp-bridge (PR 9 commands)", () => {
@@ -106,7 +133,7 @@ describe("lfcp-bridge (PR 9 commands)", () => {
     expect(b.code).toBe(EXIT.OK);
     expect(b.out).toMatch(/bound: binding (b_\w+), list "LFCP · Work"/);
     const id = /binding (b_\w+)/.exec(b.out)?.[1] as string;
-    expect((await m.call("status")).out).toContain(`${id}  pending_dry_run  "LFCP · Work"`);
+    expect((await m.support("status")).out).toContain(`${id}  pending_dry_run  "LFCP · Work"`);
     expect((await m.call("bind", "Work")).code).toBe(EXIT.NEEDS_PERSON); // already bound
     expect((await m.call("unbind", id)).out).toContain("marker retired");
   });
@@ -128,10 +155,10 @@ describe("lfcp-bridge (PR 9 commands)", () => {
 
   it("stop blocks bind (exit 5); resume lifts it", async () => {
     const m = await machine();
-    expect((await m.call("stop")).code).toBe(EXIT.OK);
-    expect((await m.call("status")).out).toContain("STOP: yes");
+    expect((await m.support("stop")).code).toBe(EXIT.OK);
+    expect((await m.support("status")).out).toContain("STOP: yes");
     expect((await m.call("bind", "Work")).code).toBe(EXIT.STOPPED);
-    expect((await m.call("resume")).out).toBe("STOP removed");
+    expect((await m.support("resume")).out).toBe("STOP removed");
     expect((await m.call("bind", "Work")).code).toBe(EXIT.OK);
   });
 
@@ -140,11 +167,13 @@ describe("lfcp-bridge (PR 9 commands)", () => {
     const id = /binding (b_\w+)/.exec((await m.call("bind", "Work")).out)?.[1] as string;
     new Holds(m.db).set(id, "ownership_lost");
     new Holds(m.db).set(id, "helper_unavailable");
-    expect((await m.call("resume", "--accept", "ownership_lost", "--binding", id)).out).toContain(
-      "lifted",
-    );
+    expect(
+      (await m.support("resume", "--accept", "ownership_lost", "--binding", id)).out,
+    ).toContain("lifted");
     expect(new Holds(m.db).of(id).map((h) => h.reason)).toEqual(["helper_unavailable"]);
-    expect((await m.call("resume", "--accept", "nonsense", "--binding", id)).code).toBe(EXIT.USAGE);
+    expect((await m.support("resume", "--accept", "nonsense", "--binding", id)).code).toBe(
+      EXIT.USAGE,
+    );
   });
 
   it("service install writes the agent and bootstraps it; uninstall boots it out", async () => {
@@ -160,7 +189,7 @@ describe("lfcp-bridge (PR 9 commands)", () => {
   it("doctor reports and exits 3 on a failure (no helper app here); log shows the journal", async () => {
     const m = await machine();
     await m.call("bind", "Work");
-    const d = await m.call("doctor");
+    const d = await m.support("doctor");
     expect(d.code).toBe(EXIT.NEEDS_PERSON);
     expect(d.out).toContain("fail  helper");
     expect((await m.call("log")).out).toContain("bootstrap.done");
@@ -174,13 +203,17 @@ describe("lfcp-bridge (PR 9 commands)", () => {
     const state = () =>
       JSON.stringify([
         m.db.prepare("SELECT * FROM binding_holds ORDER BY binding_id, reason").all(),
-        m.db.prepare("SELECT * FROM journal ORDER BY id").all(),
+        // The support queue's own record of the command aside (A§7.3: every command is journaled).
+        m.db.prepare("SELECT * FROM journal WHERE key <> 'support.command' ORDER BY id").all(),
         m.db.prepare("SELECT * FROM bindings ORDER BY id").all(),
       ]);
     const before = state();
-    const d = await m.call("doctor");
+    const d = await m.support("doctor");
     expect(d.out).toContain("this bridge's marker is gone");
     expect(state()).toBe(before);
+    expect(
+      m.db.prepare("SELECT count(*) AS n FROM journal WHERE key = 'support.command'").get(),
+    ).toEqual({ n: 1 });
   });
 
   it("still answers 'not available' for commands of later PRs; run needs the machine's process", async () => {
@@ -230,20 +263,20 @@ describe("lfcp-bridge (PR 9 commands)", () => {
     expect(started.code).toBe(EXIT.OK);
     expect(started.out).toMatch(/m_\w+ {2}catching_up {2}i1 -> i2/);
     fresh = true;
-    const switched = await m.call("migrate", "resume");
+    const switched = await m.support("migrate", "resume");
     expect(switched.out).toContain("awaiting_revocation");
     expect(switched.out).toContain("revoke the old device (installation i1)");
-    expect((await m.call("migrate", "abort")).err).toContain("after switching only forward");
+    expect((await m.support("migrate", "abort")).err).toContain("after switching only forward");
     proven = true;
-    await m.call("migrate", "resume");
-    expect((await m.call("migrate", "status")).out).toMatch(/done {2}i1 -> i2/);
+    await m.support("migrate", "resume");
+    expect((await m.support("migrate", "status")).out).toMatch(/done {2}i1 -> i2/);
   });
 
   it("sections add needs the run process in this build; migrate status works without it", async () => {
     const m = await machine();
     expect(await m.call("sections", "add", "Home")).toMatchObject({ code: EXIT.USAGE });
-    expect((await m.call("migrate", "status")).out).toBe("no migrations");
-    expect((await m.call("migrate", "abort")).code).toBe(EXIT.NOT_FOUND);
+    expect((await m.support("migrate", "status")).out).toBe("no migrations");
+    expect((await m.support("migrate", "abort")).code).toBe(EXIT.NOT_FOUND);
   });
 });
 
@@ -271,7 +304,7 @@ describe("verify --record (§7.6): the owner's report sets writesVerified", () =
     expect(r.code).toBe(EXIT.OK);
     expect(r.out).toContain("writesVerified: helper 0.3.1 on macOS 26.5.2, recorded ");
     expect(loadConfig(m.paths.config).writesVerified).toMatchObject(HELPER);
-    expect((await m.call("status")).out).toMatch(
+    expect((await m.support("status")).out).toMatch(
       /writesVerified: helper 0\.3\.1 on macOS 26\.5\.2 \(recorded \d{4}-/,
     );
   });

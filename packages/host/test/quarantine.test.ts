@@ -1,4 +1,5 @@
-// `lfcp-bridge quarantine` (D-010 §2.1, §5.4, §5.7, B19, B21) through `main`, on the harness's
+// `lfcp-bridge quarantine` (D-010 §2.1, §5.4, §5.7, B19, B21) through support.sock (A§7.3, E-006:
+// the bundle's thin client, the host's queue, the run process's transport), on the harness's
 // binding (a real section replica, the fake account, the real handler): an unknown outcome made by
 // a lost answer, an ambiguous match made by a second reminder with the Task's link; the list, each
 // resolution and what the next pass does after it; the count in `status`.
@@ -11,19 +12,24 @@ import { receiptOf } from "@openlfcp/client";
 import { setTitle, type Task } from "@openlfcp/shared-objects";
 import { afterEach, describe, expect, it } from "vitest";
 import { bridgePaths, loadConfig } from "../src/config.js";
-import { EXIT, Holds, Journal, main } from "../src/index.js";
+import { EXIT, Holds, Journal } from "../src/index.js";
 import type { Runtime } from "../src/runtime.js";
 import { type Bridge, bridge } from "./support/bridge.js";
+import { type SupportHost, supportHost } from "./support/socket.js";
 
 let b: Bridge;
 let home: string | undefined;
+let host: SupportHost | undefined;
 afterEach(async () => {
+  if (host !== undefined) expect(host.transportsOpened()).toBe(0);
+  await host?.close();
+  host = undefined;
   await b?.close();
   if (home !== undefined) rmSync(home, { recursive: true, force: true });
   home = undefined;
 });
 
-function runtime(): () => Promise<Runtime> {
+function runtime(): Runtime {
   home = mkdtempSync(join(tmpdir(), "lfcp-quarantine-"));
   const paths = bridgePaths({ LFCP_BRIDGE_HOME: home, LFCP_BRIDGE_LOGS: join(home, "logs") }, home);
   const rt: Runtime = {
@@ -51,18 +57,13 @@ function runtime(): () => Promise<Runtime> {
     }),
     close: async () => {},
   };
-  return async () => rt;
+  return rt;
 }
 
+/** `lfcp-bridge <argv>` through support.sock; the host starts at the first call of a test. */
 async function call(...argv: string[]) {
-  const out: string[] = [];
-  const err: string[] = [];
-  const code = await main(argv, {
-    out: (l) => out.push(l),
-    err: (l) => err.push(l),
-    runtime: runtime(),
-  });
-  return { code, out: out.join("\n"), err: err.join("\n") };
+  host ??= await supportHost(runtime(), b.t);
+  return host.call(...argv);
 }
 
 const reminders = () => b.reminders(b.list.id).filter((r) => !r.completed);
