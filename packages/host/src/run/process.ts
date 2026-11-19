@@ -497,9 +497,14 @@ export class BridgeProcess {
     const holds = this.#o.db
       .prepare("SELECT binding_id, reason FROM binding_holds ORDER BY binding_id, reason")
       .all() as { binding_id: string; reason: string }[];
-    const accepted = this.#o.db
-      .prepare("SELECT key FROM meta WHERE key LIKE 'hold_accepted%' ORDER BY key")
-      .all() as { key: string }[];
+    const accepted = [
+      ...(this.#o.db
+        .prepare("SELECT key FROM meta WHERE key LIKE 'hold_accepted_at:%' ORDER BY key")
+        .all() as { key: string }[]),
+      ...(this.#o.db
+        .prepare("SELECT id FROM acceptances WHERE state = 'pending' ORDER BY id")
+        .all() as { id: string }[]),
+    ];
     // A command's sequence: a stop and a resume between two looks is still seen.
     const seq = this.#o.db.prepare("SELECT value FROM meta WHERE key = 'control_seq'").get() as
       | { value: string }

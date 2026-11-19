@@ -2,8 +2,10 @@
 // was first set and an optional detail. A binding with any hold runs no
 // effect (§7.1 r4: no exceptions, the N8 `migration` hold included). Setting a hold
 // that is set keeps its `since`; a hold is lifted by `resume --accept
-// <hold>` or by the condition that set it going away.
+// <hold>` or by the condition that set it going away. Accepting a guard's hold
+// records a durable acceptance of its anomaly (acceptances.ts, A§7.1).
 
+import { Acceptances, type AnomalySnapshot, snapshot } from "./acceptances.js";
 import type { BridgeDatabase } from "./database.js";
 
 /** The hold reasons D-010 r4 names (§6.5, §7.2, §7.3–7.5, §9); a PR that needs another adds it here. */
@@ -43,6 +45,12 @@ function check(reason: string): asserts reason is HoldReason {
 }
 
 const iso = (now: number) => new Date(now).toISOString();
+
+/** The anomaly snapshot a guard keeps in its hold's detail (Limits), if any. */
+export function anomalyOf(detail: unknown): AnomalySnapshot | undefined {
+  const a = (detail as { anomaly?: AnomalySnapshot } | null | undefined)?.anomaly;
+  return a !== undefined && typeof a.effectSetHash === "string" ? a : undefined;
+}
 
 /** The holds of the bridge database. */
 export class Holds {
@@ -89,39 +97,35 @@ export class Holds {
     );
   }
 
-  /** The holds of `binding`, by reason. */
   /**
-   * `resume --accept <hold>` (§7.5): lifts the hold and accepts the anomaly that set it — the next
-   * pass that would set it again goes through once instead (Limits.admit, the count drop). True
-   * when the hold was set.
+   * `resume --accept <hold>`, the answer [Yes] (A§7.1, E18): lifts the hold and accepts the
+   * anomaly it held — its snapshot (the hold's detail `anomaly`) becomes a pending acceptance,
+   * checked by every admission of the binding's plans (Limits.admit). A guard's hold without a
+   * snapshot (set by 0.5, or by a guard without items) is accepted as a `count` anomaly. True when
+   * the hold was set.
    */
-  accept(binding: string, reason: HoldReason): boolean {
+  accept(binding: string, reason: HoldReason, o: { readonly answerId?: string } = {}): boolean {
     check(reason);
-    // Only a hold that is set can be accepted: no permission is kept for an anomaly to come
-    // (review PR 9b #24).
-    const lifted = this.lift(binding, reason);
-    if (!lifted) return false;
-    this.db
-      .prepare(
-        "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-      )
-      .run(`hold_accepted:${binding}:${reason}`, iso(this.now()));
-    this.markAccepted(binding, reason, iso(this.now()));
-    return true;
+    return this.db
+      .transaction(() => {
+        // Only a hold that is set can be accepted: no permission is kept for an anomaly to come
+        // (review PR 9b #24).
+        const held = this.of(binding).find((h) => h.reason === reason);
+        if (held === undefined || !this.lift(binding, reason)) return false;
+        const at = iso(this.now());
+        if (reason.startsWith("guard_")) {
+          const snap = anomalyOf(held.detail) ?? snapshot(binding, reason, "count");
+          new Acceptances(this.db, this.now).record(snap, o.answerId);
+        }
+        this.markAccepted(binding, reason, at);
+        return true;
+      })
+      .immediate();
   }
 
-  /** An acceptance of `reason` on `binding` waits (not used up). */
+  /** A pending acceptance of `reason` on `binding` waits (not consumed, not void). */
   hasAccepted(binding: string, reason: HoldReason): boolean {
-    return (
-      this.db
-        .prepare("SELECT 1 AS x FROM meta WHERE key = ?")
-        .get(`hold_accepted:${binding}:${reason}`) !== undefined
-    );
-  }
-
-  /** Drops every waiting acceptance of `binding`: a pass that needed none of them ends them. */
-  clearAccepted(binding: string): void {
-    this.db.prepare("DELETE FROM meta WHERE key LIKE ?").run(`hold_accepted:${binding}:%`);
+    return new Acceptances(this.db, this.now).pending(binding, reason).length > 0;
   }
 
   /**
@@ -144,14 +148,7 @@ export class Holds {
       .run(`hold_accepted_at:${binding}:${reason}`, at);
   }
 
-  /** An acceptance of `reason` on `binding` waits: it is used up by this call (true). */
-  takeAccepted(binding: string, reason: HoldReason): boolean {
-    return (
-      this.db.prepare("DELETE FROM meta WHERE key = ?").run(`hold_accepted:${binding}:${reason}`)
-        .changes === 1
-    );
-  }
-
+  /** The holds of `binding`, by reason. */
   of(binding: string): readonly Hold[] {
     const rows = this.db
       .prepare(

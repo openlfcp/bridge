@@ -60,6 +60,13 @@ export const JOURNAL_TEXT: Readonly<Record<string, (p: JournalParams) => string>
     "The reminder repeats: its completion and due date are not synchronized while it does",
   "link.status_unlocked": () =>
     "The reminder no longer repeats: completion and due are synchronized again",
+  "hold.acceptance_dropped": (p) =>
+    `An answer to ${String(p.reason ?? "a guard")} from the previous bridge was not carried over: if the change is still there, you are asked again`,
+  "acceptance.consumed": () => "Your answer was applied: the changes you accepted are synchronized",
+  "acceptance.vanished": () =>
+    "Resolved by itself: the changes you were asked about are gone, nothing was applied for them",
+  "acceptance.changed": () =>
+    "Things changed since your answer: nothing was applied, the binding is paused and the question is asked again",
   "hold.import_ambiguous": () =>
     "A reminder being imported cannot be found any more: new reminders are not imported until you decide (lfcp-bridge quarantine)",
   "hold.foreign_bridge": () =>

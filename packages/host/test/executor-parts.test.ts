@@ -294,8 +294,12 @@ describe("Limits (r2 §7.2)", () => {
     t += 1000;
     expect(holds.accept("b", "guard_mass_import")).toBe(true);
     t += 1000;
-    // The baseline moved: this one passes without needing the acceptance — which ends with it.
-    expect(limits.admit("b", { intents: [imp("X")], unlinks: 0 })).toEqual({ ok: true });
+    // The accepted anomaly ({X}) comes again: the acceptance is consumed with it (A§7.1).
+    expect(limits.admit("b", { intents: [imp("X")], unlinks: 0 })).toEqual({
+      ok: true,
+      accepted: ["guard_mass_import"],
+    });
+    expect(holds.hasAccepted("b", "guard_mass_import")).toBe(false);
     intents.prepare(imp("X"));
     t += 1000;
     const eleven = Array.from({ length: 11 }, (_, k) => imp(`N${k}`));
