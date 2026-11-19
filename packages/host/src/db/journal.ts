@@ -108,6 +108,8 @@ export const JOURNAL_TEXT: Readonly<Record<string, (p: JournalParams) => string>
     `Stopped: more changes than a person makes (${String(p.holds ?? "")}). Usually the filter got narrower or the list became unavailable — not that you deleted these tasks`,
   "safe_mode.on": () => "Safe Mode: the bridge crashed twice at start",
   "safe_mode.off": () => "Safe Mode turned off",
+  "safe_mode.reset_refused": (p) =>
+    `safe-mode reset refused: ${Array.isArray(p.causes) ? p.causes.join(", ") : "a cause"}`,
   "support.command": (p) => `support: lfcp-bridge ${String(p.command)} → exit ${String(p.exit)}`,
   "delivery.rejected": () => "LFCP refused a change made from Reminders",
   "delivery.partial": () => "LFCP accepted only part of a change made from Reminders",

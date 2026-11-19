@@ -231,6 +231,12 @@ export class BridgeProcess {
     return this.#o.transport;
   }
 
+  /** Every installation connected to its server; undefined without installations. */
+  connected(): boolean | undefined {
+    const all = [...this.#installations.values()];
+    return all.length === 0 ? undefined : all.every((i) => i.host.connected);
+  }
+
   /**
    * Runs `fn` alone, serialized with the passes (A§7.3, the host's one command queue): it starts
    * after the passes in flight, and a pass asked meanwhile starts after it. The host's queue
