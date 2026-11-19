@@ -12,6 +12,7 @@
 // Version 5: a person's decisions on refused and quarantined intents.
 // Version 6: durable acceptances of anomaly snapshots (A§7.1, E18).
 // Version 7: authorizations of exact inverse sets, a person's decisions, ignored imports (A§7.1–7.2).
+// Version 8: the items of a decision, each finished on its own (A§7.2 "writes finished").
 //
 // Beyond §3: STRICT tables, NOT NULL where a row has no meaning without the
 // value, and foreign keys to installations and bindings (PRAGMA
@@ -428,8 +429,28 @@ const V7: Migration = {
   ],
 };
 
+// Version 8 (A§7.2, E18): a decision is finished only when its writes are — Task by Task. An item
+// is `active` from the answer until a pass sees its Task agreed (the inverse write confirmed,
+// `done`; for recreate: linked again) or no longer in the state the person answered (`changed`).
+// Only active items turn the planner around: a finished one never reverses a later change of the
+// person's, an unfinished one keeps the opposite transfer out between passes. Down drops it.
+const V8: Migration = {
+  version: 8,
+  name: "decision items",
+  up: [
+    `CREATE TABLE decision_items (
+      decision_id TEXT NOT NULL REFERENCES decisions(id),
+      task_id TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('active','done','changed')),
+      ended_at TEXT,
+      PRIMARY KEY (decision_id, task_id)
+    ) STRICT, WITHOUT ROWID`,
+  ],
+  down: ["DROP TABLE decision_items"],
+};
+
 /** Every migration, in order. */
-export const MIGRATIONS: readonly Migration[] = Object.freeze([V1, V2, V3, V4, V5, V6, V7]);
+export const MIGRATIONS: readonly Migration[] = Object.freeze([V1, V2, V3, V4, V5, V6, V7, V8]);
 
 /** The schema version this build writes. */
 export const SCHEMA_VERSION = MIGRATIONS.length;
