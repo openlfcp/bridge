@@ -176,13 +176,17 @@ describe("guards on imports", () => {
     expect(b.order()).toEqual([]);
   });
 
-  it("10 pass; in strict mode (24 h after approve) more than 3 is a hold", async () => {
+  it("10 pass; in strict mode (24 h after approve) the same: 10 pass, 11 is a hold (E16)", async () => {
     b = await bridge();
     for (let k = 0; k < 10; k++) b.person.create(b.list.id, `New ${k}`);
     expect((await b.sync()).prepared).toHaveLength(10);
     await b.close();
     b = await bridge({ strict: true });
-    for (let k = 0; k < 4; k++) b.person.create(b.list.id, `New ${k}`);
+    for (let k = 0; k < 10; k++) b.person.create(b.list.id, `New ${k}`);
+    expect((await b.sync()).prepared).toHaveLength(10);
+    await b.close();
+    b = await bridge({ strict: true });
+    for (let k = 0; k < 11; k++) b.person.create(b.list.id, `New ${k}`);
     expect((await b.sync()).prepared).toEqual([]);
     expect(b.db.prepare("SELECT reason FROM binding_holds").all()).toEqual([
       { reason: "guard_mass_import" },
@@ -258,7 +262,7 @@ describe("review PR 11", () => {
     expect(b.linkOf(r.ref.id)?.state).toBe("linked");
   });
 
-  it("#22 the dry run counts each import once, as apply does: 6/10/11, strict 2/3/4", async () => {
+  it("#22 the dry run counts each import once, as apply does: 6/10/11, strict too (E16)", async () => {
     const guards = async (n: number, strict = false) => {
       b = await bridge({ strict });
       for (let k = 0; k < n; k++) b.person.create(b.list.id, `New ${k}`);
@@ -271,7 +275,7 @@ describe("review PR 11", () => {
       return held;
     };
     expect([await guards(6), await guards(10), await guards(11)]).toEqual([false, false, true]);
-    expect([await guards(2, true), await guards(3, true), await guards(4, true)]).toEqual([
+    expect([await guards(6, true), await guards(10, true), await guards(11, true)]).toEqual([
       false,
       false,
       true,

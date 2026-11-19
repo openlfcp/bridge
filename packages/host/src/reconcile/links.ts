@@ -35,7 +35,7 @@ import { type HoldReason, Holds } from "../db/holds.js";
 import { Journal } from "../db/journal.js";
 import type { Executor } from "../executor/executor.js";
 import type { Intent } from "../executor/intents.js";
-import { Limits } from "../executor/limits.js";
+import { Limits, type PlannedUnlink } from "../executor/limits.js";
 
 export type LinkOutcome = {
   readonly taskId: string;
@@ -132,53 +132,89 @@ export class LinkApplier {
       if (link !== undefined) located.set(t.taskId, await this.#locate(link, t.taskId, b));
     }
     // 2. The whole pass against the limits, on the state before any change.
-    let unlinks = 0;
+    const unlinks: PlannedUnlink[] = [];
     for (const t of plan.transitions) {
-      if (t.kind === "task_gone" || t.kind === "out_of_filter") unlinks++;
+      const externalId = () => {
+        const e = this.#link(bindingId, t.taskId)?.rem_external_id;
+        return e == null ? {} : { externalId: e };
+      };
+      if (t.kind === "task_gone" || t.kind === "out_of_filter")
+        unlinks.push({ taskId: t.taskId, cause: t.kind, ...externalId() });
       const where = located.get(t.taskId);
-      if (where?.kind === "elsewhere" || (t.kind === "apple_missing" && where?.kind === "absent"))
-        unlinks++;
+      if (where?.kind === "elsewhere")
+        unlinks.push({ taskId: t.taskId, cause: "moved_out", ...externalId() });
+      else if (t.kind === "apple_missing" && where?.kind === "absent")
+        unlinks.push({ taskId: t.taskId, cause: "deleted_in_apple", ...externalId() });
     }
-    const admitted = new Limits(db, undefined, this.#now).admit(
-      bindingId,
-      { intents: plan.intents, unlinks },
-      o.guards?.includes("guard_count_drop") ? ["guard_count_drop"] : [],
+    // What guard_count_drop holds: the links `linked` now that this plan no longer counts, per side
+    // (as the plan counts linkedLfcp / linkedApple).
+    const linkedNow = new Set(
+      (
+        db
+          .prepare("SELECT task_id FROM links WHERE binding_id = ? AND state = 'linked'")
+          .all(bindingId) as { task_id: string }[]
+      ).map((r) => r.task_id),
     );
-    const stopped: HoldReason[] = admitted.ok ? [] : [...admitted.holds];
-    // An accepted anomaly: this pass's unlinks are journaled as accepted, its imports become the
-    // new baseline — the next pass is not stopped by the very work a person accepted.
-    const accepted = admitted.ok ? (admitted.accepted ?? []) : [];
-    if (accepted.includes("guard_count_drop") && o.runId !== undefined)
-      db.prepare(
-        "UPDATE runs SET stats_json = json_set(coalesce(stats_json, '{}'), '$.countDropAccepted', json('true')) WHERE id = ?",
-      ).run(o.runId);
-    if (stopped.length > 0) return { kind: "held", holds: stopped };
+    const lfcpGone = new Set<string>();
+    const appleGone = new Set<string>();
+    for (const t of plan.transitions)
+      if (t.kind === "task_gone" || t.kind === "out_of_filter" || t.kind === "quarantine")
+        lfcpGone.add(t.taskId);
+      else if (t.kind === "apple_missing") appleGone.add(t.taskId);
+    for (const w of plan.waiting)
+      if (w.waiting === "apple_incomplete") appleGone.add(w.taskId);
+      else lfcpGone.add(w.taskId);
+    for (const id of lfcpGone) appleGone.add(id);
+    const uncounted = {
+      apple: [...appleGone].filter((id) => linkedNow.has(id)),
+      lfcp: [...lfcpGone].filter((id) => linkedNow.has(id)),
+    };
+    // From the admission to the prepared intents, one transaction (all of it is synchronous): an
+    // acceptance this pass consumes (A§7.1) is consumed with its work, or stays pending.
+    return db
+      .transaction((): LinkApplyResult => {
+        const admitted = new Limits(db, undefined, this.#now).admit(
+          bindingId,
+          { intents: plan.intents, unlinks, uncounted },
+          o.guards?.includes("guard_count_drop") ? ["guard_count_drop"] : [],
+        );
+        const stopped: HoldReason[] = admitted.ok ? [] : [...admitted.holds];
+        // An accepted anomaly: this pass's unlinks are journaled as accepted, its imports become
+        // the new baseline — the next pass is not stopped by the very work a person accepted.
+        const accepted = admitted.ok ? (admitted.accepted ?? []) : [];
+        if (accepted.includes("guard_count_drop") && o.runId !== undefined)
+          db.prepare(
+            "UPDATE runs SET stats_json = json_set(coalesce(stats_json, '{}'), '$.countDropAccepted', json('true')) WHERE id = ?",
+          ).run(o.runId);
+        if (stopped.length > 0) return { kind: "held", holds: stopped };
 
-    // 3. Apply: the link transitions, then the intents.
-    const out: LinkOutcome[] = [];
-    for (const t of plan.transitions) {
-      const result = this.#one(
-        bindingId,
-        b,
-        t,
-        located.get(t.taskId),
-        accepted.includes("guard_mass_unlink"),
-      );
-      out.push({ taskId: t.taskId, transition: t.kind, result });
-    }
-    const prepared =
-      o.executor === undefined || plan.intents.length === 0
-        ? []
-        : (o.executor.prepare(
+        // 3. Apply: the link transitions, then the intents.
+        const out: LinkOutcome[] = [];
+        for (const t of plan.transitions) {
+          const result = this.#one(
             bindingId,
-            { intents: plan.intents, unlinks: 0 },
-            { admitted: true },
-          ) ?? []);
-    if (accepted.includes("guard_mass_import"))
-      for (const i of prepared)
-        if (i.kind === "create_task")
-          holds.markAccepted(bindingId, "guard_mass_import", i.createdAt);
-    return { kind: "applied", outcomes: out, prepared };
+            b,
+            t,
+            located.get(t.taskId),
+            accepted.includes("guard_mass_unlink"),
+          );
+          out.push({ taskId: t.taskId, transition: t.kind, result });
+        }
+        const prepared =
+          o.executor === undefined || plan.intents.length === 0
+            ? []
+            : (o.executor.prepare(
+                bindingId,
+                { intents: plan.intents, unlinks: 0 },
+                { admitted: true },
+              ) ?? []);
+        if (accepted.includes("guard_mass_import"))
+          for (const i of prepared)
+            if (i.kind === "create_task")
+              holds.markAccepted(bindingId, "guard_mass_import", i.createdAt);
+        return { kind: "applied", outcomes: out, prepared };
+      })
+      .immediate();
   }
 
   #link(bindingId: string, taskId: string): LinkRow | undefined {

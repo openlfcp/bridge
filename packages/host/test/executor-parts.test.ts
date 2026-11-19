@@ -259,7 +259,7 @@ describe("Limits (r2 §7.2)", () => {
     expect(limits.admit("b", { intents: [], unlinks: 2 }).ok).toBe(false);
   });
 
-  it("imports: > 10 an hour, counting the prepared ones; > 3 in strict", () => {
+  it("imports: > 10 an hour, counting the prepared ones; in strict the same (E16)", () => {
     const limits = new Limits(db, undefined, () => T0);
     const intents = new Intents(db, () => T0);
     for (let k = 0; k < 10; k++) intents.prepare(imp(`T${k}`));
@@ -272,12 +272,9 @@ describe("Limits (r2 §7.2)", () => {
     db.prepare("DELETE FROM intents").run();
     new Holds(db).lift("b", "guard_mass_import");
     db.prepare("UPDATE bindings SET strict_until = ?").run(new Date(T0 + 1000).toISOString());
-    expect(limits.admit("b", { intents: [imp("A"), imp("B"), imp("C")], unlinks: 0 }).ok).toBe(
-      true,
-    );
-    expect(
-      limits.admit("b", { intents: [imp("A"), imp("B"), imp("C"), imp("D")], unlinks: 0 }).ok,
-    ).toBe(false);
+    const n = (k: number) => Array.from({ length: k }, (_, j) => imp(`S${j}`));
+    expect(limits.admit("b", { intents: n(10), unlinks: 0 }).ok).toBe(true);
+    expect(limits.admit("b", { intents: n(11), unlinks: 0 }).ok).toBe(false);
   });
 
   it("review PR 9b #24: one accept lets one anomaly through, not the next; no hold, no acceptance; all guards or none", () => {
@@ -294,8 +291,12 @@ describe("Limits (r2 §7.2)", () => {
     t += 1000;
     expect(holds.accept("b", "guard_mass_import")).toBe(true);
     t += 1000;
-    // The baseline moved: this one passes without needing the acceptance — which ends with it.
-    expect(limits.admit("b", { intents: [imp("X")], unlinks: 0 })).toEqual({ ok: true });
+    // The accepted anomaly ({X}) comes again: the acceptance is consumed with it (A§7.1).
+    expect(limits.admit("b", { intents: [imp("X")], unlinks: 0 })).toEqual({
+      ok: true,
+      accepted: ["guard_mass_import"],
+    });
+    expect(holds.hasAccepted("b", "guard_mass_import")).toBe(false);
     intents.prepare(imp("X"));
     t += 1000;
     const eleven = Array.from({ length: 11 }, (_, k) => imp(`N${k}`));
@@ -308,11 +309,17 @@ describe("Limits (r2 §7.2)", () => {
     expect(holds.hasAccepted("b", "guard_mass_unlink")).toBe(false);
     // Two guards, one accepted: held, and the acceptance is not used up meanwhile.
     expect(holds.accept("b", "guard_mass_import")).toBe(true);
-    const both = limits.admit("b", { intents: eleven, unlinks: 0 }, ["guard_count_drop"]);
+    // The count drop's links (A§7.1: what it holds).
+    const uncounted = { apple: ["L0", "L1", "L2"], lfcp: [] };
+    const both = limits.admit("b", { intents: eleven, unlinks: 0, uncounted }, [
+      "guard_count_drop",
+    ]);
     expect(both).toMatchObject({ ok: false, holds: ["guard_count_drop"] });
     expect(holds.hasAccepted("b", "guard_mass_import")).toBe(true);
     expect(holds.accept("b", "guard_count_drop")).toBe(true);
-    expect(limits.admit("b", { intents: eleven, unlinks: 0 }, ["guard_count_drop"])).toMatchObject({
+    expect(
+      limits.admit("b", { intents: eleven, unlinks: 0, uncounted }, ["guard_count_drop"]),
+    ).toMatchObject({
       ok: true,
     });
     expect(holds.hasAccepted("b", "guard_mass_import")).toBe(false);
@@ -345,5 +352,149 @@ describe("Limits (r2 §7.2)", () => {
     expect(new Holds(db).has("b", "guard_count_drop")).toBe(true);
     const [entry] = new Journal(db).list({ minLevel: "error" }).slice(-1);
     expect(entry?.text).toMatch(/Usually the filter got narrower/);
+  });
+});
+
+describe("A§8: one table of limits (E16), each row at its boundaries", () => {
+  let t = T0;
+  const at = (ms: number) => new Date(ms).toISOString();
+  const limits = () => new Limits(db, undefined, () => t);
+  const fires = (planned: Parameters<Limits["check"]>[1], reason: string) => {
+    const a = limits().check("b", planned);
+    return !a.ok && a.holds.includes(reason as never);
+  };
+  const links = (n: number) => {
+    db.prepare("DELETE FROM links").run();
+    for (let k = 0; k < n; k++)
+      db.prepare(
+        "INSERT INTO links (binding_id, task_id, origin, state, created_at, updated_at) VALUES ('b', ?, 'lfcp', 'linked', ?, ?)",
+      ).run(`K${k}`, at(T0), at(T0));
+  };
+  const journal = (ms: number, key: string, params: Record<string, unknown> = {}) =>
+    new Journal(db, () => ms).append("info", key, { bindingId: "b", params });
+  const strict = (until: number) =>
+    db.prepare("UPDATE bindings SET strict_until = ?").run(at(until));
+  const imp = (task: string) =>
+    newIntent(task, { direction: "to_lfcp", kind: "create_task", fields: ["title"] });
+  const prepared = (ms: number, intents: NewIntent[]) => {
+    const i = new Intents(db, () => ms);
+    for (const n of intents) i.prepare(n);
+  };
+  beforeEach(() => {
+    t = T0;
+  });
+
+  it("unlinks: > max(3, 10 % linked); measure — the journal's unlink keys, not the accepted ones, + the plan", () => {
+    links(20);
+    expect(fires({ intents: [], unlinks: 3 }, "guard_mass_unlink")).toBe(false);
+    expect(fires({ intents: [], unlinks: 4 }, "guard_mass_unlink")).toBe(true);
+    links(40); // 10 % = 4
+    expect(fires({ intents: [], unlinks: 4 }, "guard_mass_unlink")).toBe(false);
+    expect(fires({ intents: [], unlinks: 5 }, "guard_mass_unlink")).toBe(true);
+    // Every unlink key counts (out_of_filter, task_gone included); other keys and accepted ones do not.
+    journal(t, "link.unlinked");
+    journal(t, "link.out_of_filter");
+    journal(t, "link.task_gone");
+    journal(t, "link.relinked");
+    journal(t, "link.unlinked", { accepted: true });
+    expect(fires({ intents: [], unlinks: 1 }, "guard_mass_unlink")).toBe(false);
+    expect(fires({ intents: [], unlinks: 2 }, "guard_mass_unlink")).toBe(true);
+  });
+
+  it("unlinks: the window is 1 h; strict (first 24 h) > 1; after acceptedAt only what came later", () => {
+    links(20);
+    journal(t - 3_600_000, "link.unlinked"); // exactly 1 h ago: out
+    expect(fires({ intents: [], unlinks: 3 }, "guard_mass_unlink")).toBe(false);
+    journal(t - 3_599_999, "link.unlinked"); // just inside
+    expect(fires({ intents: [], unlinks: 3 }, "guard_mass_unlink")).toBe(true);
+    // The 24 h boundary: strict while strict_until is ahead.
+    db.prepare("DELETE FROM journal").run();
+    strict(t + 1);
+    expect(limits().strict("b")).toBe(true);
+    expect(fires({ intents: [], unlinks: 1 }, "guard_mass_unlink")).toBe(false);
+    expect(fires({ intents: [], unlinks: 2 }, "guard_mass_unlink")).toBe(true);
+    strict(t);
+    expect(limits().strict("b")).toBe(false);
+    expect(fires({ intents: [], unlinks: 3 }, "guard_mass_unlink")).toBe(false);
+    // After acceptance: the window starts at acceptedAt.
+    journal(t - 60_000, "link.unlinked");
+    journal(t - 60_000, "link.unlinked");
+    expect(fires({ intents: [], unlinks: 2 }, "guard_mass_unlink")).toBe(true);
+    new Holds(db).markAccepted("b", "guard_mass_unlink", at(t - 30_000));
+    expect(fires({ intents: [], unlinks: 3 }, "guard_mass_unlink")).toBe(false);
+    journal(t - 10_000, "link.unlinked");
+    expect(fires({ intents: [], unlinks: 3 }, "guard_mass_unlink")).toBe(true);
+  });
+
+  it("imports: > 10 in 1 h, in the first 24 h too (E16); measure — to_lfcp create_task only; after acceptedAt", () => {
+    const plan = (k: number) => Array.from({ length: k }, (_, j) => imp(`P${j}`));
+    for (const s of [t - 1, t + 86_400_000]) {
+      strict(s);
+      expect(fires({ intents: plan(10), unlinks: 0 }, "guard_mass_import")).toBe(false);
+      expect(fires({ intents: plan(11), unlinks: 0 }, "guard_mass_import")).toBe(true);
+    }
+    // Not imports: new reminders (to_apple create) and updates.
+    const creates = Array.from({ length: 11 }, (_, j) =>
+      newIntent(`C${j}`, { kind: "create", fields: ["title"] }),
+    );
+    expect(limits().check("b", { intents: creates, unlinks: 0 })).toEqual({ ok: true });
+    const updates = Array.from({ length: 11 }, (_, j) =>
+      newIntent(`U${j}`, { direction: "to_lfcp", kind: "update_task" }),
+    );
+    expect(fires({ intents: updates, unlinks: 0 }, "guard_mass_import")).toBe(false);
+    // The window: prepared exactly 1 h ago is out, just inside counts.
+    prepared(t - 3_600_000, [imp("W0")]);
+    expect(fires({ intents: plan(10), unlinks: 0 }, "guard_mass_import")).toBe(false);
+    prepared(t - 3_599_999, [imp("W1")]);
+    expect(fires({ intents: plan(10), unlinks: 0 }, "guard_mass_import")).toBe(true);
+    // A dry run's imports beyond its intents count too.
+    expect(fires({ intents: plan(8), unlinks: 0, imports: 1 }, "guard_mass_import")).toBe(false);
+    expect(fires({ intents: plan(9), unlinks: 0, imports: 1 }, "guard_mass_import")).toBe(true);
+    // After acceptance: only what came after acceptedAt.
+    new Holds(db).markAccepted("b", "guard_mass_import", at(t - 1000));
+    expect(fires({ intents: plan(10), unlinks: 0 }, "guard_mass_import")).toBe(false);
+  });
+
+  it("status: > 50 % linked at ≥ 6 links, this plan only (no window), strict the same", () => {
+    const status = (k: number, field = "completed") =>
+      Array.from({ length: k }, (_, j) => newIntent(`S${j}`, { fields: [field] }));
+    links(5);
+    expect(fires({ intents: status(5), unlinks: 0 }, "guard_mass_status")).toBe(false);
+    links(6);
+    for (const s of [t - 1, t + 86_400_000]) {
+      strict(s);
+      expect(fires({ intents: status(3), unlinks: 0 }, "guard_mass_status")).toBe(false);
+      expect(fires({ intents: status(4), unlinks: 0 }, "guard_mass_status")).toBe(true);
+    }
+    // Every status field counts; others do not.
+    expect(fires({ intents: status(4, "status"), unlinks: 0 }, "guard_mass_status")).toBe(true);
+    expect(fires({ intents: status(4, "completion_date"), unlinks: 0 }, "guard_mass_status")).toBe(
+      true,
+    );
+    expect(fires({ intents: status(4, "title"), unlinks: 0 }, "guard_mass_status")).toBe(false);
+    // No window: status intents prepared a minute ago do not count.
+    prepared(t - 60_000, status(3));
+    expect(fires({ intents: [], unlinks: 0 }, "guard_mass_status")).toBe(false);
+  });
+
+  it("count drop: `linked` of one side, previous pass → this one, > 50 % from ≥ 5 (no window)", () => {
+    const l = limits();
+    expect(l.wouldDrop(4, 0)).toBe(false);
+    expect(l.wouldDrop(5, 3)).toBe(false);
+    expect(l.wouldDrop(5, 2)).toBe(true);
+    expect(l.wouldDrop(6, 3)).toBe(false);
+    expect(l.wouldDrop(6, 2)).toBe(true);
+    strict(t + 86_400_000);
+    expect(l.wouldDrop(6, 3)).toBe(false);
+  });
+
+  it("backlog: open intents now + the plan > 200 (no window); finalized ones do not count", () => {
+    const many = (k: number, p: string) =>
+      Array.from({ length: k }, (_, j) => newIntent(`${p}${j}`, { fields: ["title"] }));
+    prepared(t - 86_400_000, many(150, "O"));
+    expect(fires({ intents: many(50, "N"), unlinks: 0 }, "guard_backlog")).toBe(false);
+    expect(fires({ intents: many(51, "N"), unlinks: 0 }, "guard_backlog")).toBe(true);
+    db.prepare("UPDATE intents SET state = 'finalized' WHERE task_id = 'O0'").run();
+    expect(fires({ intents: many(51, "N"), unlinks: 0 }, "guard_backlog")).toBe(false);
   });
 });

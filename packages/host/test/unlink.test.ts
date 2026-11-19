@@ -12,7 +12,7 @@ import {
   unassign,
 } from "@openlfcp/shared-objects";
 import { afterEach, describe, expect, it } from "vitest";
-import type { Intent } from "../src/index.js";
+import { Holds, type Intent } from "../src/index.js";
 import { type Bridge, bridge } from "./support/bridge.js";
 
 let b: Bridge;
@@ -95,6 +95,62 @@ describe("E5: deleted or moved in Apple → unlinked (B4); many at once → hold
     for (const t of tasks) expect(b.link(t.id)?.state).toBe("linked");
     expect(b.db.prepare("SELECT reason FROM binding_holds").all()).toEqual([
       { reason: "guard_mass_unlink" },
+    ]);
+  });
+
+  it("A§7.1: the answer accepts these deletions — one more before the next pass is asked again; the answered ones are then applied", async () => {
+    b = await bridge();
+    const tasks = [];
+    for (const t of ["A", "B", "C", "D", "E"]) tasks.push(await b.task(t));
+    await b.sync();
+    for (const r of b.reminders().filter((x) => x.title !== "E")) b.person.delete(r.ref);
+    expect((await b.sync()).applied).toEqual({ kind: "held", holds: ["guard_mass_unlink"] });
+    const holds = new Holds(b.db);
+    expect(holds.accept("b", "guard_mass_unlink")).toBe(true);
+    // One more deleted after the answer: the anomaly changed — held again, nothing unlinked.
+    b.person.delete(reminderOf("E").ref);
+    expect((await b.sync()).applied).toEqual({ kind: "held", holds: ["guard_mass_unlink"] });
+    for (const t of tasks) expect(b.link(t.id)?.state).toBe("linked");
+    expect(b.db.prepare("SELECT state, outcome FROM acceptances ORDER BY id").all()).toEqual([
+      { state: "void", outcome: "changed" },
+    ]);
+    // The re-issued question answered: all five unlinked, journaled as accepted.
+    expect(holds.accept("b", "guard_mass_unlink")).toBe(true);
+    expect((await b.sync()).applied.kind).toBe("applied");
+    for (const t of tasks) expect(b.link(t.id)?.state).toBe("unlinked");
+    expect(b.db.prepare("SELECT state, outcome FROM acceptances ORDER BY id").all()).toEqual([
+      { state: "void", outcome: "changed" },
+      { state: "consumed", outcome: "consumed" },
+    ]);
+  });
+
+  it("A§7.1: a failure after part of the accepted pass was prepared rolls all of it back; the acceptance waits", async () => {
+    b = await bridge();
+    const tasks = [];
+    for (const t of ["A", "B", "C", "D", "E"]) tasks.push(await b.task(t));
+    await b.sync();
+    for (const r of b.reminders().filter((x) => x.title !== "E")) b.person.delete(r.ref);
+    b.person.create(b.list.id, "New in Reminders");
+    expect((await b.sync()).applied).toMatchObject({ kind: "held" });
+    const holds = new Holds(b.db);
+    for (const h of holds.of("b")) holds.accept("b", h.reason);
+    // The import's pending link fails after its intent was prepared and the unlinks applied.
+    b.db.exec(
+      "CREATE TRIGGER abort_pending AFTER INSERT ON links BEGIN SELECT RAISE(ABORT, 'abort'); END",
+    );
+    await expect(b.sync()).rejects.toThrow(/abort/);
+    for (const t of tasks) expect(b.link(t.id)?.state).toBe("linked");
+    const imports = "SELECT count(*) AS n FROM intents WHERE kind = 'create_task'";
+    expect(b.db.prepare(imports).get()).toEqual({ n: 0 });
+    expect(b.db.prepare("SELECT DISTINCT state FROM acceptances").all()).toEqual([
+      { state: "pending" },
+    ]);
+    b.db.exec("DROP TRIGGER abort_pending");
+    expect((await b.sync()).applied.kind).toBe("applied");
+    expect(tasks.filter((t) => b.link(t.id)?.state === "unlinked")).toHaveLength(4);
+    expect(b.db.prepare(imports).get()).toEqual({ n: 1 });
+    expect(b.db.prepare("SELECT DISTINCT state FROM acceptances").all()).toEqual([
+      { state: "consumed" },
     ]);
   });
 

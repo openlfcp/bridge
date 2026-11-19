@@ -216,12 +216,14 @@ export class Executor {
       const invalid = this.#invalid(n, binding);
       if (invalid !== undefined) throw new InvalidIntentError(n, invalid);
     }
-    if (o.admitted !== true) {
-      const admitted = new Limits(this.#o.db, undefined, this.#now).admit(bindingId, planned);
-      if (!admitted.ok) return undefined;
-    }
+    // Admission and preparation in one transaction: an acceptance it consumes (A§7.1) is consumed
+    // with the intents prepared, or not at all.
     return this.#o.db
       .transaction(() => {
+        if (o.admitted !== true) {
+          const admitted = new Limits(this.#o.db, undefined, this.#now).admit(bindingId, planned);
+          if (!admitted.ok) return undefined;
+        }
         const out: Intent[] = [];
         for (const n of planned.intents) {
           const held = this.#quarantinedFields(n);

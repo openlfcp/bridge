@@ -66,7 +66,7 @@ const V2_TABLES = [
   "migrations",
   "transport_state",
 ];
-const LATER_TABLES = ["migration_details", "intent_resolutions"];
+const LATER_TABLES = ["migration_details", "intent_resolutions", "acceptances"];
 
 const now = "2026-11-10T00:00:00.000Z";
 function seedV1(d: BridgeDatabase) {
@@ -445,5 +445,50 @@ describe("migration 3: runs and journal of r2", () => {
       { kind: "binding.created", message: "Inbox bound", run_id: null, data_json: null },
       { kind: "safe_mode.on", message: "old text", run_id: "r0", data_json: '{"runs":2}' },
     ]);
+  });
+});
+
+describe("migration 6: acceptances (A§7.1, E18; E-040)", () => {
+  it("forward drops the waiting 0.5 tokens with a journal entry, keeps the baselines; back drops the table", () => {
+    const d = db({ migrate: false });
+    migrateTo(d, 5);
+    seedV1(d);
+    const put = d.prepare("INSERT INTO meta (key, value) VALUES (?, ?)");
+    put.run("hold_accepted:b1:guard_mass_unlink", now);
+    put.run("hold_accepted:b:x:guard_mass_import", now);
+    put.run("hold_accepted_at:b1:guard_mass_unlink", now);
+    migrateTo(d, 6);
+    expect(d.prepare("SELECT key FROM meta ORDER BY key").all()).toEqual([
+      { key: "bridge_instance" },
+      { key: "hold_accepted_at:b1:guard_mass_unlink" },
+    ]);
+    const dropped = new Journal(d)
+      .list()
+      .filter((e) => e.key === "hold.acceptance_dropped")
+      .map((e) => [e.level, e.bindingId, e.params]);
+    expect(dropped).toEqual([
+      ["warn", "b1", { reason: "guard_mass_unlink", acceptedAt: now }],
+      ["warn", "b:x", { reason: "guard_mass_import", acceptedAt: now }],
+    ]);
+    // The hold the 0.5 token lifted stays lifted; the other hold is untouched.
+    expect(new Holds(d).of("b1").map((h) => h.reason)).toEqual(["ownership_lost"]);
+    d.prepare(
+      `INSERT INTO acceptances (id, binding_id, reason, anomaly_id, kind, items_json, effect_set_hash,
+         bases_json, state, accepted_at) VALUES ('a1', 'b1', 'guard_mass_unlink', 'n1', 'set', '[]', 'h', '{}', 'pending', ?)`,
+    ).run(now);
+    expect(() =>
+      d
+        .prepare(
+          `INSERT INTO acceptances (id, binding_id, reason, anomaly_id, kind, items_json, effect_set_hash,
+             bases_json, state, accepted_at) VALUES ('a2', 'b1', 'r', 'n2', 'set', '[]', 'h', '{}', 'maybe', ?)`,
+        )
+        .run(now),
+    ).toThrow(/CHECK/);
+    // Back to 5: no acceptances table, the rest as it was.
+    migrateTo(d, 5);
+    expect(tables(d)).not.toContain("acceptances");
+    expect(new Holds(d).of("b1").map((h) => h.reason)).toEqual(["ownership_lost"]);
+    migrateTo(d, 6);
+    expect(d.prepare("SELECT count(*) AS n FROM acceptances").get()).toEqual({ n: 0 });
   });
 });
