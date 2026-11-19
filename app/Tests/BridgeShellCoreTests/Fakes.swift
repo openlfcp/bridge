@@ -62,7 +62,13 @@ final class FakeHost: HostProcess {
     self.onExit = onExit
   }
 
-  func send(_ line: String) { sent.append(line) }
+  /// The host's stdin is closed: writes fail.
+  var stdinClosed = false
+  func send(_ line: String) -> Bool {
+    if stdinClosed { return false }
+    sent.append(line)
+    return true
+  }
   func terminate() { terminated += 1 }
   func kill() { killed += 1 }
 

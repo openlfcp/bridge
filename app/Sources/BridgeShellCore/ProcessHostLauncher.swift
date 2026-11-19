@@ -104,9 +104,14 @@ public final class ProcessHostLauncher: HostLauncher {
 
     var pid: Int32 { process.processIdentifier }
 
-    func send(_ line: String) {
+    func send(_ line: String) -> Bool {
       // write(contentsOf:) throws on EPIPE instead of raising an Objective-C exception.
-      try? stdin.write(contentsOf: Data((line + "\n").utf8))
+      do {
+        try stdin.write(contentsOf: Data((line + "\n").utf8))
+        return true
+      } catch {
+        return false
+      }
     }
 
     func terminate() {

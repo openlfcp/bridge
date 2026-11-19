@@ -90,49 +90,93 @@ final class MenuModelTests: XCTestCase {
 
 final class URLHandoffTests: XCTestCase {
   let secret = "lfcp-bridge://connect?c=1#k=VERY-SECRET-KEY"
+  var launcher: FakeLauncher!
+  var scheduler: FakeScheduler!
+  var log: RecordingLog!
+  var supervisor: HostSupervisor!
+  var handoff: URLHandoff!
 
-  func testHandsTheURLToTheHostAndLogsNoURL() {
-    let log = RecordingLog()
-    var sent: [ShellCommand] = []
-    let h = URLHandoff(send: { sent.append($0); return "1" }, log: log)
-    h.open([URL(string: secret)!])
-    XCTAssertEqual(sent, [.openURL(secret)])
-    XCTAssertEqual(h.forwarded, 1)
-    XCTAssertEqual(log.lines, ["url: handed to the host"])
+  /// Wired as AppDelegate wires them.
+  override func setUp() {
+    launcher = FakeLauncher()
+    scheduler = FakeScheduler()
+    log = RecordingLog()
+    supervisor = HostSupervisor(launcher: launcher, scheduler: scheduler, log: log)
+    handoff = URLHandoff(send: { [unowned self] in self.supervisor.send($0) }, log: log)
+    supervisor.onEvent = { [unowned self] in self.handoff.hostEvent($0) }
+    supervisor.onPhase = { [unowned self] in self.handoff.hostPhase($0) }
   }
 
-  func testKeepsURLsUntilTheHostRunsThenFlushes() {
-    let log = RecordingLog()
-    var up = false
-    var sent: [ShellCommand] = []
-    let h = URLHandoff(
-      send: { c in
-        guard up else { return nil }
-        sent.append(c)
-        return "1"
-      }, log: log)
-    h.open([URL(string: secret)!])
-    XCTAssertEqual(h.waiting, 1)
-    XCTAssertEqual(sent, [])
-    up = true
-    h.flush()
-    XCTAssertEqual(sent, [.openURL(secret)])
-    XCTAssertEqual(h.waiting, 0)
-    XCTAssertFalse(log.lines.joined(separator: "\n").contains("SECRET"))
-    XCTAssertFalse(log.lines.joined(separator: "\n").contains("lfcp-bridge://"))
+  private func hello(_ h: FakeHost) { h.emit(#"{"v":1,"type":"hello","version":"t","pid":1}"#) }
+  private func urls(_ h: FakeHost) -> [String] {
+    h.commands.filter { $0["cmd"] as? String == "openURL" }.compactMap { $0["url"] as? String }
+  }
+  private var logText: String { log.lines.joined(separator: "\n") }
+
+  func testHandsTheURLToAHostThatSaidHelloAndLogsNoURL() {
+    supervisor.start()
+    hello(launcher.last)
+    handoff.open([URL(string: secret)!])
+    XCTAssertEqual(urls(launcher.last), [secret])
+    XCTAssertEqual(handoff.forwarded, 1)
+    XCTAssertTrue(log.lines.contains("url: handed to the host"))
+    XCTAssertFalse(logText.contains("SECRET"))
+    XCTAssertFalse(logText.contains("lfcp-bridge://"))
+  }
+
+  func testWaitsForHelloNotForTheSpawn() {
+    handoff.open([URL(string: secret)!])
+    supervisor.start()
+    XCTAssertEqual(urls(launcher.last), [], "running is not ready: no hello yet")
+    XCTAssertEqual(handoff.waiting, 1)
+    hello(launcher.last)
+    XCTAssertEqual(urls(launcher.last), [secret])
+    XCTAssertEqual(handoff.waiting, 0)
+  }
+
+  func testAHostThatExitsBeforeHelloDoesNotTakeTheURL() {
+    handoff.open([URL(string: secret)!])
+    supervisor.start()
+    let first = launcher.last
+    first.onExit(3)  // e.g. run.lock held, before its hello
+    scheduler.advance(1)
+    let second = launcher.last
+    XCTAssertFalse(first === second)
+    XCTAssertEqual(urls(first), [])
+    XCTAssertEqual(handoff.waiting, 1)
+    hello(second)
+    XCTAssertEqual(urls(second), [secret])
+    XCTAssertEqual(handoff.forwarded, 1)
+  }
+
+  func testAHostThatExitedAfterHelloIsNotReadyAnyMore() {
+    supervisor.start()
+    hello(launcher.last)
+    launcher.last.onExit(1)
+    handoff.open([URL(string: secret)!])
+    XCTAssertEqual(handoff.waiting, 1)
+    scheduler.advance(1)
+    hello(launcher.last)
+    XCTAssertEqual(urls(launcher.last), [secret])
+  }
+
+  func testAWriteThatFailsKeepsTheURL() {
+    supervisor.start()
+    hello(launcher.last)
+    launcher.last.stdinClosed = true
+    handoff.open([URL(string: secret)!])
+    XCTAssertEqual(handoff.forwarded, 0)
+    XCTAssertEqual(handoff.waiting, 1)
+    XCTAssertTrue(log.lines.contains("host: openURL not written (stdin closed)"), "\(log.lines)")
+    XCTAssertFalse(logText.contains("SECRET"))
   }
 
   func testIgnoresOtherSchemesAndBoundsTheWait() {
-    let log = RecordingLog()
-    var sent: [ShellCommand] = []
-    let h = URLHandoff(send: { _ in nil }, log: log)
-    h.open([URL(string: "https://example.org/#k=VERY-SECRET-KEY")!])
-    XCTAssertEqual(h.waiting, 0)
-    for _ in 0..<(URLHandoff.maxPending + 2) { h.open([URL(string: secret)!]) }
-    XCTAssertEqual(h.waiting, URLHandoff.maxPending)
-    XCTAssertEqual(sent, [])
-    XCTAssertFalse(log.lines.joined(separator: "\n").contains("SECRET"))
-    sent.removeAll()
+    handoff.open([URL(string: "https://example.org/#k=VERY-SECRET-KEY")!])
+    XCTAssertEqual(handoff.waiting, 0)
+    for _ in 0..<(URLHandoff.maxPending + 2) { handoff.open([URL(string: secret)!]) }
+    XCTAssertEqual(handoff.waiting, URLHandoff.maxPending)
+    XCTAssertFalse(logText.contains("SECRET"))
   }
 }
 

@@ -7,8 +7,8 @@ import Foundation
 /// One running host process.
 public protocol HostProcess: AnyObject {
   var pid: Int32 { get }
-  /// Writes one line and its "\n" to the host's stdin. A host that is gone loses it.
-  func send(_ line: String)
+  /// Writes one line and its "\n" to the host's stdin; false when it could not (the host is gone).
+  func send(_ line: String) -> Bool
   /// SIGTERM.
   func terminate()
   /// SIGKILL.
@@ -105,7 +105,9 @@ public final class HostSupervisor {
   @discardableResult
   public func send(_ command: ShellCommand) -> String? {
     guard let p = process, case .running = phase else { return nil }
-    return write(command, to: p)
+    let id = write(command, to: p)
+    if id == nil { log.info("host: \(command.name) not written (stdin closed)") }
+    return id
   }
 
   /// shutdown{reason}: the host finishes what is in flight and exits; no restart after it.
@@ -149,12 +151,12 @@ public final class HostSupervisor {
       })
   }
 
+  /// The command's id, or nil when the host's stdin did not take it.
   @discardableResult
-  private func write(_ command: ShellCommand, to p: HostProcess) -> String {
+  private func write(_ command: ShellCommand, to p: HostProcess) -> String? {
     nextId += 1
     let id = String(nextId)
-    p.send(command.line(id: id))
-    return id
+    return p.send(command.line(id: id)) ? id : nil
   }
 
   private func launch() {

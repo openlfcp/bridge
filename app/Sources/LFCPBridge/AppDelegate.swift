@@ -87,7 +87,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     setUpLoginItem()
     refresh()
     supervisor.start()
-    handoff.flush()
     #if LFCP_TEST_HOOKS
       TestHooks.start(self)
     #endif
@@ -122,7 +121,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     switch event {
     case .hello(let version, _):
       helloVersion = version
-      handoff.flush()
     case .reply(let id, let ok, let code):
       if ok {
         replies.ok += 1
@@ -133,17 +131,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     default: break
     }
     state.apply(event)
+    handoff.hostEvent(event)
     refresh()
   }
 
   func hostPhase(_ phase: HostSupervisor.Phase) {
-    switch phase {
-    case .backingOff:
+    handoff.hostPhase(phase)
+    if case .backingOff = phase {
       state.host = nil
       state.reconnecting = true
-    case .running:
-      handoff.flush()
-    default: break
     }
     refresh()
   }
