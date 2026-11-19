@@ -16,3 +16,4 @@ export {
   eventOf,
   type Incoming,
 } from "./exec.js";
+export { type BindingStatus, bindingStatus, markCompleteCheck, nextGeneration } from "./status.js";
