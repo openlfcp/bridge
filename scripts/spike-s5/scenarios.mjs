@@ -1,10 +1,11 @@
 // Spike S-5 (T§4, PLAN §E-003): can a CI test read the app's window and press its buttons through the
 // Accessibility API, given a kTCCServiceAccessibility row in the *system* TCC.db (SIP is off on hosted
 // runners)? Steps: launch the probe app; baseline; control with every Accessibility row removed (must
-// be untrusted); then grant, in order, (1) the driver binary itself, (2) its process chain, each first
-// without and then with a tccd restart; with the first variant that is trusted, read the label and
-// press the button through AXUIElement. Writes results.json and summary.md; exit 1 unless the control
-// is untrusted and the read and press pass. macOS CI only: it edits the runner's system TCC.db.
+// be untrusted); then a row for the driver binary alone, and for each ancestor process alone, to find
+// the one tccd holds responsible; then, under the nearest sufficient single row and nothing else
+// (control again, then insert without a tccd restart), read the label and press the button through
+// AXUIElement. Writes results.json and summary.md; exit 1 unless both controls are untrusted and the
+// read and press pass. macOS CI only: it edits the runner's system TCC.db.
 //
 // Usage: node scripts/spike-s5/scenarios.mjs <build-dir> <results-dir>
 import { execFileSync, spawnSync } from "node:child_process";
@@ -103,10 +104,10 @@ function driver(args, timeoutMs = 60_000) {
   return { code: r.status, json };
 }
 const check = () => {
-  const { json } = driver(["check"]);
+  const { json } = driver(["check", BUNDLE_ID]);
   return {
     trusted: json?.trusted ?? null,
-    focusedAppAXError: json?.focusedAppAXError ?? null,
+    windowsAXError: json?.windowsAXError ?? null,
     chain: json?.chain ?? [],
   };
 };
@@ -145,10 +146,20 @@ writeFileSync(path.join(R, "rows-before.txt"), `${res.rowsBefore}\n`);
 
 const variant = (name, extra = {}) => {
   const c = check();
-  const v = { name, ...extra, trusted: c.trusted, focusedAppAXError: c.focusedAppAXError };
+  const v = { name, ...extra, trusted: c.trusted, windowsAXError: c.windowsAXError };
   res.variants.push(v);
-  log(`== ${name}: trusted=${c.trusted} focusedAppAXError=${c.focusedAppAXError}`);
+  log(`== ${name}: trusted=${c.trusted} windowsAXError=${c.windowsAXError}`);
   return c;
+};
+const revokeAll = () => sql(`DELETE FROM access WHERE service=${quote(SERVICE)}`);
+const grantAll = (clients) => {
+  const granted = clients.map((client, i) => {
+    const { requirement, hex } = csreqHex(client, `client-${i}`);
+    grant(client, 1, hex);
+    return { client, requirement };
+  });
+  log(`rows now:\n${rows()}`);
+  return granted;
 };
 
 const base = variant("baseline (image rows)");
@@ -156,40 +167,48 @@ const chain = base.chain.map((p) => p.path).filter((p) => p !== "/sbin/launchd" 
 res.chain = base.chain;
 
 // Control: no Accessibility row at all.
-sql(`DELETE FROM access WHERE service=${quote(SERVICE)}`);
+revokeAll();
 await restartTccd();
 res.controlUntrusted = variant("control: no rows (after tccd restart)").trusted === false;
 
-// Grants, smallest first.
-const plans = [
-  { name: "driver binary only", clients: [DRIVER] },
-  { name: "driver + process chain", clients: [DRIVER, ...chain] },
-];
-for (const plan of plans) {
-  const granted = [];
-  for (const [i, client] of plan.clients.entries()) {
-    const { requirement, hex } = csreqHex(client, `client-${i}`);
-    grant(client, 1, hex);
-    granted.push({ client, requirement });
-  }
-  log(`rows now:\n${rows()}`);
-  if (variant(`${plan.name} (no restart)`, { granted }).trusted) {
-    res.winner = { ...plan, granted, tccdRestart: false };
-    break;
-  }
+// Which single row is enough? The driver binary itself first, then each ancestor alone.
+const sufficient = [];
+let granted = grantAll([DRIVER]);
+let ok = variant("only the driver binary (no restart)", { granted }).trusted;
+if (!ok) {
   await restartTccd();
-  if (variant(`${plan.name} (after tccd restart)`, { granted }).trusted) {
-    res.winner = { ...plan, granted, tccdRestart: true };
-    break;
-  }
+  ok = variant("only the driver binary (after tccd restart)", { granted }).trusted;
 }
+if (ok) sufficient.push(DRIVER);
+for (const client of [...new Set(chain.slice(1))]) {
+  revokeAll();
+  granted = grantAll([client]);
+  await restartTccd();
+  if (variant(`only ${client} (after tccd restart)`, { granted }).trusted) sufficient.push(client);
+}
+res.sufficient = sufficient;
+const clients = sufficient.length ? [sufficient[0]] : chain;
 
-if (res.winner) {
+// Drive under the smallest grant, alone in the table: control, insert without restart, then read and press.
+revokeAll();
+await restartTccd();
+const control2 = variant("drive config: control, no rows (after tccd restart)").trusted === false;
+granted = grantAll(clients);
+let restartNeeded = false;
+if (!variant(`drive config: ${clients.join(" + ")} (no restart)`, { granted }).trusted) {
+  restartNeeded = true;
+  await restartTccd();
+  variant(`drive config: ${clients.join(" + ")} (after tccd restart)`, { granted });
+}
+const final = res.variants.at(-1);
+res.controlUntrusted = res.controlUntrusted && control2;
+if (final.trusted) {
+  res.winner = { clients, granted, tccdRestart: restartNeeded };
   const d = driver(["drive", BUNDLE_ID, CODE, EVENTS, "--menu"], 90_000);
   res.drive = d.json;
   res.accepted = res.controlUntrusted === true && d.code === 0 && d.json?.pass === true;
 } else {
-  log("no grant variant made the driver trusted");
+  log("no grant made the driver trusted");
 }
 
 writeFileSync(path.join(R, "results.json"), `${JSON.stringify(res, null, 2)}\n`);
@@ -199,11 +218,11 @@ const md = [
   `## Spike S-5 — ${res.runner} (macOS ${res.os} ${res.build}, ${res.arch})`,
   "",
   `${res.sip}  `,
-  `accepted: **${res.accepted}**; control (no rows) untrusted: **${res.controlUntrusted}**; winner: **${res.winner ? `${res.winner.name}${res.winner.tccdRestart ? ", after tccd restart" : ", no restart"}` : "none"}**`,
+  `accepted: **${res.accepted}**; control (no rows) untrusted: **${res.controlUntrusted}**; drive grant: **${res.winner ? `${res.winner.clients.map((c) => `\`${c}\``).join(" + ")}${res.winner.tccdRestart ? ", after tccd restart" : ", no restart"}` : "none"}**; single rows that suffice: ${(res.sufficient ?? []).map((c) => `\`${c}\``).join(", ") || "none"}`,
   "",
-  "| variant | AXIsProcessTrusted | AX call error (focused app) |",
+  "| variant | AXIsProcessTrusted | AXWindows error on the app |",
   "|---|---|---|",
-  ...res.variants.map((v) => `| ${v.name} | ${v.trusted} | ${v.focusedAppAXError} |`),
+  ...res.variants.map((v) => `| ${v.name} | ${v.trusted} | ${v.windowsAXError} |`),
   "",
   `process chain: ${res.chain.map((p) => `\`${p.path}\``).join(" ← ")}`,
   "",
