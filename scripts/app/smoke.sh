@@ -127,6 +127,15 @@ cmp -s "$CONFIG05" "$DATA/config.json" || fail "config.json (bridgeInstanceId) c
 [ "$(sqlite3 "$DATA/bridge.sqlite" "SELECT count(*) FROM journal WHERE key = 'bridge.launch_agent_05_removed'")" = 1 ] ||
   fail "no journal entry for the removed 0.5 agent"
 ok "0.5 agent booted out and removed; same data directory and bridgeInstanceId"
+# src/launchd.ts removes the plist after a failed bootout only on these statuses (BOOTOUT_NOT_LOADED).
+set +e
+launchctl bootout "$SERVICE05" >/dev/null 2>&1
+NOT_LOADED=$?
+set -e
+case "$NOT_LOADED" in
+  3 | 113) ok "bootout of a job that is not loaded exits $NOT_LOADED (BOOTOUT_NOT_LOADED)" ;;
+  *) fail "bootout of a job that is not loaded exited $NOT_LOADED, not 3 or 113 (src/launchd.ts)" ;;
+esac
 check "status item exists" '.statusItem.exists == true'
 check "status item visible" '.statusItem.visible == true'
 check "status item has its icon" '.statusItem.hasImage == true'
