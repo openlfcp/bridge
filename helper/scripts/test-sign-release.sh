@@ -67,6 +67,9 @@ if [ "$1" = notarytool ] && [ "$2" = submit ]; then
   echo "{\"id\":\"11111111-2222-3333-4444-555555555555\",\"status\":\"$(cat "'"$T"'/notary-status")\"}"
 fi'
 stub ditto ''
+# The release dependency check (scripts/check-release-deps.mjs): passes unless deps-refused exists.
+stub node '
+[ -f "'"$T"'/deps-refused" ] && { echo "release refused: sdk-ts.lock is present" >&2; exit 1; }'
 stub spctl ''
 
 run() {
@@ -86,6 +89,14 @@ run --identity "$ID" --notarize; [ $? = 2 ] && grep -q 'needs --notary-profile' 
 run --identity "$ID" --notary-profile p; [ $? = 2 ] && ok "notary options without --notarize: refused" || bad "profile w/o notarize"
 run --identity "$ID" --notarize --api-key /nonexistent.p8 --api-key-id K --api-issuer I; [ $? = 2 ] && ok "missing API key file: refused" || bad "api key file"
 run --identity "$ID" --add-to-search-list; [ $? = 2 ] && ok "--add-to-search-list without --keychain: refused" || bad "search list w/o keychain"
+
+touch "$T/deps-refused"
+run --identity "$ID"; rc=$?
+[ "$rc" = 2 ] && grep -q 'not npm: no release' "$T/stderr" && ! grep -qx security "$LOG" && ! called codesign &&
+  ok "the SDK pinned to an sdk-ts commit: refused before any lookup or signing" || bad "release deps ($rc)"
+rm "$T/deps-refused"
+run --identity "$ID"; rc=$?
+[ "$rc" = 0 ] && grep -q 'check-release-deps.mjs' "$LOG" && ok "the release dependency check runs" || bad "deps check not run ($rc)"
 
 rm "$T/have-identity"
 run --identity "$ID"; rc=$?

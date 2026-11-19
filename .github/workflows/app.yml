@@ -6,9 +6,9 @@ name: app
 # (scripts/app/check-app.sh). Notarization and Developer ID are the release chain (E-052).
 on:
   push:
-    paths: ["app/**", "packages/host/**", "packages/transport-eventkit/**", "helper/**", "scripts/app/**", "scripts/bundle-host.mjs", "package.json", "pnpm-lock.yaml", ".node-version", ".github/workflows/app.yml"]
+    paths: ["app/**", "packages/host/**", "packages/transport-eventkit/**", "helper/**", "scripts/app/**", "scripts/bundle-host.mjs", "scripts/check-release-deps.mjs", "package.json", "pnpm-lock.yaml", ".node-version", ".github/workflows/app.yml"]
   pull_request:
-    paths: ["app/**", "packages/host/**", "packages/transport-eventkit/**", "helper/**", "scripts/app/**", "scripts/bundle-host.mjs", "package.json", "pnpm-lock.yaml", ".node-version", ".github/workflows/app.yml"]
+    paths: ["app/**", "packages/host/**", "packages/transport-eventkit/**", "helper/**", "scripts/app/**", "scripts/bundle-host.mjs", "scripts/check-release-deps.mjs", "package.json", "pnpm-lock.yaml", ".node-version", ".github/workflows/app.yml"]
 
 permissions:
   contents: read
@@ -71,6 +71,11 @@ jobs:
         with:
           node-version-file: .node-version
           cache: pnpm
+      # A tag is a release: built from the @openlfcp/* npm packages only, never from the
+      # development pin of the SDK (sdk-ts.lock, file: tarballs).
+      - name: The SDK comes from npm (tags)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: node scripts/check-release-deps.mjs
       - run: pnpm install --frozen-lockfile
       - name: Toolchain
         run: |
