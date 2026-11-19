@@ -11,6 +11,7 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 | `@openlfcp/bridge-reminders` | `packages/reminders` | projections (§4.4–4.5), matching (§5.4), reconciliation, filter (§6.1); `transport.ts` (§4.2), `capabilities.ts` (§4.3); `fake/` | imports the host |
 | `@openlfcp/bridge-transport-eventkit` | `packages/transport-eventkit` | the Node side of the helper: spawn, FIFO, protocol v2 (§8), stages in DurableKV | imports anything of the adapter but `transport` and `capabilities`; imports the host |
 | Swift helper | `helper/` | `LFCP Reminders Helper.app`: HelperCore, HelperApp (EventKit) | — |
+| Swift shell | `app/` | `LFCP Bridge.app` (MVP 0.6): status item and menu, the host's supervisor, SMAppService, `lfcp-bridge://`; `BridgeShellCore` (tested with a fake host) and `LFCPBridge` (AppKit) | — |
 
 `scripts/check-boundaries.mjs` enforces the column "Never" (`pnpm lint`).
 
@@ -42,6 +43,7 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 | `src/reconcile/bases.ts` | the decisions that write no side (§5.5): "bases" (equivalent sides) and "shadow", recorded by an applied pass, `intent_id` NULL | 9b |
 | `src/run/process.ts` | **the run process**: start (Safe Mode, sections, ownership, recovery, write mode, a full pass), one pass at a time per binding (plan → write gate B16/§7.6 → LinkApplier → decisions → intents), triggers (remote nodes, rebuild, LIVE back, the change hint; debounce 400 ms / 3 s; wake; 15 min), delivery, stop | 9b |
 | `src/run/machine.ts` | the process on the machine: installations (the SDK's `openNodeInstallation` with its defaults, `storePairedResources`, a SectionHost on the coordinator of `pairedResources`, an AccessTracker with revocationStatus, the root from `deviceIdentity`), the EventKit transport over the supervised helper (restart → reopen; > 3 in 5 min → helper_unavailable; a second stall on one list within 5 min → helper_stall on that binding only), writesVerified | 9b |
+| `src/app/ipc.ts`, `src/app/serve.ts` | `run --app`: the host under `LFCP Bridge.app`, commands on stdin, events on stdout (`docs/reference/app-ipc-v1.md`) | E-004 |
 | `src/run/cli.ts` | `run` (run.lock, until SIGTERM / SIGINT), `dry-run`, `approve` (a planned dry run ≤ 1 h old, ownership not lost, strict 24 h), `pair` (storage-node pair), `sections` (`pairedResources`; "(not ready)" when the SDK says it is not usable here) | 9b |
 
 ## Adapter (`packages/reminders/src/adapter/`, PR 8)
@@ -79,6 +81,7 @@ SDK's bridge API directly, with no fallbacks of its own: `openNodeInstallation`
 | `unit` | vitest |
 | `helper` (`helper.yml`) | HelperCore tests, the app, smoke, sign-dev tests, the sign-release dry run, SwiftPM |
 | `helper-protocol` (`helper.yml`) | `transport-eventkit` against the helper (memory backend): unit tests, `transportContract`, open + FIFO |
+| `swift-test`, `smoke` (`app.yml`) | the shell's `swift test`; L5 smoke of a development `.app` (`scripts/app/smoke.sh`) |
 | `crash`, `e2e` | with PRs 7, 9 |
 
 ## Testing
@@ -87,6 +90,12 @@ SDK's bridge API directly, with no fallbacks of its own: `openNodeInstallation`
 |---|---|
 | `docs/devel/testing/helper-live-checklist.md` | the owner's live EventKit check of the helper (TCC, `live-check.mjs`, `sign-dev.sh`), linked to the R-001 live run |
 | `docs/devel/testing/verification-run.md` | the owner's first live run of the bridge (R-023): pair, verify, dry-run, approve, run, the checklist on iPhone and in Obsidian |
+
+## Reference
+
+| Document | What |
+|---|---|
+| `docs/reference/app-ipc-v1.md` | the shell ↔ host channel v1: transport, commands, events, restart and shutdown |
 
 ## Guides
 
@@ -100,6 +109,8 @@ SDK's bridge API directly, with no fallbacks of its own: `openNodeInstallation`
 
 | Path | What |
 |---|---|
+| `scripts/bundle-host.mjs` | the host as one ESM file for the app (esbuild; better-sqlite3 external, Automerge wasm inlined) |
+| `scripts/app/build-dev-app.sh`, `scripts/app/smoke.sh` | a development `LFCP Bridge.app` (native slice, ad-hoc; `TEST_HOOKS=1` for the smoke's hooks) and its L5 smoke |
 | `scripts/bridge-db.mjs` | `status` / `backup` / `migrate --to <N>` of `bridge.sqlite` (up and down; needs STOP and no `run`; backs up to a new file first, never over one); `--self-test` |
 | `scripts/check-runbook.mjs` | checks the `lfcp-bridge …` commands of the guides against the CLI sources (`--src` for another tree): command ready, flags read by the code, required flags, N8's migration ports |
 | `helper/scripts/sign-release.sh` | release signing: Developer ID, hardened runtime, `Support/release.entitlements`, notarytool submit + staple; changes no keychain without `--add-to-search-list` |
