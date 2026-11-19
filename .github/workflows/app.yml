@@ -1,12 +1,14 @@
 name: app
 
-# LFCP Bridge.app (PLAN §E-004, T§2): the shell's L0 tests (swift test in app/) and the L5 smoke of
-# a development build (scripts/app/smoke.sh). Packaging, both slices and the DMG come with E-005.
+# LFCP Bridge.app (PLAN §E-004, §E-005, T§2): the shell's L0 tests (swift test in app/), the L5
+# smoke of a development build (scripts/app/smoke.sh), and the release packaging: one universal,
+# ad-hoc signed app in a DMG (scripts/app/package-app.sh), checked on both slices
+# (scripts/app/check-app.sh). Notarization and Developer ID are the release chain (E-052).
 on:
   push:
-    paths: ["app/**", "packages/host/**", "helper/**", "scripts/app/**", "scripts/bundle-host.mjs", "package.json", "pnpm-lock.yaml", ".github/workflows/app.yml"]
+    paths: ["app/**", "packages/host/**", "packages/transport-eventkit/**", "helper/**", "scripts/app/**", "scripts/bundle-host.mjs", "package.json", "pnpm-lock.yaml", ".node-version", ".github/workflows/app.yml"]
   pull_request:
-    paths: ["app/**", "packages/host/**", "helper/**", "scripts/app/**", "scripts/bundle-host.mjs", "package.json", "pnpm-lock.yaml", ".github/workflows/app.yml"]
+    paths: ["app/**", "packages/host/**", "packages/transport-eventkit/**", "helper/**", "scripts/app/**", "scripts/bundle-host.mjs", "package.json", "pnpm-lock.yaml", ".node-version", ".github/workflows/app.yml"]
 
 permissions:
   contents: read
@@ -41,6 +43,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Build the development app (native slice, ad-hoc, test hooks)
         run: TEST_HOOKS=1 scripts/app/build-dev-app.sh "$RUNNER_TEMP/app"
+      - name: The test-hook search finds this build's hooks (control for the release check)
+        run: scripts/app/check-no-test-hooks.sh --expect-hooks "$RUNNER_TEMP/app/LFCP Bridge.app"
       - name: L5 smoke
         run: scripts/app/smoke.sh "$RUNNER_TEMP/app/LFCP Bridge.app"
       - name: Collect the logs
@@ -53,4 +57,74 @@ jobs:
         with:
           name: smoke-logs
           path: ${{ runner.temp }}/logs
+          if-no-files-found: ignore
+
+  # T§2 L5 on the release build: universal (E2), pinned Node, signed inside out under the hardened
+  # runtime (ad-hoc here), LSMinimumSystemVersion 15.0 (E15), no test hooks. The job's artifact is
+  # the DMG.
+  package:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Toolchain
+        run: |
+          sw_vers
+          xcrun swift --version
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/node-cache
+          key: node-darwin-${{ hashFiles('.node-version', 'scripts/app/node-darwin.sha256') }}
+      - name: Package (universal, ad-hoc) and the DMG
+        env:
+          NODE_CACHE: ${{ runner.temp }}/node-cache
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: scripts/app/package-app.sh "$RUNNER_TEMP/out"
+      - name: No test hooks in the release build
+        run: scripts/app/check-no-test-hooks.sh "$RUNNER_TEMP/out/LFCP Bridge.app"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: LFCP-Bridge-dmg
+          path: ${{ runner.temp }}/out/*.dmg
+          if-no-files-found: error
+
+  # The DMG's app on each slice, from a path with a space, without the repository's node_modules
+  # (none are installed here) and with no node on PATH: check-app.sh and the host's self-test.
+  package-check:
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: LFCP-Bridge-dmg
+          path: ${{ runner.temp }}/dmg
+      - name: Copy the app out of the DMG to a path with a space
+        shell: bash
+        run: |
+          dmg="$(ls "$RUNNER_TEMP"/dmg/*.dmg)"
+          du -h "$dmg"
+          mnt="$(mktemp -d)"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg"
+          test -L "$mnt/Applications"
+          mkdir -p "$RUNNER_TEMP/a b"
+          ditto "$mnt/LFCP Bridge.app" "$RUNNER_TEMP/a b/LFCP Bridge.app"
+          hdiutil detach "$mnt"
+      - name: L5 checks and the self-test
+        shell: bash
+        run: scripts/app/check-app.sh "$RUNNER_TEMP/a b/LFCP Bridge.app" | tee "$RUNNER_TEMP/check.txt"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: l5-${{ matrix.os }}
+          path: ${{ runner.temp }}/check.txt
           if-no-files-found: ignore
