@@ -33,8 +33,10 @@ for arch in $(xcrun lipo -archs "$SHELL_EXE"); do
     found+=("$arch: $(echo "$syms" | wc -l | tr -d ' ') TestHooks symbol(s), e.g. $(echo "$syms" | head -1)")
   fi
   # The type's name in Swift's metadata is a C string of its own; the log line is the hooks' own.
-  if strings -a "$slice" | grep -qx 'TestHooks'; then found+=("$arch: type name 'TestHooks'"); fi
-  if strings -a "$slice" | grep -qF 'test hooks: on (L5 smoke build)'; then
+  # Searched in a file: `strings | grep -q` under pipefail loses a match when grep exits early.
+  strings -a "$slice" > "$slice.strings"
+  if grep -qx 'TestHooks' "$slice.strings"; then found+=("$arch: type name 'TestHooks'"); fi
+  if grep -qF 'test hooks: on (L5 smoke build)' "$slice.strings"; then
     found+=("$arch: string 'test hooks: on (L5 smoke build)'")
   fi
 done
