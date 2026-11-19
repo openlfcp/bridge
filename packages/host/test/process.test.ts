@@ -218,6 +218,37 @@ describe("triggers, one pass at a time, decisions", () => {
   });
 });
 
+describe("a support command is serialized with the passes (A§7.3, E-006)", () => {
+  it("it starts after the pass in flight; a pass asked during it starts after it", async () => {
+    b = await bridge();
+    await b.task("Buy milk");
+    const proc = processOf();
+    await proc.start();
+    await quiet(proc);
+    const order: string[] = [];
+    const inFlight = proc.pass("b").then(() => order.push("pass before"));
+    let asked: Promise<unknown> | undefined;
+    await proc.exclusive(async () => {
+      order.push("command in");
+      asked = proc.pass("b").then(() => order.push("pass during"));
+      await new Promise((r) => setTimeout(r, 30));
+      order.push("command out");
+    });
+    await Promise.all([inFlight, asked]);
+    expect(order).toEqual(["pass before", "command in", "command out", "pass during"]);
+    // Two commands one after the other: the second waits for the first.
+    const both: string[] = [];
+    await Promise.all([
+      proc.exclusive(async () => {
+        await new Promise((r) => setTimeout(r, 20));
+        both.push("first");
+      }),
+      proc.exclusive(async () => void both.push("second")),
+    ]);
+    expect(both).toEqual(["first", "second"]);
+  });
+});
+
 describe("holds, resume, stop", () => {
   it("helper_stall (hang analysis G1): the binding's pass reads nothing until the hold is accepted", async () => {
     b = await bridge();

@@ -174,6 +174,8 @@ export class BridgeProcess {
   #ready = false;
   #runId: string | undefined;
   #stopping = false;
+  /** A command of the host's queue runs (exclusive): passes asked meanwhile start after it. */
+  #gate: Promise<void> | undefined;
 
   constructor(options: BridgeProcessOptions) {
     this.#o = options;
@@ -220,6 +222,33 @@ export class BridgeProcess {
 
   get executor(): Executor {
     return this.#executor;
+  }
+
+  /** The transport of this process: the only one the host opens (A§7.3, no second executor). */
+  get transport(): WriteModeTransport {
+    return this.#o.transport;
+  }
+
+  /**
+   * Runs `fn` alone, serialized with the passes (A§7.3, the host's one command queue): it starts
+   * after the passes in flight, and a pass asked meanwhile starts after it. The host's queue
+   * calls it one command at a time.
+   */
+  async exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    let open!: () => void;
+    const gate = new Promise<void>((r) => {
+      open = r;
+    });
+    const previous = this.#gate;
+    this.#gate = gate;
+    try {
+      await previous;
+      await Promise.allSettled([...this.#running.values()]);
+      return await fn();
+    } finally {
+      if (this.#gate === gate) this.#gate = undefined;
+      open();
+    }
   }
 
   /** Starts the process: see the header. */
@@ -306,7 +335,10 @@ export class BridgeProcess {
       this.#again.add(bindingId);
       return current;
     }
-    const p = this.#passNow(bindingId).finally(() => {
+    const gate = this.#gate;
+    const p = (
+      gate === undefined ? this.#passNow(bindingId) : gate.then(() => this.#passNow(bindingId))
+    ).finally(() => {
       this.#running.delete(bindingId);
       if (this.#again.delete(bindingId) && !this.#stopping) void this.pass(bindingId);
     });
