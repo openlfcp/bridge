@@ -1,9 +1,9 @@
 // Spike S-5 (T§4, PLAN §E-003): the test side. Reads the probe app's window and presses its button
 // through AXUIElement — no hooks in the app. Prints one JSON object to stdout.
 //
-//   s5-ax check
-//       AXIsProcessTrusted() (never prompts) and a real AX call against the frontmost app,
-//       to tell "trusted" from "API usable".
+//   s5-ax check [<bundle-id>]
+//       AXIsProcessTrusted() (never prompts) and, with a bundle id, a real AX call (AXWindows) against
+//       that running app: -25211 kAXErrorAPIDisabled when untrusted.
 //   s5-ax drive <bundle-id> <expected-code> <events.jsonl> [--menu]
 //       Finds the running app, reads the label `s5-code`, presses the button `s5-confirm`, re-reads
 //       `s5-status`, and waits for the app's own "pressed" record. With --menu also opens the status
@@ -74,18 +74,19 @@ func processChain() -> [[String: Any]] {
 
 let argv = CommandLine.arguments
 guard argv.count >= 2 else {
-  out["error"] = "usage: s5-ax check | drive <bundle-id> <code> <events.jsonl> [--menu]"
+  out["error"] = "usage: s5-ax check [<bundle-id>] | drive <bundle-id> <code> <events.jsonl> [--menu]"
   emit(2)
 }
 
 out["trusted"] = AXIsProcessTrusted()
 out["chain"] = processChain()
-let systemWide = AXUIElementCreateSystemWide()
-AXUIElementSetMessagingTimeout(systemWide, 3)
 
 if argv[1] == "check" {
-  let (e, _) = attr(systemWide, kAXFocusedApplicationAttribute)
-  out["focusedAppAXError"] = e.rawValue  // -25211 = kAXErrorAPIDisabled (not trusted)
+  if argv.count >= 3, let app = NSRunningApplication.runningApplications(withBundleIdentifier: argv[2]).first {
+    let el = AXUIElementCreateApplication(app.processIdentifier)
+    AXUIElementSetMessagingTimeout(el, 3)
+    out["windowsAXError"] = attr(el, kAXWindowsAttribute).0.rawValue  // -25211 = kAXErrorAPIDisabled
+  }
   emit(0)
 }
 
