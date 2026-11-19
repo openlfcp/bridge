@@ -718,3 +718,109 @@ describe("Apple → LFCP (PR 10)", () => {
     ]);
   });
 });
+
+describe("Restore answers (A§7.2; E-041b): the status the inverse way, imports kept in Reminders", () => {
+  const pair = (over: Partial<LfcpTask> = {}, apple: Partial<AppleItem> = {}) => {
+    const t = task("T1", over);
+    const r = projection(t, apple);
+    return { t, r, bases: new Map([["T1", synced(t, r)]]) };
+  };
+  const restore = (kind: "prefer_lfcp_status" | "reopen") => new Map([["T1", kind]]);
+  const status = (p: ReturnType<typeof plan>) =>
+    p.intents.map((i) => [i.direction, i.fields, i.payload]);
+
+  it("prefer_lfcp_status: completed in Reminders → the reminder reopened (with its rev), not the Task completed", () => {
+    const { t, r, bases } = pair();
+    const done = { ...r, completed: true, completionDate: "2026-11-09T12:00:00Z", rev: "2" };
+    const v = {
+      tasks: [t],
+      links: [link("T1")],
+      bases,
+      snapshot: { items: [done], complete: true },
+    };
+    expect(plan(view(v)).intents[0]?.direction).toBe("to_lfcp");
+    const p = plan(view({ ...v, restore: restore("prefer_lfcp_status") }));
+    expect(status(p)).toEqual([
+      [
+        "to_apple",
+        ["status"],
+        {
+          kind: "update",
+          ref: done.ref,
+          set: { completed: { value: false } },
+          expect: { rev: "2" },
+        },
+      ],
+    ]);
+    expect(p.intents[0]?.basis.pA?.status).toEqual({ closed: true, date: "2026-11-09" });
+  });
+
+  it("prefer_lfcp_status: reopened in Reminders → completed again with the Task's date (a LocalDate)", () => {
+    const { t, r, bases } = pair(
+      { status: "done", completion_date: "2026-11-08" },
+      { completed: true, completionDate: "2026-11-08T12:00:00Z" },
+    );
+    const p = plan(
+      view({
+        tasks: [t],
+        links: [link("T1")],
+        bases,
+        snapshot: { items: [{ ...r, completed: false }], complete: true },
+        restore: restore("prefer_lfcp_status"),
+      }),
+    );
+    expect(p.intents.map((i) => (i.payload as { set?: unknown }).set)).toEqual([
+      { completed: { value: true, date: "2026-11-08" } },
+    ]);
+  });
+
+  it("reopen: completed in LFCP → task.reopen, the reminder left open; a Task not in the decision as usual", () => {
+    const { t, r, bases } = pair({ status: "done", completion_date: "2026-11-09" });
+    const v = { tasks: [t], links: [link("T1")], bases, snapshot: { items: [r], complete: true } };
+    expect(status(plan(view(v)))[0]?.[0]).toBe("to_apple");
+    expect(status(plan(view({ ...v, restore: restore("reopen") })))).toEqual([
+      ["to_lfcp", ["status"], { resource: S, intents: [{ intent: "task.reopen", id: "T1" }] }],
+    ]);
+    // Only the inverse of what it answers: a completion in Reminders goes to LFCP as usual.
+    const open = pair();
+    const appleDone = { ...open.r, completed: true, completionDate: "2026-11-09T12:00:00Z" };
+    const p = plan(
+      view({
+        tasks: [open.t],
+        links: [link("T1")],
+        bases: open.bases,
+        snapshot: { items: [appleDone], complete: true },
+        restore: restore("reopen"),
+      }),
+    );
+    expect(status(p)).toEqual([
+      [
+        "to_lfcp",
+        ["status"],
+        {
+          resource: S,
+          intents: [{ intent: "task.complete", id: "T1", completionDate: "2026-11-09" }],
+        },
+      ],
+    ]);
+  });
+
+  it("ignored imports: a reminder kept in Reminders is not imported, by externalId or by id", () => {
+    const kept = item({ title: "Kept" });
+    const keptById = item({ title: "Kept by id", ref: { id: "rid" } });
+    const fresh = item({ title: "Fresh" });
+    const ignored = new Set([`ext:${kept.ref.externalId}`, "id:rid"]);
+    const p = plan(
+      view({
+        snapshot: { items: [kept, keptById, fresh], complete: true },
+        ignoredImport: (key) => ignored.has(key),
+      }),
+    );
+    expect(p.items.map((i) => [i.kind, i.item.title])).toEqual([
+      ["ignore", "Kept"],
+      ["ignore", "Kept by id"],
+      ["import", "Fresh"],
+    ]);
+    expect(p.counts.imports).toBe(1);
+  });
+});
