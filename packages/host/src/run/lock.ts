@@ -22,6 +22,18 @@ export function takeRunLock(home: string): (() => void) | { readonly held: numbe
   return { held: -1 };
 }
 
+/** The pid of a live run process holding run.lock, or undefined (no lock, or a stale one). */
+export function runLockHolder(home: string): number | undefined {
+  let pid: number;
+  try {
+    pid = Number(readFileSync(join(home, "run.lock"), "utf8").trim());
+  } catch (e) {
+    if ((e as { code?: string }).code === "ENOENT") return undefined;
+    throw e;
+  }
+  return Number.isInteger(pid) && pid > 0 && alive(pid) ? pid : undefined;
+}
+
 const alive = (pid: number) => {
   try {
     process.kill(pid, 0);

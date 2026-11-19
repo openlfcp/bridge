@@ -3,14 +3,20 @@
 // (exit 2), and `status` lists it the same way.
 
 import { mkdirSync, readFileSync } from "node:fs";
+import { retire05 } from "./app/legacy.js";
 import { type AppIo, serveApp } from "./app/serve.js";
 import { type BindOutcome, Bootstrap } from "./bootstrap.js";
-import { loadConfig, saveConfig } from "./config.js";
+import { bridgePaths, loadConfig, saveConfig } from "./config.js";
 import { HOLD_REASONS, type HoldReason } from "./db/holds.js";
 import { resume, stop, stopState } from "./db/stop.js";
 import { doctor, worst } from "./doctor.js";
 import { EXIT, type ExitCode } from "./exit.js";
-import { installLaunchAgent, uninstallLaunchAgent } from "./launchd.js";
+import {
+  installLaunchAgent,
+  type LaunchAgent05,
+  type Launchctl,
+  uninstallLaunchAgent,
+} from "./launchd.js";
 import { MigrationError, type MigrationRow, Migrations } from "./migration.js";
 import {
   acceptOutcome,
@@ -117,6 +123,16 @@ export interface CliEnvironment {
   readonly runtime?: () => Promise<Runtime>;
   /** `run --app`: the shell's channel (default: stdin and stdout). */
   readonly app?: AppIo;
+  /**
+   * `run --app`: 0.5's LaunchAgent, retired before the runtime opens bridge.sqlite (src/app/legacy.ts;
+   * default: the machine's paths and launchctl).
+   */
+  readonly launchAgent05?: {
+    readonly path: string;
+    readonly home: string;
+    readonly launchctl?: Launchctl;
+    readonly waitMs?: number;
+  };
 }
 
 /** --name value / --flag parsing for the commands below. */
@@ -157,20 +173,48 @@ export async function main(argv: readonly string[], env: CliEnvironment): Promis
     env.err(`${command.name}: not available in this build (D-010 PR ${command.pr})`);
     return EXIT.USAGE;
   }
+  // `run --app`: 0.5's agent goes before bridge.sqlite is opened and migrated (PLAN §E-007).
+  let retired: LaunchAgent05 | undefined;
+  if (command.name === "run" && options(argv.slice(1)).opts.get("app") === true) {
+    const legacy = env.launchAgent05 ?? {
+      path: bridgePaths().launchAgent,
+      home: bridgePaths().home,
+    };
+    retired = await retire05({
+      launchAgent: legacy.path,
+      home: legacy.home,
+      ...(legacy.launchctl === undefined ? {} : { launchctl: legacy.launchctl }),
+      ...(legacy.waitMs === undefined ? {} : { waitMs: legacy.waitMs }),
+    });
+  }
   const rt = await (env.runtime ?? (() => machineRuntime()))();
   try {
-    return await run(command.name, argv.slice(1), rt, env);
+    return await run(command.name, argv.slice(1), rt, env, retired);
   } finally {
     await rt.close();
   }
 }
 
 /** `run --app` (src/app/serve.ts): the host under LFCP Bridge.app. */
-async function appCommand(rt: Runtime, env: CliEnvironment): Promise<ExitCode> {
+async function appCommand(
+  rt: Runtime,
+  env: CliEnvironment,
+  retired: LaunchAgent05 | undefined,
+): Promise<ExitCode> {
   const startProcess = rt.startProcess;
   if (startProcess === undefined) {
     env.err("run --app: not available on this machine");
     return EXIT.USAGE;
+  }
+  if (retired?.removed === true) {
+    // A 0.5 agent with another LFCP_BRIDGE_HOME left its data there: said, never moved (E-007).
+    const sameHome = retired.home === undefined || retired.home === rt.paths.home;
+    rt.journal.append(sameHome ? "info" : "warn", "bridge.launch_agent_05_removed", {
+      params: { sameHome },
+    });
+    env.err(
+      `run --app: the LaunchAgent of lfcp-bridge 0.5 was removed${sameHome ? "" : "; it used another data directory, which is left as it is"}`,
+    );
   }
   const r = await serveApp({
     home: rt.paths.home,
@@ -371,12 +415,13 @@ async function run(
   args: readonly string[],
   rt: Runtime,
   env: CliEnvironment,
+  retired?: LaunchAgent05,
 ): Promise<ExitCode> {
   const { positional, opts } = options(args);
   const stopped = () => stopState(rt.paths.home) !== undefined;
   switch (name) {
     case "run":
-      return opts.get("app") === true ? appCommand(rt, env) : runCommand(rt, env);
+      return opts.get("app") === true ? appCommand(rt, env, retired) : runCommand(rt, env);
     case "dry-run":
       return dryRunCommand(rt, positional[0], env);
     case "approve":

@@ -423,6 +423,8 @@ describe("serveApp and main run --app", () => {
       err: (l) => err.push(l),
       runtime: async () => rt,
       app: { input, write: (l) => out.push(l) },
+      // Never the machine's ~/Library/LaunchAgents (test/first-run-05.test.ts covers the retirement).
+      launchAgent05: { path: join(home, "no-agent.plist"), home, launchctl: () => {} },
     });
     for (let i = 0; i < 50 && out.length < 3; i++) await new Promise((r) => setTimeout(r, 5));
     expect(existsSync(join(home, "run.lock"))).toBe(true);

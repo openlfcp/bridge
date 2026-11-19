@@ -37,6 +37,10 @@ export interface JournalFilter {
 
 /** The texts of the message keys; a key without one shows as itself. */
 export const JOURNAL_TEXT: Readonly<Record<string, (p: JournalParams) => string>> = {
+  "bridge.launch_agent_05_removed": (p) =>
+    p.sameHome === false
+      ? "LFCP Bridge now runs the bridge: the background service of lfcp-bridge 0.5 was removed. It used another data directory, which was left as it is"
+      : "LFCP Bridge now runs the bridge: the background service of lfcp-bridge 0.5 was removed",
   "effect.off": () => "An effect would run here (effects are off in this build)",
   "effect.lost": () => "The answer of a write to Reminders was lost",
   "effect.in_flight": () => "A write to Reminders is already under way; not repeated",
