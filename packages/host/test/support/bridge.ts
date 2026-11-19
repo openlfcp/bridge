@@ -42,6 +42,11 @@ export interface BridgeRig {
   readonly id: string;
   readonly transport: RemindersTransport;
   readonly list: ListInfo;
+  /**
+   * A verification binding (D-010 §7.6: its own "LFCP Verify · " list; the only binding that
+   * writes to a helper whose writes are not verified yet, §7.1).
+   */
+  readonly verification?: boolean;
   close(): Promise<void>;
 }
 
@@ -80,13 +85,14 @@ export async function bridge(o: BridgeOptions = {}) {
   ).run(now);
   db.prepare(
     `INSERT INTO bindings (id, installation_id, resource_id, adapter, transport, target_ref, filter_mode, state,
-       strict_until, created_at) VALUES ('b', 'i', ?, 'apple-reminders', ?, ?, ?, 'active', ?, ?)`,
+       strict_until, verification, created_at) VALUES ('b', 'i', ?, 'apple-reminders', ?, ?, ?, 'active', ?, ?, ?)`,
   ).run(
     toHex(R),
     o.rig?.id ?? "fake",
     list.id,
     o.filter ?? "all",
     o.strict === true ? new Date(Date.now() + 86_400_000).toISOString() : null,
+    o.rig?.verification === true ? 1 : 0,
     now,
   );
   const t = new FakeTransport(store);
