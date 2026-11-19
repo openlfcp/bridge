@@ -53,6 +53,7 @@ import type { SectionReplica } from "@openlfcp/shared-objects/sections";
 import type { BridgeDatabase } from "../db/database.js";
 import { Holds } from "../db/holds.js";
 import { Journal } from "../db/journal.js";
+import { errorCode } from "../diag/errors.js";
 import { BasisChangedError } from "../lfcp/commit-guard.js";
 import type { GuardedCommit, GuardedCommitResult } from "../lfcp/section-host.js";
 import { type Intent, Intents, type NewIntent } from "./intents.js";
@@ -599,7 +600,7 @@ export class Executor {
       this.#journal.append("warn", "effect.lost", {
         bindingId: i.bindingId,
         taskId: i.taskId,
-        params: { intent: i.id, error: String(error) },
+        params: { intent: i.id, code: errorCode(error) },
       });
       return { kind: "lost" };
     }
@@ -648,8 +649,9 @@ export class Executor {
         this.#intents.end(i.id, "superseded", "basis_changed", { detail: error.detail ?? null });
         return { kind: "superseded", reason: "basis_changed" };
       }
-      this.#intents.retry(i.id, this.#now() + retryDelay(i.attempts), { error: String(error) });
-      return { kind: "retry", reason: String(error) };
+      const code = errorCode(error);
+      this.#intents.retry(i.id, this.#now() + retryDelay(i.attempts), { code });
+      return { kind: "retry", reason: code };
     }
     this.#o.crash?.("after_effect", i);
     this.#intents.applied(i.id, receipt);

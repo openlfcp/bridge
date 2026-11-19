@@ -39,6 +39,7 @@ import type { BridgeDatabase } from "../db/database.js";
 import { Holds } from "../db/holds.js";
 import { Journal } from "../db/journal.js";
 import { stopState } from "../db/stop.js";
+import { errorCode } from "../diag/errors.js";
 import { type LOSE_NEXT_WRITE_ANSWER, loseNextWriteAnswer, verificationWrite } from "../fault.js";
 import { AccessTracker, metaAccessStore } from "../lfcp/access.js";
 import { SectionHost, type SectionHostOptions } from "../lfcp/section-host.js";
@@ -149,7 +150,7 @@ export function helperReconnector(o: {
   const step = (work: () => Promise<void>) => {
     chain = chain.then(work).catch((e) => {
       o.journal?.append("error", "helper.reconnect_failed", {
-        params: { error: e instanceof Error ? e.message : String(e) },
+        params: { code: errorCode(e) },
       });
     });
     return chain;
