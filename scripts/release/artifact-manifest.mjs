@@ -43,9 +43,13 @@ function cdhashOf(app) {
 }
 
 function plist(app, key) {
-  return execFileSync("plutil", ["-extract", key, "raw", "-o", "-", join(app, "Contents/Info.plist")], {
-    encoding: "utf8",
-  }).trim();
+  return execFileSync(
+    "plutil",
+    ["-extract", key, "raw", "-o", "-", join(app, "Contents/Info.plist")],
+    {
+      encoding: "utf8",
+    },
+  ).trim();
 }
 
 function manifestOf(app) {
