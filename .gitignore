@@ -6,6 +6,8 @@ helper/.build/
 helper/build/
 # Swift app (shell) build output
 app/.build/
+# L3: the person app, the TCC and run records (scripts/l3)
+/build/l3/
 # macOS
 .DS_Store
 # TypeScript incremental build
