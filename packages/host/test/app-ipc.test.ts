@@ -166,6 +166,7 @@ function harness(
     /** The start waits for this before it returns. */
     startGate?: Promise<void>;
     home?: string;
+    exportDiagnostics?: (path: string) => void;
   } = {},
 ) {
   const events: (Event & { v: number })[] = [];
@@ -193,6 +194,7 @@ function harness(
     write: (l) => events.push(JSON.parse(l)),
     log: (l) => logs.push(l),
     ...(o.shutdownWaitMs === undefined ? {} : { shutdownWaitMs: o.shutdownWaitMs }),
+    ...(o.exportDiagnostics === undefined ? {} : { exportDiagnostics: o.exportDiagnostics }),
   });
   const send = async (cmd: Record<string, unknown>) => {
     host.input(`${line(cmd)}\n`);
@@ -356,7 +358,36 @@ describe("AppHost", () => {
     expect(everything).not.toContain("lfcp-bridge://");
   });
 
-  it("answer, export and remove are not implemented yet", async () => {
+  it("export writes the zip at an absolute .zip path; the path is never logged (A§11)", async () => {
+    const written: string[] = [];
+    const h = harness({
+      exportDiagnostics: (p) => {
+        if (p.includes("fail")) throw Object.assign(new Error(p), { code: "EACCES" });
+        written.push(p);
+      },
+    });
+    await h.host.begin();
+    await h.send({ id: "1", cmd: "export", path: "/Users/someone/Desktop/diag.zip" });
+    await h.send({ id: "2", cmd: "export", path: "Desktop/diag.zip" });
+    await h.send({ id: "3", cmd: "export", path: "/Users/someone/Desktop/diag.txt" });
+    await h.send({ id: "4", cmd: "export", path: "/Users/someone/fail/diag.zip" });
+    expect(written).toEqual(["/Users/someone/Desktop/diag.zip"]);
+    expect(h.replies()).toEqual([
+      {
+        v: 1,
+        type: "reply",
+        id: "1",
+        ok: true,
+        result: { path: "/Users/someone/Desktop/diag.zip" },
+      },
+      { v: 1, type: "reply", id: "2", ok: false, error: { code: "bad_arguments", detail: "path" } },
+      { v: 1, type: "reply", id: "3", ok: false, error: { code: "bad_arguments", detail: "path" } },
+      { v: 1, type: "reply", id: "4", ok: false, error: { code: "failed", detail: "EACCES" } },
+    ]);
+    expect(h.logs.join("\n")).not.toContain("someone");
+  });
+
+  it("answer, export (without an exporter) and remove are not implemented yet", async () => {
     const h = harness();
     await h.host.begin();
     await h.send({ id: "a", cmd: "answer", questionId: "q", choice: "later" });
