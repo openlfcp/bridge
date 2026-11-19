@@ -408,6 +408,11 @@ export class BridgeProcess {
     // The helper stalls on this binding's list (hang analysis G1): no pass reads it until a person
     // accepts the hold; the other bindings go on.
     if (this.#holds.has(b.id, "helper_stall")) return { kind: "skipped", reason: "helper_stall" };
+    // Reminders does not answer (the helper is down, no access): a pass would only fail on its
+    // first read, and a pass asked in the background (a control look, a timer) must not reject.
+    // The transport coming back runs it: access_changed, or the helper reconnect's full pass.
+    if (this.#o.transport.status().state !== "ok")
+      return { kind: "skipped", reason: "transport_not_ready" };
     // §6.5: ownership on every pass, before any transition or effect (review PR 9b #23); an
     // incomplete search leaves the binding unchecked, so the executor writes nothing.
     await this.#ownership.check(b.id, b.resource_id);
