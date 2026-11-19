@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v5
       # The TypeScript SDK: until @openlfcp/* 0.7.0 is on npm, the eight packages of
       # openlfcp/sdk-ts at the commit in sdk-ts.lock, packed by scripts/sdk-ts-pack.mjs into
-      # vendor/sdk-ts/; pnpm-lock.yaml holds each tarball's integrity (CONTRIBUTING.md).
+      # vendor/sdk-ts/; pnpm-lock.yaml holds each tarball's integrity (docs/devel/sdk-pin.md).
       - id: sdk-ts-lock
         run: echo "commit=$(jq -er .commit sdk-ts.lock)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v5
@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@v5
       # The TypeScript SDK: until @openlfcp/* 0.7.0 is on npm, the eight packages of
       # openlfcp/sdk-ts at the commit in sdk-ts.lock, packed by scripts/sdk-ts-pack.mjs into
-      # vendor/sdk-ts/; pnpm-lock.yaml holds each tarball's integrity (CONTRIBUTING.md).
+      # vendor/sdk-ts/; pnpm-lock.yaml holds each tarball's integrity (docs/devel/sdk-pin.md).
       - id: sdk-ts-lock
         run: echo "commit=$(jq -er .commit sdk-ts.lock)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v5
