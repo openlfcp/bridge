@@ -166,6 +166,23 @@ jobs:
           echo "sha256=$sha" >> "$GITHUB_OUTPUT"
           echo "version=$(jq -er .manifest.version "$dist/artifact-manifest.json")" >> "$GITHUB_OUTPUT"
 
+      # The control of the two checks above: a copy whose helper is re-signed (another valid
+      # signature, T§3 (c)) must change the cdhashes and fail the check.
+      - name: Control — a re-signed helper is caught
+        run: |
+          copy="$(mktemp -d)/LFCP Bridge.app"
+          ditto "$RUNNER_TEMP/out/LFCP Bridge.app" "$copy"
+          codesign --force --sign - --options runtime "$copy/Contents/MacOS/lfcp-reminders-helper"
+          scripts/release/artifact-manifest.mjs cdhashes "$copy" > "$RUNNER_TEMP/cdhash-control.json"
+          if cmp -s "$RUNNER_TEMP/cdhash-after.json" "$RUNNER_TEMP/cdhash-control.json"; then
+            echo "::error::the cdhash comparison did not see a re-signed helper"; exit 1
+          fi
+          if scripts/release/artifact-manifest.mjs check "$copy" --manifest "$RUNNER_TEMP/dist/artifact-manifest.json" \
+            --public-key "$(cat "$RUNNER_TEMP/dist/artifact-manifest.pub")"; then
+            echo "::error::the manifest check accepted a re-signed helper"; exit 1
+          fi
+          echo "control ok: the re-signed helper is caught"
+
       - name: DMG (the same app, copied)
         env:
           SIGN_IDENTITY: ${{ steps.identity.outputs.sha1 }}
