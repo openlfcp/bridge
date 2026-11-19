@@ -2,7 +2,7 @@
 // support.sock of `run --app`: links, safe-mode reset (refused while doctor names a cause),
 // certification-test (until E-050); the client starts the app when nobody listens, for ≤ 30 s.
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -339,6 +339,22 @@ describe("export (A§11, T§3 canary through run --app)", () => {
       ok: true,
       result: { path: viaMenu },
     });
+    // review #3: a symlink at the chosen path — refused by both, its target untouched.
+    const outside = join(home, "outside.txt");
+    writeFileSync(outside, "keep me");
+    const linked = join(home, "linked.zip");
+    symlinkSync(outside, linked);
+    const refused = await client(a.path, ["export", "--out", linked]);
+    expect(refused.code).toBe(EXIT.NEEDS_PERSON);
+    a.input.write(`${JSON.stringify({ v: 1, id: "s", cmd: "export", path: linked })}\n`);
+    for (let i = 0; i < 200 && !a.written.some((l) => l.includes('"id":"s"')); i++)
+      await new Promise((r) => setTimeout(r, 5));
+    expect(a.written.map((l) => JSON.parse(l)).find((e) => e.id === "s")).toMatchObject({
+      type: "reply",
+      ok: false,
+      error: { code: "failed", detail: "EEXIST" },
+    });
+    expect(readFileSync(outside, "utf8")).toBe("keep me");
     await a.end();
   });
 });

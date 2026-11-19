@@ -20,7 +20,13 @@ import { HOLD_REASONS, type HoldReason } from "./db/holds.js";
 import { Journal } from "./db/journal.js";
 import { resume, stop, stopState } from "./db/stop.js";
 import { recordHostCrash } from "./diag/crash.js";
-import { type DiagnosticsSource, defaultExportPath, exportDiagnostics } from "./diag/export.js";
+import { errorCode } from "./diag/errors.js";
+import {
+  type DiagnosticsSource,
+  defaultExportDir,
+  defaultExportPath,
+  exportDiagnostics,
+} from "./diag/export.js";
 import { type Check, doctor, worst } from "./doctor.js";
 import { Runs } from "./executor/safe-mode.js";
 import { EXIT, type ExitCode } from "./exit.js";
@@ -768,8 +774,16 @@ async function run(
       const out = opts.get("out");
       if (out === true || (out !== undefined && (!isAbsolute(out) || !out.endsWith(".zip"))))
         return usage(env, "lfcp-bridge export [--out </absolute/path.zip>]");
+      if (out === undefined) defaultExportDir(rt.paths.home);
       const path = out ?? defaultExportPath(rt.paths.home);
-      const { bytes } = exportDiagnostics(diagnosticsSource(rt), path);
+      let bytes: number;
+      try {
+        ({ bytes } = exportDiagnostics(diagnosticsSource(rt), path));
+      } catch (e) {
+        // A symlink or a directory at the path, a missing folder: its code, never the path's text.
+        env.err(`export: not written (${errorCode(e)}): choose a new file in an existing folder`);
+        return EXIT.NEEDS_PERSON;
+      }
       env.out(`diagnostics exported (${bytes} bytes): ${path}`);
       env.out(
         "titles, URLs, paths and error texts are replaced by one-time HMACs; send the file to support yourself",

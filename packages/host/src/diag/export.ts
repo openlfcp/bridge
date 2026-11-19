@@ -1,23 +1,38 @@
 // Export diagnostics (A§11, E20): a zip a person sends to support themselves, built by a
-// versioned allow-list, `diag-schema v1`. What is collected is named here field by field —
-// versions, counters, states, codes, ids — and nothing else is read: no pairing links, keys or
-// DEKs, no intent payloads or evidence, no field values, no raw crash reports (crash.ts keeps
-// signatures only). Then the whole tree is sealed: every string is replaced by
-// `h:` + HMAC-SHA-256(k, value)[0..8] unless its key is allow-listed as plain and the value has
-// that key's form (a code, an id, a time). Titles, URLs, paths and error texts are never plain.
+// versioned allow-list, `diag-schema v1`. The tree is built here field by field, by its path in
+// the schema — versions, counters, states, codes, ids — and nothing else is read or carried: no
+// pairing links, keys or DEKs, no intent payloads or evidence, no field values, no journal
+// parameters but a code and an intent id, no raw crash reports (crash.ts rebuilds signatures).
+// No object read from the database or a file is copied: every leaf is made by one of the makers
+// in collect(), which keep a value plain only when it is in its field's vocabulary (a known code,
+// codes.ts) or form (an id, a time, a version, a frame), and otherwise seal it:
+// `h:` + HMAC-SHA-256(k, value)[0..8]. Titles, URLs, paths and error texts are always sealed.
 // The key k is random per export and zeroed after it, never written: two exports of the same
 // state share no HMAC value, and no export can be matched to another by them.
 
 import { createHmac, randomBytes } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fchmodSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  realpathSync,
+  renameSync,
+  unlinkSync,
+  writeSync,
+} from "node:fs";
 import { arch, platform, release } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { crc32 } from "node:zlib";
 import type { BridgeConfig } from "../config.js";
 import type { BridgeDatabase } from "../db/database.js";
+import { JOURNAL_TEXT } from "../db/journal.js";
 import { stopState } from "../db/stop.js";
-import { crashSignatures, FRAME } from "./crash.js";
-import { CODE } from "./errors.js";
+import { KNOWN_CODES } from "./codes.js";
+import { crashSignatures } from "./crash.js";
 
 export const DIAG_SCHEMA = "diag-schema";
 export const DIAG_SCHEMA_VERSION = 1;
@@ -27,56 +42,15 @@ export const INTENTS = 200;
 export const RUNS = 20;
 
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
-/** A value of an enumerated column (CHECK in the schema): `active`, `to_apple`, `warn`. */
-const WORD = /^[a-z][a-z0-9_]{0,31}$/;
-const WORD_OR_CODE = new RegExp(`${WORD.source}|${CODE.source}`);
 const TIME = /^\d{4}-\d{2}-\d{2}T[\d:.]{8,12}Z$/;
 const VERSION = /^[A-Za-z0-9._+-]{1,32}$/;
 
-/** The keys whose strings may stay plain, each with the form its value must have. */
-const PLAIN: Readonly<Record<string, RegExp>> = {
-  schema: CODE,
-  createdAt: TIME,
-  since: TIME,
-  ts: TIME,
-  startedAt: TIME,
-  endedAt: TIME,
-  bridge: VERSION,
-  node: VERSION,
-  os: VERSION,
-  arch: WORD,
-  helper: VERSION,
-  macOS: VERSION,
-  level: WORD,
-  key: CODE,
-  code: CODE,
-  state: WORD,
-  stateReason: WORD_OR_CODE,
-  outcome: WORD,
-  direction: WORD,
-  kind: WORD,
-  holds: WORD,
-  process: /^[\w .-]{1,32}$/,
-  exception: CODE,
-  frames: FRAME,
-  id: ID,
-  bindingId: ID,
-  taskId: ID,
-  intent: ID,
-};
+/** Seals one string. */
+export type Sealer = (value: string) => string;
 
-/** Every string sealed: plain only at an allow-listed key and in that key's form. */
-export function seal(value: unknown, key: Buffer, at = ""): unknown {
-  if (typeof value === "string") {
-    const form = PLAIN[at];
-    if (form?.test(value) === true) return value;
-    return `h:${createHmac("sha256", key).update(value).digest("hex").slice(0, 16)}`;
-  }
-  if (Array.isArray(value)) return value.map((v) => seal(v, key, at));
-  if (typeof value === "object" && value !== null)
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, seal(v, key, k)]));
-  if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
-  return null;
+/** The sealer of one export's key. */
+export function sealer(key: Buffer): Sealer {
+  return (value) => `h:${createHmac("sha256", key).update(value).digest("hex").slice(0, 16)}`;
 }
 
 export interface DiagnosticsSource {
@@ -96,33 +70,43 @@ export interface DiagnosticsSource {
 
 type Row = Record<string, unknown>;
 
-function counts(db: BridgeDatabase, sql: string): Record<string, number> {
-  const out: Record<string, number> = {};
-  for (const r of db.prepare(sql).all() as { k: string; n: number }[]) out[r.k] = r.n;
-  return out;
-}
-
 function json(text: unknown): Row | undefined {
   try {
     const v = typeof text === "string" ? (JSON.parse(text) as unknown) : undefined;
-    return typeof v === "object" && v !== null ? (v as Row) : undefined;
+    return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Row) : undefined;
   } catch {
     return undefined;
   }
 }
 
-/** A journal entry's code: the first machine token among its code, reason and choice. */
-function codeOf(p: Row | undefined): string | null {
-  for (const k of ["code", "reason", "choice"]) {
-    const v = p?.[k];
-    if (typeof v === "string" && CODE.test(v)) return v;
-  }
-  return null;
-}
-
-/** The allow-listed tree of diag-schema v1, not yet sealed. */
-export function collect(s: DiagnosticsSource): Row {
+/** The allow-listed tree of diag-schema v1; `h` seals what may not stay plain. */
+export function collect(s: DiagnosticsSource, h: Sealer): Row {
   const db = s.db;
+  // The makers of leaves: a string is checked, a number kept, anything else is null.
+  const leaf = (v: unknown, plain: (x: string) => boolean): string | number | null => {
+    if (v === null || v === undefined) return null;
+    if (typeof v === "number") return Number.isFinite(v) ? v : null;
+    // An object or anything else where a string belongs is dropped, never carried or serialized.
+    if (typeof v !== "string") return null;
+    return plain(v) ? v : h(v);
+  };
+  const code = (v: unknown) => leaf(v, (x) => KNOWN_CODES.has(x));
+  const id = (v: unknown) => leaf(v, (x) => ID.test(x));
+  const time = (v: unknown) => leaf(v, (x) => TIME.test(x));
+  const version = (v: unknown) => leaf(v, (x) => VERSION.test(x));
+  const text = (v: unknown) => leaf(v, () => false);
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const counts = (sql: string) => {
+    const out: Record<string, number> = {};
+    for (const r of db.prepare(sql).all() as { k: unknown; n: number }[])
+      out[String(code(r.k))] = r.n;
+    return out;
+  };
+  /** A journal entry's code: its code, reason or choice — the first there, plain if known. */
+  const codeOf = (p: Row | undefined) => {
+    for (const k of ["code", "reason", "choice"]) if (p?.[k] !== undefined) return code(p[k]);
+    return null;
+  };
   const safeMode = json(
     (db.prepare("SELECT value FROM meta WHERE key = 'safe_mode'").get() as Row | undefined)?.value,
   );
@@ -134,11 +118,11 @@ export function collect(s: DiagnosticsSource): Row {
       )
       .all() as Row[]
   ).map((b) => ({
-    id: b.id,
-    state: b.state,
-    title: b.target_title,
+    id: id(b.id),
+    state: code(b.state),
+    title: text(b.target_title),
     verification: b.verification === 1,
-    holds: holds.filter((h) => h.binding_id === b.id).map((h) => h.reason),
+    holds: holds.filter((x) => x.binding_id === b.id).map((x) => code(x.reason)),
   }));
   const intents = (
     db
@@ -148,14 +132,14 @@ export function collect(s: DiagnosticsSource): Row {
       )
       .all(INTENTS) as Row[]
   ).map((i) => ({
-    id: i.id,
-    bindingId: i.binding_id,
-    taskId: i.task_id,
-    direction: i.direction,
-    kind: i.kind,
-    state: i.state,
-    stateReason: i.state_reason,
-    attempts: i.attempts,
+    id: id(i.id),
+    bindingId: id(i.binding_id),
+    taskId: id(i.task_id),
+    direction: code(i.direction),
+    kind: code(i.kind),
+    state: code(i.state),
+    stateReason: code(i.state_reason),
+    attempts: num(i.attempts),
     code: codeOf(json(i.last_error_json)),
   }));
   const runs = (
@@ -164,7 +148,11 @@ export function collect(s: DiagnosticsSource): Row {
         "SELECT started_at, ended_at, outcome FROM runs WHERE kind = 'process' ORDER BY started_at DESC LIMIT ?",
       )
       .all(RUNS) as Row[]
-  ).map((r) => ({ startedAt: r.started_at, endedAt: r.ended_at, outcome: r.outcome }));
+  ).map((r) => ({
+    startedAt: time(r.started_at),
+    endedAt: time(r.ended_at),
+    outcome: code(r.outcome),
+  }));
   const journal = (
     db
       .prepare(
@@ -176,54 +164,61 @@ export function collect(s: DiagnosticsSource): Row {
     .map((e) => {
       const p = json(e.params_json);
       return {
-        ts: e.ts,
-        level: e.level,
-        key: e.key,
+        ts: time(e.ts),
+        level: code(e.level),
+        key: leaf(e.key, (x) => Object.hasOwn(JOURNAL_TEXT, x)),
         code: codeOf(p),
-        ids: { bindingId: e.binding_id, taskId: e.task_id, intent: p?.intent ?? null },
+        ids: { bindingId: id(e.binding_id), taskId: id(e.task_id), intent: id(p?.intent) },
       };
     });
   const wv = s.config.writesVerified;
   return {
     schema: DIAG_SCHEMA,
     version: DIAG_SCHEMA_VERSION,
-    createdAt: new Date((s.now ?? Date.now)()).toISOString(),
+    createdAt: time(new Date((s.now ?? Date.now)()).toISOString()),
     versions: {
-      bridge: s.version,
-      node: process.versions.node,
-      os: `${platform()}-${release()}`,
-      arch: arch(),
-      helper: wv?.helperVersion ?? null,
-      macOS: wv?.macOS ?? null,
-      database: (db.pragma("user_version", { simple: true }) as number) ?? null,
+      bridge: version(s.version),
+      node: version(process.versions.node),
+      os: version(`${platform()}-${release()}`),
+      arch: version(arch()),
+      helper: version(wv?.helperVersion),
+      macOS: version(wv?.macOS),
+      database: num(db.pragma("user_version", { simple: true })),
     },
-    artifactSliceId: s.artifactSliceId?.() ?? null,
-    certTestMode: s.certTestMode?.() ?? false,
+    artifactSliceId: id(s.artifactSliceId?.()),
+    certTestMode: s.certTestMode?.() === true,
     stop: stopState(s.home) !== undefined,
-    safeMode: safeMode === undefined ? null : { since: safeMode.since },
-    paths: { home: s.home },
+    safeMode: safeMode === undefined ? null : { since: time(safeMode.since) },
+    paths: { home: text(s.home) },
     counters: {
-      bindings: counts(db, "SELECT state AS k, count(*) AS n FROM bindings GROUP BY state"),
-      links: counts(db, "SELECT state AS k, count(*) AS n FROM links GROUP BY state"),
-      intents: counts(db, "SELECT state AS k, count(*) AS n FROM intents GROUP BY state"),
-      holds: counts(db, "SELECT reason AS k, count(*) AS n FROM binding_holds GROUP BY reason"),
-      journal: counts(db, "SELECT level AS k, count(*) AS n FROM journal GROUP BY level"),
+      bindings: counts("SELECT state AS k, count(*) AS n FROM bindings GROUP BY state"),
+      links: counts("SELECT state AS k, count(*) AS n FROM links GROUP BY state"),
+      intents: counts("SELECT state AS k, count(*) AS n FROM intents GROUP BY state"),
+      holds: counts("SELECT reason AS k, count(*) AS n FROM binding_holds GROUP BY reason"),
+      journal: counts("SELECT level AS k, count(*) AS n FROM journal GROUP BY level"),
     },
-    needsAttention: s.needsAttention?.() ?? [],
+    needsAttention: (s.needsAttention?.() ?? []).map((n) => ({
+      bindingId: id(n.bindingId),
+      code: code(n.code),
+    })),
     bindings,
     intents,
     runs,
     journal,
-    crashes: crashSignatures(s.home, s.reports),
+    // Rebuilt and checked field by field in crash.ts: the process ours, the exception known.
+    crashes: crashSignatures(s.home, s.reports).map((c) => ({
+      process: c.process,
+      exception: c.exception,
+      frames: [...c.frames],
+    })),
   };
 }
 
-/** The sealed diagnostics: collected, then sealed with a key made for it and zeroed after. */
+/** The sealed diagnostics: collected with a key made for this export and zeroed after it. */
 export function diagnostics(s: DiagnosticsSource): Row {
-  const tree = collect(s);
   const key = randomBytes(32);
   try {
-    return seal(tree, key) as Row;
+    return collect(s, sealer(key));
   } finally {
     key.fill(0);
   }
@@ -278,11 +273,58 @@ export function defaultExportPath(home: string, now = Date.now()): string {
   return join(home, "diagnostics", `lfcp-bridge-diagnostics-${stamp}.zip`);
 }
 
-/** Writes the export to `path` (0600); returns its size. */
+/**
+ * Writes `data` at `path` without following a link there and without writing into an existing
+ * file: a new file (0600, O_EXCL | O_NOFOLLOW) in the directory `path` names (resolved once), then
+ * renamed over `path`. An existing regular file is replaced as a whole (its inode, and any other
+ * link to it, is left as it was); a symlink, a directory or anything else there is refused (EEXIST).
+ * The directory must exist.
+ */
+export function writeNewFile(path: string, data: Buffer): string {
+  const dir = realpathSync(dirname(path));
+  const final = join(dir, basename(path));
+  let there: ReturnType<typeof lstatSync> | undefined;
+  try {
+    there = lstatSync(final);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  }
+  if (there !== undefined && !there.isFile())
+    throw Object.assign(new Error("export: not a regular file"), { code: "EEXIST" });
+  const tmp = join(dir, `.${basename(path)}.${randomBytes(6).toString("hex")}.tmp`);
+  const fd = openSync(
+    tmp,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    fchmodSync(fd, 0o600);
+    for (let at = 0; at < data.length; ) at += writeSync(fd, data, at);
+    fsyncSync(fd);
+  } catch (e) {
+    closeSync(fd);
+    unlinkSync(tmp);
+    throw e;
+  }
+  closeSync(fd);
+  try {
+    renameSync(tmp, final);
+  } catch (e) {
+    unlinkSync(tmp);
+    throw e;
+  }
+  return final;
+}
+
+/** The data directory's own export folder (0700), made when missing. */
+export function defaultExportDir(home: string): void {
+  mkdirSync(join(home, "diagnostics"), { recursive: true, mode: 0o700 });
+}
+
+/** Writes the export to `path` (writeNewFile: 0600, never through a link); returns its size. */
 export function exportDiagnostics(s: DiagnosticsSource, path: string): { readonly bytes: number } {
   const data = Buffer.from(`${JSON.stringify(diagnostics(s), null, 2)}\n`, "utf8");
   const archive = zip([{ name: DIAG_FILE, data }]);
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  writeFileSync(path, archive, { mode: 0o600 });
+  writeNewFile(path, archive);
   return { bytes: archive.length };
 }

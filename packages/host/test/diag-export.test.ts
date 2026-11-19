@@ -3,7 +3,20 @@
 // reports, a pairing link — is found nowhere in the zip; two exports of one state share no HMAC.
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  linkSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inflateRawSync } from "node:zlib";
@@ -11,14 +24,22 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type BridgeDatabase, openBridgeDatabase } from "../src/db/database.js";
 import { Holds } from "../src/db/holds.js";
 import { Journal } from "../src/db/journal.js";
-import { hostSignature, ipsSignature, recordHostCrash } from "../src/diag/crash.js";
+import {
+  crashSignatures,
+  hostSignature,
+  ipsSignature,
+  MAX_CRASHES,
+  recordHostCrash,
+} from "../src/diag/crash.js";
+import { errorCode } from "../src/diag/errors.js";
 import {
   collect,
   DIAG_FILE,
   type DiagnosticsSource,
   diagnostics,
   exportDiagnostics,
-  seal,
+  sealer,
+  writeNewFile,
   zip,
 } from "../src/diag/export.js";
 import { Runs } from "../src/executor/safe-mode.js";
@@ -57,7 +78,7 @@ function seed(): void {
      VALUES ('b1', 'inst1', ?, 'reminders', 'eventkit', ?, ?, 'active', ?)`,
   ).run(`res-${CANARY}`, `list-${CANARY}`, `LFCP · Groceries ${CANARY}`, T);
   db.prepare(
-    "INSERT INTO binding_holds (binding_id, reason, since, detail_json) VALUES ('b1', 'guard_limit', ?, ?)",
+    "INSERT INTO binding_holds (binding_id, reason, since, detail_json) VALUES ('b1', 'guard_mass_unlink', ?, ?)",
   ).run(T, JSON.stringify({ title: CANARY }));
   db.prepare(
     `INSERT INTO links (binding_id, task_id, rem_url, rem_external_id, rem_title_snapshot, origin,
@@ -173,6 +194,7 @@ function hmacs(v: unknown, out = new Set<string>()): Set<string> {
 describe("Export diagnostics: T§3 canary (L0)", () => {
   it("no canary in the zip: titles, URLs, paths, causes, payload, evidence, crashes, pairing", () => {
     seed();
+    mkdirSync(join(dir, "out"));
     const path = join(dir, "out", "diag.zip");
     const { bytes } = exportDiagnostics(source(), path);
     const raw = readFileSync(path);
@@ -193,7 +215,7 @@ describe("Export diagnostics: T§3 canary (L0)", () => {
         state: "active",
         title: expect.stringMatching(/^h:[0-9a-f]{16}$/),
         verification: false,
-        holds: ["guard_limit"],
+        holds: ["guard_mass_unlink"],
       },
     ]);
     expect(d.intents).toEqual([
@@ -214,7 +236,7 @@ describe("Export diagnostics: T§3 canary (L0)", () => {
     expect(d.journal.map((e: { key: string; code: string | null }) => [e.key, e.code])).toEqual([
       ["effect.lost", "EPIPE"],
       ["effect.lost", null],
-      ["link.quarantine", null],
+      ["link.quarantine", expect.stringMatching(/^h:[0-9a-f]{16}$/)],
       ["link.unlinked", "moved_out"],
     ]);
     expect(d.journal[0]).toEqual({
@@ -247,41 +269,106 @@ describe("Export diagnostics: T§3 canary (L0)", () => {
     // Everything else is the same: only the sealed values differ.
     const plain = (d: unknown) => JSON.stringify(d).replace(/"h:[0-9a-f]{16}"/g, '"h"');
     expect(plain(a)).toBe(plain(b));
-    const key = Buffer.alloc(32, 7);
-    expect(seal({ x: "same", y: ["same"] }, key)).toEqual({
-      x: seal("same", key),
-      y: [seal("same", key)],
-    });
-  });
-
-  it("seal: plain only at an allow-listed key in that key's form; anything else is an HMAC", () => {
-    const key = Buffer.alloc(32, 1);
-    const out = seal(
-      {
-        code: "EPIPE",
-        state: `active ${CANARY}`,
-        title: "store_conflict",
-        nested: {
-          deeper: [{ code: `x y ${CANARY}`, ts: T, id: "b1", n: 3, ok: true, none: null }],
-        },
-      },
-      key,
-    ) as Record<string, unknown>;
-    expect(JSON.stringify(out)).not.toContain(CANARY);
-    expect(out.code).toBe("EPIPE");
-    expect(out.state).toMatch(/^h:/);
-    expect(out.title).toMatch(/^h:/);
-    expect(out.nested).toEqual({
-      deeper: [{ code: expect.stringMatching(/^h:/), ts: T, id: "b1", n: 3, ok: true, none: null }],
-    });
+    const h = sealer(Buffer.alloc(32, 7));
+    expect(h("same")).toBe(h("same"));
+    expect(h("same")).not.toBe(sealer(Buffer.alloc(32, 8))("same"));
   });
 
   it("collect reads no payload, evidence, link or meta beyond the allow-list", () => {
     seed();
-    const tree = JSON.stringify(collect({ ...source(), reports: join(dir, "none") }));
-    // Before sealing, only the allow-listed strings with the canary are there: title, home path.
-    const leaks = tree.match(new RegExp(`"[^"]*${CANARY}[^"]*"`, "g")) ?? [];
-    expect(leaks.sort()).toEqual([`"${home}"`, `"LFCP · Groceries ${CANARY}"`]);
+    // A marking sealer: what would be sealed shows as S<…>.
+    const tree = JSON.stringify(
+      collect({ ...source(), reports: join(dir, "none") }, (v) => `S<${v}>`),
+    );
+    const plain = tree.replace(/"S<[^"]*>"/g, '"S"');
+    expect(plain).not.toContain(CANARY);
+    // Sealed, the canary is only where a title or a path belongs…
+    const sealed = (tree.match(new RegExp(`"S<[^"]*${CANARY}[^"]*>"`, "g")) ?? []).sort();
+    // …and the free-text reason of a journal entry, in place of its code.
+    expect(sealed).toEqual([`"S<${home}>"`, `"S<${CANARY}>"`, `"S<LFCP · Groceries ${CANARY}>"`]);
+  });
+
+  it("review #1: nested JSON is never carried — extra fields, nested allowed names, canary keys", () => {
+    seed();
+    const crashes = join(home, "crashes");
+    // An old or foreign host-*.json: only process, exception and frames are rebuilt, each checked.
+    writeFileSync(
+      join(crashes, "host-2.json"),
+      JSON.stringify({
+        process: "host",
+        exception: "PRIVATE_NOTE",
+        frames: ["main (bridge.mjs:1)", { code: "PRIVATE_NOTE" }, `x ${CANARY}`],
+        payload: { code: "PRIVATE_NOTE", id: "PRIVATE_NOTE" },
+        [`PRIVATE_USER_TEXT_${CANARY}`]: "value",
+      }),
+    );
+    writeFileSync(
+      join(crashes, "host-3.json"),
+      JSON.stringify({ process: `PRIVATE ${CANARY}`, exception: "TypeError", frames: [] }),
+    );
+    const journal = new Journal(db, () => Date.parse(T));
+    journal.append("info", "effect.lost", {
+      params: { intent: { payload: { id: "PRIVATE_NOTE" } }, code: { code: "EPIPE" } },
+    });
+    journal.append("info", `custom.${CANARY}`, { params: { intent: "i1", reason: ["moved_out"] } });
+    const d = diagnostics(source());
+    const text = JSON.stringify(d);
+    expect(text).not.toContain(CANARY);
+    expect(text).not.toContain("PRIVATE");
+    expect(text).not.toContain("payload");
+    expect(d.crashes).toContainEqual({
+      process: "host",
+      exception: "unknown",
+      frames: ["main (bridge.mjs:1)"],
+    });
+    expect(
+      (d.crashes as { process: string }[]).filter(
+        (c) => c.process !== "host" && c.process !== "lfcp-reminders-helper",
+      ),
+    ).toEqual([]);
+    const tail = (d.journal as Record<string, unknown>[]).slice(-2);
+    expect(tail[0]).toMatchObject({ key: "effect.lost", code: null, ids: { intent: null } });
+    expect(tail[1]).toMatchObject({
+      key: expect.stringMatching(/^h:/),
+      code: null,
+      ids: { intent: "i1" },
+    });
+    for (const e of d.journal as Record<string, unknown>[])
+      expect(Object.keys(e).sort()).toEqual(["code", "ids", "key", "level", "ts"]);
+  });
+
+  it("review #2: user text in the shape of a code is sealed; unknown codes are not codes", () => {
+    seed();
+    const shaped = ["PRIVATE_NOTE", "private.example.com", "private_note", "PrivateNoteError"];
+    const journal = new Journal(db, () => Date.parse(T));
+    for (const v of shaped) {
+      journal.append("warn", "effect.refused", { params: { code: v } });
+      journal.append("info", "link.unlinked", { params: { reason: v } });
+    }
+    db.prepare("UPDATE intents SET state_reason = ?, last_error_json = ?, kind = ?").run(
+      "private_note",
+      JSON.stringify({ code: "private.example.com" }),
+      "PRIVATE_NOTE",
+    );
+    db.prepare(
+      "INSERT INTO binding_holds (binding_id, reason, since) VALUES ('b1', 'private_note', ?)",
+    ).run(T);
+    const d = diagnostics(source());
+    const text = JSON.stringify(d);
+    for (const v of shaped) expect(text).not.toContain(v);
+    expect(text.toLowerCase()).not.toContain("private");
+    // Known codes stay plain.
+    expect(d.intents).toEqual([
+      expect.objectContaining({ state: "prepared", direction: "to_apple" }),
+    ]);
+    expect((d.bindings as { holds: string[] }[])[0]?.holds).toContain("guard_mass_unlink");
+    expect(errorCode({ code: "private.example.com" })).toBe("error");
+    expect(errorCode({ code: "PRIVATE_NOTE", name: "TransportReadError" })).toBe(
+      "TransportReadError",
+    );
+    expect(errorCode({ name: "PrivateNoteError" })).toBe("error");
+    expect(errorCode({ code: "store_conflict" })).toBe("store_conflict");
+    expect(errorCode(Object.assign(new Error("x"), { code: "ENOENT" }))).toBe("ENOENT");
   });
 
   it("the zip opens with the system's unzip", () => {
@@ -298,7 +385,66 @@ describe("Export diagnostics: T§3 canary (L0)", () => {
   });
 });
 
+describe("review #3: the export never writes through a link or into an existing file", () => {
+  it("a symlink at the path is refused; its target is untouched", () => {
+    const outside = join(dir, "outside.txt");
+    writeFileSync(outside, "keep me");
+    const chosen = join(home, "chosen.zip");
+    symlinkSync(outside, chosen);
+    expect(() => exportDiagnostics(source(), chosen)).toThrow(
+      expect.objectContaining({ code: "EEXIST" }),
+    );
+    expect(readFileSync(outside, "utf8")).toBe("keep me");
+    expect(lstatSync(chosen).isSymbolicLink()).toBe(true);
+    // A dangling link too: nothing is created at its target.
+    const dangling = join(home, "dangling.zip");
+    symlinkSync(join(dir, "made-by-export.zip"), dangling);
+    expect(() => writeNewFile(dangling, Buffer.from("x"))).toThrow();
+    expect(existsSync(join(dir, "made-by-export.zip"))).toBe(false);
+  });
+
+  it("an existing 0644 file is replaced by a new 0600 file; a hard link to it keeps its bytes", () => {
+    const path = join(dir, "old.zip");
+    writeFileSync(path, "old", { mode: 0o644 });
+    chmodSync(path, 0o644);
+    const other = join(dir, "other-link");
+    linkSync(path, other);
+    exportDiagnostics(source(), path);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(readFileSync(other, "utf8")).toBe("old");
+    expect(readFileSync(path).subarray(0, 4)).toEqual(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+    // No temporary file is left behind.
+    expect(readdirSync(dir).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("a directory at the path or a missing folder is refused", () => {
+    mkdirSync(join(dir, "d.zip"));
+    expect(() => writeNewFile(join(dir, "d.zip"), Buffer.from("x"))).toThrow();
+    expect(() => writeNewFile(join(dir, "missing", "d.zip"), Buffer.from("x"))).toThrow();
+  });
+});
+
 describe("crash signatures (A§11)", () => {
+  it("review #4: other processes' reports are never opened; at most MAX_CRASHES are", () => {
+    const opened: string[] = [];
+    const read = (f: string) => {
+      opened.push(f);
+      return readFileSync(f, "utf8");
+    };
+    writeFileSync(join(reports, `Other-${CANARY}-1.ips`), ips("Other"));
+    writeFileSync(join(reports, "lfcp-reminders-helper-x.crash"), ips());
+    for (let i = 0; i < MAX_CRASHES + 2; i++)
+      writeFileSync(join(reports, `lfcp-reminders-helper-${i}.ips`), ips());
+    symlinkSync(
+      join(reports, "lfcp-reminders-helper-0.ips"),
+      join(reports, "LFCP Bridge-link.ips"),
+    );
+    const got = crashSignatures(home, reports, read);
+    expect(got).toHaveLength(MAX_CRASHES);
+    expect(opened).toHaveLength(MAX_CRASHES);
+    for (const f of opened) expect(f).toMatch(/lfcp-reminders-helper-\d+\.ips$/);
+  });
+
   it("host: the class and our own frames, no message, no path", () => {
     const e = new RangeError(CANARY);
     e.stack = [
@@ -353,6 +499,17 @@ describe("lfcp-bridge export", () => {
     const d = await call("export");
     expect(d.code).toBe(EXIT.OK);
     expect(d.out[0]).toMatch(/diagnostics[/\\]lfcp-bridge-diagnostics-\d{8}T\d{6}Z\.zip$/);
+  });
+
+  it("review #3: a symlink at --out is refused with its code; the target is untouched", async () => {
+    const outside = join(dir, "outside.txt");
+    writeFileSync(outside, "keep me");
+    const chosen = join(home, "chosen.zip");
+    symlinkSync(outside, chosen);
+    const r = await call("export", "--out", chosen);
+    expect(r.code).toBe(EXIT.NEEDS_PERSON);
+    expect(r.err.join("\n")).toContain("(EEXIST)");
+    expect(readFileSync(outside, "utf8")).toBe("keep me");
   });
 
   it("refuses a relative path or another extension", async () => {

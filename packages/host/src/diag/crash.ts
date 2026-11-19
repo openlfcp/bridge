@@ -3,9 +3,9 @@
 // The host's own crash (an exception nobody caught) is written as a signature, at once, to
 // <home>/crashes/; the shell's and the helper's come from macOS's .ips reports, read at export.
 
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import { CODE } from "./errors.js";
+import { ERROR_CLASSES, MACH_EXCEPTIONS } from "./codes.js";
 
 export interface CrashSignature {
   /** "host", or one of OWN_PROCESSES. */
@@ -22,6 +22,15 @@ export const CRASHES_DIR = "crashes";
 export const TOP_FRAMES = 8;
 /** How many signatures an export carries (the newest). */
 export const MAX_CRASHES = 10;
+/** The largest file read: a host signature, an .ips report. Bigger ones are skipped unread. */
+export const MAX_SIGNATURE_BYTES = 64 * 1024;
+export const MAX_REPORT_BYTES = 4 * 1024 * 1024;
+
+const HOST_FILE = /^host-\d{1,16}\.json$/;
+/** An .ips report of one of our processes, by its name alone: the only reports opened. */
+function ownReport(name: string): boolean {
+  return name.endsWith(".ips") && OWN_PROCESSES.some((p) => name.startsWith(`${p}-`));
+}
 
 /** One frame, as a signature keeps it: identifiers, a file's base name and numbers only. */
 export const FRAME = /^(?:[\w$.#<>]{1,96} \([\w.-]{1,64}:\d{1,7}\)|[\w .-]{1,64}\+\d{1,10})$/;
@@ -49,8 +58,30 @@ export function hostSignature(e: unknown): CrashSignature {
   }
   return {
     process: "host",
-    exception: typeof name === "string" && CODE.test(name) ? name : "unknown",
+    exception: typeof name === "string" && ERROR_CLASSES.has(name) ? name : "unknown",
     frames,
+  };
+}
+
+/**
+ * A signature rebuilt from what a file says: the three fields, each checked — the process ours,
+ * the exception a known class or Mach type, the frames in FRAME's form. Nothing else is carried.
+ */
+export function checkedSignature(v: unknown): CrashSignature | undefined {
+  if (typeof v !== "object" || v === null) return undefined;
+  const { process, exception, frames } = v as Record<string, unknown>;
+  if (typeof process !== "string" || (process !== "host" && !OWN_PROCESSES.includes(process)))
+    return undefined;
+  return {
+    process,
+    exception:
+      typeof exception === "string" &&
+      (process === "host" ? ERROR_CLASSES : MACH_EXCEPTIONS).has(exception)
+        ? exception
+        : "unknown",
+    frames: (Array.isArray(frames) ? frames : [])
+      .filter((f): f is string => typeof f === "string" && FRAME.test(f))
+      .slice(0, TOP_FRAMES),
   };
 }
 
@@ -106,18 +137,21 @@ export function ipsSignature(text: string): CrashSignature | undefined {
     if (FRAME.test(frame)) frames.push(frame);
     if (frames.length === TOP_FRAMES) break;
   }
-  const type = body.exception?.type;
-  return {
-    process: proc,
-    exception: typeof type === "string" && CODE.test(type) ? type : "unknown",
-    frames,
-  };
+  return checkedSignature({ process: proc, exception: body.exception?.type, frames });
 }
 
-/** The newest crash signatures: the host's (<home>/crashes) and our processes' .ips reports. */
-export function crashSignatures(home: string, reports?: string): readonly CrashSignature[] {
-  const found: { at: number; s: CrashSignature }[] = [];
-  const read = (dir: string, take: (name: string, text: string) => CrashSignature | undefined) => {
+/**
+ * The newest crash signatures: the host's (<home>/crashes) and our processes' .ips reports. Files
+ * are chosen by name, type (regular, no symlink) and size first; only the newest MAX_CRASHES of
+ * them are opened. A report of another process is never read.
+ */
+export function crashSignatures(
+  home: string,
+  reports?: string,
+  read: (file: string) => string = (file) => readFileSync(file, "utf8"),
+): readonly CrashSignature[] {
+  const candidates: { at: number; file: string; ips: boolean }[] = [];
+  const scan = (dir: string, wanted: (name: string) => boolean, max: number, ips: boolean) => {
     let names: string[];
     try {
       names = readdirSync(dir);
@@ -125,24 +159,23 @@ export function crashSignatures(home: string, reports?: string): readonly CrashS
       return;
     }
     for (const name of names) {
+      if (!wanted(name)) continue;
       try {
         const file = join(dir, name);
-        const s = take(name, readFileSync(file, "utf8"));
-        if (s !== undefined) found.push({ at: statSync(file).mtimeMs, s });
+        const st = lstatSync(file);
+        if (st.isFile() && st.size <= max) candidates.push({ at: st.mtimeMs, file, ips });
       } catch {}
     }
   };
-  read(join(home, CRASHES_DIR), (name, text) =>
-    /^host-\d+\.json$/.test(name) ? (JSON.parse(text) as CrashSignature) : undefined,
-  );
-  if (reports !== undefined)
-    read(reports, (name, text) =>
-      name.endsWith(".ips") && OWN_PROCESSES.some((p) => name.startsWith(`${p}-`))
-        ? ipsSignature(text)
-        : undefined,
-    );
-  return found
-    .sort((a, b) => b.at - a.at)
-    .slice(0, MAX_CRASHES)
-    .map((f) => f.s);
+  scan(join(home, CRASHES_DIR), (n) => HOST_FILE.test(n), MAX_SIGNATURE_BYTES, false);
+  if (reports !== undefined) scan(reports, ownReport, MAX_REPORT_BYTES, true);
+  const out: CrashSignature[] = [];
+  for (const c of candidates.sort((a, b) => b.at - a.at).slice(0, MAX_CRASHES)) {
+    try {
+      const text = read(c.file);
+      const s = c.ips ? ipsSignature(text) : checkedSignature(JSON.parse(text));
+      if (s !== undefined) out.push(s);
+    } catch {}
+  }
+  return out;
 }
