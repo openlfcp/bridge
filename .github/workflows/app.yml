@@ -1,0 +1,28 @@
+name: app
+
+# LFCP Bridge.app (PLAN §E-004, T§2): the shell's L0 tests (swift test in app/) and the L5 smoke of
+# a development build (scripts/app/smoke.sh). Packaging, both slices and the DMG come with E-005.
+on:
+  push:
+    paths: ["app/**", "packages/host/**", "helper/**", "scripts/app/**", "scripts/bundle-host.mjs", "package.json", "pnpm-lock.yaml", ".github/workflows/app.yml"]
+  pull_request:
+    paths: ["app/**", "packages/host/**", "helper/**", "scripts/app/**", "scripts/bundle-host.mjs", "package.json", "pnpm-lock.yaml", ".github/workflows/app.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  swift-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Toolchain
+        run: |
+          sw_vers
+          xcrun swift --version
+      - name: swift test (menu model, IPC, supervisor, URL handoff; fake host)
+        working-directory: app
+        run: swift test
+      - name: swift build -c release (the shell, no test hooks)
+        working-directory: app
+        run: swift build -c release
