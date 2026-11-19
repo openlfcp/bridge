@@ -84,6 +84,23 @@ export interface FieldBase {
   readonly lfcpShadow?: unknown;
 }
 
+/** One Task of a Restore answer, and the state it was answered in (the authorization's `from`). */
+export type RestoreItem =
+  /** The reminder's rev the inverse write expects. */
+  | { readonly kind: "prefer_lfcp_status"; readonly rev: string }
+  /** The Task's exact status the reopen undoes. */
+  | { readonly kind: "reopen"; readonly status: string };
+
+/**
+ * What a pass saw of a Task of a Restore answer: its status turned around (written, or waiting
+ * for an open write), agreed (both sides the same: the answer is done for it), or moved (no longer
+ * as answered — a later change of the person's goes as usual).
+ */
+export interface RestoreSeen {
+  readonly taskId: string;
+  readonly seen: "turned" | "agreed" | "moved";
+}
+
 export interface PassBinding {
   readonly id: string;
   readonly installationId: string;
@@ -126,11 +143,12 @@ export interface PassView {
    */
   readonly newTask?: (input: NewTaskInput) => { readonly id: string; readonly task: unknown };
   /**
-   * A person's Restore answers waiting (A§7.2, the host's `decisions`), by Task: its status goes
-   * the inverse way — LFCP's written back to the reminder (prefer_lfcp_status: "Reopen the
-   * reminders", "Complete the reminders again"), or the Task reopened (reopen).
+   * A person's Restore answers not yet finished (A§7.2, the host's active decision items), by
+   * Task: its status goes the inverse way — LFCP's written back to the reminder
+   * (prefer_lfcp_status: "Reopen the reminders", "Complete the reminders again"), or the Task
+   * reopened (reopen) — but only while the pair is still as the person answered it.
    */
-  readonly restore?: ReadonlyMap<string, "prefer_lfcp_status" | "reopen">;
+  readonly restore?: ReadonlyMap<string, RestoreItem>;
   /** A reminder kept out of the imports ("Keep only in Reminders", `ignored_imports`), by its key. */
   readonly ignoredImport?: (key: string) => boolean;
 }
@@ -325,6 +343,8 @@ export interface Plan {
   readonly items: readonly ItemNote[];
   readonly waiting: readonly { readonly taskId: string; readonly waiting: Waiting }[];
   readonly holds: readonly ("foreign_bridge" | "import_ambiguous")[];
+  /** The Tasks of view.restore this pass reconciled the status of, and what it saw. */
+  readonly restored: readonly RestoreSeen[];
   readonly counts: {
     readonly tasks: number;
     readonly inFilter: number;
@@ -382,18 +402,45 @@ export function plan(view: PassView): Plan {
 
   // A Restore answer turns the status table's action around for its Tasks (A§7.2): Apple's
   // change → LFCP's status back to the reminder (completed to LocalDate, B2), LFCP's completion →
-  // the Task reopened. Anything else is planned as the table says.
-  const inverse = (taskId: string, pL: StatusProjection, act: StatusAction): StatusAction => {
-    const r = view.restore?.get(taskId);
-    if (r === "prefer_lfcp_status" && (act.kind === "lfcp_complete" || act.kind === "lfcp_reopen"))
+  // the Task reopened — only while the pair is as answered (the same rev of the reminder, the same
+  // exact status of the Task). Agreed sides finish it; anything else is planned as the table says.
+  const restored: RestoreSeen[] = [];
+  const inverse = (
+    task: LfcpTask,
+    item: AppleItem,
+    pL: StatusProjection,
+    act: StatusAction,
+  ): StatusAction => {
+    const r = view.restore?.get(task.id);
+    if (r === undefined) return act;
+    const seen = (s: RestoreSeen["seen"]) => restored.push({ taskId: task.id, seen: s });
+    if (act.kind === "none") {
+      seen("agreed");
+      return act;
+    }
+    if (
+      r.kind === "prefer_lfcp_status" &&
+      item.rev === r.rev &&
+      (act.kind === "lfcp_complete" || act.kind === "lfcp_reopen")
+    ) {
+      seen("turned");
       return {
         kind: "apple",
         completed: pL.closed
           ? { value: true, ...(pL.date === null ? {} : { date: pL.date }) }
           : { value: false },
       };
-    if (r === "reopen" && act.kind === "apple" && act.completed.value)
+    }
+    if (
+      r.kind === "reopen" &&
+      task.status === r.status &&
+      act.kind === "apple" &&
+      act.completed.value
+    ) {
+      seen("turned");
       return { kind: "lfcp_reopen" };
+    }
+    seen("moved");
     return act;
   };
 
@@ -484,7 +531,7 @@ export function plan(view: PassView): Plan {
               }),
         };
         const row = statusRow(input);
-        const act = inverse(task.id, pL.status, row.action(input));
+        const act = inverse(task, item, pL.status, row.action(input));
         const extra = { row: row.id, ...(row.appleOverruled ? { appleValueLost: true } : {}) };
         if (act.kind === "apple")
           writeApple(
@@ -821,6 +868,7 @@ export function plan(view: PassView): Plan {
     items,
     waiting,
     holds: m.holds,
+    restored,
     counts: {
       tasks: view.tasks.filter((t) => t.lifecycle === "active").length,
       inFilter: view.tasks.filter((t) => filtered(t)).length,

@@ -12,6 +12,7 @@ import {
   plan,
   projectApple,
   projectLfcp,
+  type RestoreItem,
   taskLink,
 } from "../src/adapter/index.js";
 import type { AppleItem, ListRef } from "../src/index.js";
@@ -725,7 +726,7 @@ describe("Restore answers (A§7.2; E-041b): the status the inverse way, imports 
     const r = projection(t, apple);
     return { t, r, bases: new Map([["T1", synced(t, r)]]) };
   };
-  const restore = (kind: "prefer_lfcp_status" | "reopen") => new Map([["T1", kind]]);
+  const restore = (r: RestoreItem) => new Map([["T1", r]]);
   const status = (p: ReturnType<typeof plan>) =>
     p.intents.map((i) => [i.direction, i.fields, i.payload]);
 
@@ -739,7 +740,7 @@ describe("Restore answers (A§7.2; E-041b): the status the inverse way, imports 
       snapshot: { items: [done], complete: true },
     };
     expect(plan(view(v)).intents[0]?.direction).toBe("to_lfcp");
-    const p = plan(view({ ...v, restore: restore("prefer_lfcp_status") }));
+    const p = plan(view({ ...v, restore: restore({ kind: "prefer_lfcp_status", rev: "2" }) }));
     expect(status(p)).toEqual([
       [
         "to_apple",
@@ -753,6 +754,21 @@ describe("Restore answers (A§7.2; E-041b): the status the inverse way, imports 
       ],
     ]);
     expect(p.intents[0]?.basis.pA?.status).toEqual({ closed: true, date: "2026-11-09" });
+    expect(p.restored).toEqual([{ taskId: "T1", seen: "turned" }]);
+    // The reminder changed since the answer (another rev): as usual, the item moved.
+    const moved = plan(view({ ...v, restore: restore({ kind: "prefer_lfcp_status", rev: "1" }) }));
+    expect(moved.intents[0]?.direction).toBe("to_lfcp");
+    expect(moved.restored).toEqual([{ taskId: "T1", seen: "moved" }]);
+    // Both sides open again (the write confirmed): agreed, nothing written.
+    const agreed = plan(
+      view({
+        ...v,
+        snapshot: { items: [{ ...r, rev: "3" }], complete: true },
+        restore: restore({ kind: "prefer_lfcp_status", rev: "2" }),
+      }),
+    );
+    expect(agreed.intents).toEqual([]);
+    expect(agreed.restored).toEqual([{ taskId: "T1", seen: "agreed" }]);
   });
 
   it("prefer_lfcp_status: reopened in Reminders → completed again with the Task's date (a LocalDate)", () => {
@@ -766,7 +782,7 @@ describe("Restore answers (A§7.2; E-041b): the status the inverse way, imports 
         links: [link("T1")],
         bases,
         snapshot: { items: [{ ...r, completed: false }], complete: true },
-        restore: restore("prefer_lfcp_status"),
+        restore: restore({ kind: "prefer_lfcp_status", rev: "1" }),
       }),
     );
     expect(p.intents.map((i) => (i.payload as { set?: unknown }).set)).toEqual([
@@ -778,7 +794,9 @@ describe("Restore answers (A§7.2; E-041b): the status the inverse way, imports 
     const { t, r, bases } = pair({ status: "done", completion_date: "2026-11-09" });
     const v = { tasks: [t], links: [link("T1")], bases, snapshot: { items: [r], complete: true } };
     expect(status(plan(view(v)))[0]?.[0]).toBe("to_apple");
-    expect(status(plan(view({ ...v, restore: restore("reopen") })))).toEqual([
+    expect(
+      status(plan(view({ ...v, restore: restore({ kind: "reopen", status: "done" }) }))),
+    ).toEqual([
       ["to_lfcp", ["status"], { resource: S, intents: [{ intent: "task.reopen", id: "T1" }] }],
     ]);
     // Only the inverse of what it answers: a completion in Reminders goes to LFCP as usual.
@@ -790,9 +808,10 @@ describe("Restore answers (A§7.2; E-041b): the status the inverse way, imports 
         links: [link("T1")],
         bases: open.bases,
         snapshot: { items: [appleDone], complete: true },
-        restore: restore("reopen"),
+        restore: restore({ kind: "reopen", status: "done" }),
       }),
     );
+    expect(p.restored).toEqual([{ taskId: "T1", seen: "moved" }]);
     expect(status(p)).toEqual([
       [
         "to_lfcp",
@@ -803,6 +822,19 @@ describe("Restore answers (A§7.2; E-041b): the status the inverse way, imports 
         },
       ],
     ]);
+    // Cancelled since the answer (the same projection as done): not reopened, as usual.
+    const cancelled = pair({ status: "cancelled" });
+    const c = plan(
+      view({
+        tasks: [cancelled.t],
+        links: [link("T1")],
+        bases: pair().bases,
+        snapshot: { items: [cancelled.r], complete: true },
+        restore: restore({ kind: "reopen", status: "done" }),
+      }),
+    );
+    expect(c.intents.filter((i) => i.direction === "to_lfcp")).toEqual([]);
+    expect(c.restored).toEqual([{ taskId: "T1", seen: "moved" }]);
   });
 
   it("ignored imports: a reminder kept in Reminders is not imported, by externalId or by id", () => {

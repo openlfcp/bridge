@@ -17,12 +17,15 @@
 // current set of that guard with the authorization by the table of acceptances (A§7.1): empty →
 // void{vanished}, with no exception (an inverse set is never empty); every item one of the
 // effects with the same `from` (and `to`, `expectRev`) → consumed, with the preparation; anything
-// else → void{changed}, held again whatever the threshold. A void authorization voids its decision;
-// a consumed one makes it done (its writes are prepared with the pass, the planner's input ends).
+// else → void{changed}, held again whatever the threshold. A void authorization voids its decision.
+// A consumed one leaves it pending: the decision ends Task by Task (decision_items), when a pass
+// sees its write confirmed (the sides agreed; for recreate, linked again) or the Task no longer as
+// answered. Until then the item turns the planner around and keeps the opposite transfer out.
 // It covers only these effects: other holds, STOP, TCC, ownership, `expect.rev` still apply.
 
 import { createHash } from "node:crypto";
 import { isLocalDate } from "@openlfcp/bridge-reminders";
+import type { RestoreItem, RestoreSeen } from "@openlfcp/bridge-reminders/adapter";
 import { ulid } from "../executor/intents.js";
 import {
   type AcceptanceOutcome,
@@ -33,6 +36,7 @@ import {
 } from "./acceptances.js";
 import type { BridgeDatabase } from "./database.js";
 import type { HoldReason } from "./holds.js";
+import type { Journal } from "./journal.js";
 
 export type RestoreChoice = "prefer_lfcp_status" | "reopen" | "recreate" | "suppress";
 
@@ -378,7 +382,7 @@ export class Authorizations {
         )
         .run(snap.binding, key, snap.anomalyId, at);
     const id = ulid(this.now());
-    // suppress is done once its reminders are ignored; the others once their authorization is consumed.
+    // suppress is done once its reminders are ignored; the others once every Task of theirs is.
     const done = choice === "suppress";
     this.db
       .prepare(
@@ -398,6 +402,14 @@ export class Authorizations {
         at,
         done ? at : null,
       );
+    // Each Task is finished on its own (decision_items, A§7.2 "writes finished").
+    if (!done)
+      for (const t of new Set(snap.items.map((i) => i.taskId ?? "")))
+        this.db
+          .prepare(
+            "INSERT INTO decision_items (decision_id, task_id, state) VALUES (?, ?, 'active')",
+          )
+          .run(id, t);
     const decision = this.decision(id) as Decision;
     return authorization === undefined ? { decision } : { authorization, decision };
   }
@@ -421,10 +433,9 @@ export class Authorizations {
   }
 
   /**
-   * Ends a pending authorization with its decision: a void one voids it; a consumed one makes it
-   * done — the pass that consumes it prepares its writes (in the same transaction), the executor
-   * carries them out as any intent, and the decision is no longer the planner's input (it never
-   * turns a later change of the person's around). True when it was pending.
+   * Ends a pending authorization; a void one voids its decision. A consumed one leaves its
+   * decision pending: the decision ends Task by Task, when its writes are confirmed (observe).
+   * True when it was pending.
    */
   end(id: string, outcome: AcceptanceOutcome): boolean {
     const at = iso(this.now());
@@ -434,31 +445,122 @@ export class Authorizations {
           "UPDATE authorizations SET state = ?, outcome = ?, ended_at = ? WHERE id = ? AND state = 'pending'",
         )
         .run(outcome === "consumed" ? "consumed" : "void", outcome, at, id).changes === 1;
-    if (ended)
+    if (ended && outcome !== "consumed")
       this.db
         .prepare(
-          "UPDATE decisions SET state = ?, ended_at = ? WHERE authorization_id = ? AND state = 'pending'",
+          "UPDATE decisions SET state = 'void', ended_at = ? WHERE authorization_id = ? AND state = 'pending'",
         )
-        .run(outcome === "consumed" ? "done" : "void", at, id);
+        .run(at, id);
     return ended;
   }
 
-  /** The planner's input (A§7.2): the Tasks of the pending status decisions, by Task. */
-  restoring(binding: string): ReadonlyMap<string, "prefer_lfcp_status" | "reopen"> {
-    const m = new Map<string, "prefer_lfcp_status" | "reopen">();
-    for (const d of this.decisions(binding))
-      if (d.kind === "prefer_lfcp_status" || d.kind === "reopen")
-        for (const t of d.taskIds) m.set(t, d.kind);
+  /** The active items of the pending decisions of `binding`, with their kind and authorization. */
+  #active(binding: string) {
+    return (
+      this.db
+        .prepare(
+          `SELECT d.id AS decision, d.kind, d.authorization_id AS auth, i.task_id AS task
+             FROM decisions d JOIN decision_items i ON i.decision_id = d.id
+            WHERE d.binding_id = ? AND d.state = 'pending' AND i.state = 'active' ORDER BY d.id`,
+        )
+        .all(binding) as {
+        decision: string;
+        kind: RestoreChoice;
+        auth: string | null;
+        task: string;
+      }[]
+    ).map((r) => ({ ...r, authorization: r.auth === null ? undefined : this.get(r.auth) }));
+  }
+
+  /**
+   * The planner's input (A§7.2): the active status items, by Task, with the state the person
+   * answered — the reminder's rev the inverse write expects, the Task's exact status a reopen undoes.
+   */
+  restoring(binding: string): ReadonlyMap<string, RestoreItem> {
+    const m = new Map<string, RestoreItem>();
+    for (const a of this.#active(binding)) {
+      const e = a.authorization?.effects.find((x) => x.taskId === a.task);
+      if (e === undefined) continue;
+      if (a.kind === "prefer_lfcp_status" && e.expectRev !== undefined)
+        m.set(a.task, { kind: "prefer_lfcp_status", rev: e.expectRev });
+      const status = (e.from as { status?: unknown } | null)?.status;
+      if (a.kind === "reopen" && typeof status === "string")
+        m.set(a.task, { kind: "reopen", status });
+    }
     return m;
   }
 
-  /** The Tasks of the pending recreate decisions, with the authorization each one waits on. */
+  /** The active recreate items whose authorization still waits, with that authorization. */
   recreating(binding: string): ReadonlyMap<string, string> {
     const m = new Map<string, string>();
-    for (const d of this.decisions(binding))
-      if (d.kind === "recreate" && d.authorizationId !== null)
-        for (const t of d.taskIds) m.set(t, d.authorizationId);
+    for (const a of this.#active(binding))
+      if (a.kind === "recreate" && a.authorization?.state === "pending")
+        m.set(a.task, a.authorization.id);
     return m;
+  }
+
+  /**
+   * After a pass applied (in its transaction): what it saw of the active items. A status item
+   * the pass saw agreed is done (its inverse write confirmed, or nothing left to write), one no
+   * longer as answered is changed; a recreate item is done once its Task is linked again (its new
+   * reminder created). A decision with no active item left is done. An unfinished item — a write
+   * prepared, in flight, superseded or in quarantine — stays active: it keeps turning the planner
+   * around and the opposite transfer out until a pass sees how it ended.
+   */
+  observe(binding: string, seen: readonly RestoreSeen[], journal: Journal): void {
+    const at = iso(this.now());
+    const finish = (decision: string, task: string, state: "done" | "changed") =>
+      this.db
+        .prepare(
+          "UPDATE decision_items SET state = ?, ended_at = ? WHERE decision_id = ? AND task_id = ? AND state = 'active'",
+        )
+        .run(state, at, decision, task).changes === 1;
+    const by = new Map(seen.map((x) => [x.taskId, x.seen]));
+    const linked = this.db.prepare(
+      "SELECT 1 FROM links WHERE binding_id = ? AND task_id = ? AND state = 'linked'",
+    );
+    const touched = new Set<string>();
+    for (const a of this.#active(binding)) {
+      if (a.authorization?.state !== "consumed") continue;
+      const s =
+        a.kind === "recreate"
+          ? linked.get(binding, a.task) === undefined
+            ? undefined
+            : "agreed"
+          : by.get(a.task);
+      if (s === "agreed" && finish(a.decision, a.task, "done")) touched.add(a.decision);
+      if (s === "moved" && finish(a.decision, a.task, "changed")) {
+        touched.add(a.decision);
+        journal.append("warn", "decision.item_changed", {
+          bindingId: binding,
+          taskId: a.task,
+          params: { decision: a.decision, kind: a.kind },
+        });
+      }
+    }
+    for (const d of touched)
+      if (
+        this.db
+          .prepare(
+            `UPDATE decisions SET state = 'done', ended_at = ? WHERE id = ? AND state = 'pending'
+               AND NOT EXISTS (SELECT 1 FROM decision_items WHERE decision_id = ? AND state = 'active')`,
+          )
+          .run(at, d, d).changes === 1
+      )
+        journal.append("info", "decision.done", { bindingId: binding, params: { decision: d } });
+  }
+
+  /** The items of a decision and their state. */
+  items(decision: string): Readonly<Record<string, string>> {
+    return Object.fromEntries(
+      (
+        this.db
+          .prepare(
+            "SELECT task_id, state FROM decision_items WHERE decision_id = ? ORDER BY task_id",
+          )
+          .all(decision) as { task_id: string; state: string }[]
+      ).map((r) => [r.task_id, r.state]),
+    );
   }
 
   decision(id: string): Decision | undefined {

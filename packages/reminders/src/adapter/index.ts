@@ -43,6 +43,8 @@ export {
   type PlannedIntent,
   type PlannedLfcpIntent,
   plan,
+  type RestoreItem,
+  type RestoreSeen,
   type Transition,
   type TransitionKind,
   type Waiting,

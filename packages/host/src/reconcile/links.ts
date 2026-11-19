@@ -172,7 +172,7 @@ export class LinkApplier {
     };
     // From the admission to the prepared intents, one transaction (all of it is synchronous): an
     // acceptance this pass consumes (A§7.1) is consumed with its work, or stays pending.
-    // "Create new reminders from these tasks" (A§7.2), waiting on its authorization.
+    // "Create new reminders from these tasks" (A§7.2): its Tasks whose authorization still waits.
     const answers = new Authorizations(db, this.#now);
     const recreating = answers.recreating(bindingId);
     return db
@@ -219,6 +219,8 @@ export class LinkApplier {
                 { intents: plan.intents, unlinks: 0 },
                 { admitted: true },
               ) ?? []);
+        // The Restore answers this pass moved on: Tasks finished, decisions done (A§7.2).
+        answers.observe(bindingId, plan.restored, this.#journal);
         if (accepted.includes("guard_mass_import"))
           for (const i of prepared)
             if (i.kind === "create_task")
