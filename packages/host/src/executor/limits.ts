@@ -18,14 +18,16 @@
 // answer makes it a pending acceptance, checked at every admission — before
 // the early "no guard, ok" — against the current set of its reason
 // (acceptances.ts): vanished, consumed (in the transaction that prepares the
-// pass: the caller's) or changed (held again whatever the threshold).
+// pass: the caller's) or changed (held again whatever the threshold). The
+// authorization of a Restore answer (its exact inverse set, authorizations.ts)
+// is checked the same way against the guard that counts its effects.
 //
 // For a person: "Usually this means the filter got narrower or the list
 // became unavailable, not that you deleted N tasks." Lifted by
 // `resume --accept <hold>`. The bridge deletes no Task and no reminder in MVP.
 
 import {
-  type Acceptance,
+  type AcceptanceOutcome,
   Acceptances,
   type AnomalyItem,
   type AnomalySnapshot,
@@ -33,6 +35,7 @@ import {
   itemKey,
   snapshot,
 } from "../db/acceptances.js";
+import { Authorizations, compareInverse } from "../db/authorizations.js";
 import type { BridgeDatabase } from "../db/database.js";
 import { type HoldReason, Holds } from "../db/holds.js";
 import { Journal } from "../db/journal.js";
@@ -113,6 +116,16 @@ export type Admission =
       readonly counts: Readonly<Record<string, number>>;
     };
 
+/** A pending answer: an acceptance or a Restore's authorization, by the same table (A§7.1). */
+interface Answer {
+  readonly kind: "acceptance" | "authorization";
+  readonly id: string;
+  readonly reason: HoldReason;
+  readonly anomalyId: string;
+  readonly compare: (current: AnomalySnapshot, present: boolean) => AcceptanceOutcome;
+  readonly end: (outcome: AcceptanceOutcome) => boolean;
+}
+
 const STATUS_FIELDS = new Set(["status", "completed", "completion_date"]);
 const isStatus = (fields: readonly string[]) => fields.some((f) => STATUS_FIELDS.has(f));
 const isImport = (i: { readonly direction: string; readonly kind: string }) =>
@@ -146,11 +159,30 @@ export class Limits {
     const m = this.#measure(bindingId, planned);
     const fired = [...new Set([...m.holds, ...extra])];
     const acceptances = new Acceptances(this.db, this.now);
-    const pending = acceptances.pending(bindingId);
+    const authorizations = new Authorizations(this.db, this.now);
+    // The answers waiting: acceptances and the authorizations of Restore answers (A§7.1), one table.
+    const pending: Answer[] = [
+      ...acceptances.pending(bindingId).map((a) => ({
+        kind: "acceptance" as const,
+        id: a.id,
+        reason: a.reason,
+        anomalyId: a.anomalyId,
+        compare: (cur: AnomalySnapshot, present: boolean) => compare(a, cur, present),
+        end: (o: AcceptanceOutcome) => acceptances.end(a.id, o),
+      })),
+      ...authorizations.pending(bindingId).map((a) => ({
+        kind: "authorization" as const,
+        id: a.id,
+        reason: a.reason,
+        anomalyId: a.anomalyId,
+        compare: (cur: AnomalySnapshot, present: boolean) => compareInverse(a, cur, present),
+        end: (o: AcceptanceOutcome) => authorizations.end(a.id, o),
+      })),
+    ];
     // Without an answer waiting, as 0.5: no guard, ok.
     if (fired.length === 0 && pending.length === 0) return { ok: true };
 
-    // Every pending acceptance against the current set of its reason (A§7.1), even below the
+    // Every pending answer against the current set of its reason (A§7.1), even below the
     // threshold: vanished and changed end here; consumed ones end only if the pass is admitted.
     const current = new Map<HoldReason, AnomalySnapshot>();
     const now = (reason: HoldReason) => {
@@ -160,23 +192,23 @@ export class Limits {
       current.set(reason, snap);
       return snap;
     };
-    const consumed: Acceptance[] = [];
+    const consumed: Answer[] = [];
     const changed = new Set<HoldReason>();
     const journal = new Journal(this.db, this.now);
     for (const p of pending) {
-      const outcome = compare(p, now(p.reason), fired.includes(p.reason));
+      const outcome = p.compare(now(p.reason), fired.includes(p.reason));
       if (outcome === "consumed") {
         consumed.push(p);
         continue;
       }
-      acceptances.end(p.id, outcome);
-      journal.append(outcome === "changed" ? "warn" : "info", `acceptance.${outcome}`, {
+      p.end(outcome);
+      journal.append(outcome === "changed" ? "warn" : "info", `${p.kind}.${outcome}`, {
         bindingId,
         params: { reason: p.reason, anomalyId: p.anomalyId },
       });
       if (outcome === "changed") changed.add(p.reason);
     }
-    // The pass goes through only when every guard it fires is covered by a consumed acceptance; a
+    // The pass goes through only when every guard it fires is covered by a consumed answer; a
     // changed anomaly is held again whatever the threshold (conservative).
     const covered = new Set(consumed.map((c) => c.reason));
     const holds = [...new Set([...fired.filter((r) => !covered.has(r)), ...changed])];
@@ -185,13 +217,13 @@ export class Limits {
       return { ok: false, holds, counts: m.counts };
     }
     // Consumed: in the caller's transaction, with the preparation of the pass (a crash before its
-    // commit leaves the acceptance pending; a consumed one is never repeated).
+    // commit leaves the answer pending; a consumed one is never repeated).
     const at = new Date(this.now()).toISOString();
     const h = new Holds(this.db, this.now);
     for (const c of consumed) {
-      acceptances.end(c.id, "consumed");
+      c.end("consumed");
       h.markAccepted(bindingId, c.reason, at);
-      journal.append("info", "acceptance.consumed", {
+      journal.append("info", `${c.kind}.consumed`, {
         bindingId,
         params: { reason: c.reason, anomalyId: c.anomalyId },
       });
