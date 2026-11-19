@@ -13,7 +13,7 @@ Implementations: `packages/host/src/app/ipc.ts` (host), `app/Sources/BridgeShell
 - Every object has `"v": 1`. A side that gets another version, or a type it does not know, ignores
   it (the shell) or answers `bad_line` / `unknown_command` (the host).
 - In `run --app` nothing but events and replies goes to stdout.
-- stdin closing (the shell is gone) makes the host shut down as for `shutdown`.
+- stdin closing (the shell is gone), SIGTERM and SIGINT make the host shut down as for `shutdown`.
 
 ## Commands (shell → host stdin)
 
@@ -27,8 +27,17 @@ The host runs them one at a time, in order.
 | `answer` | `questionId`, `choice` | `not_implemented` until E-042 |
 | `export` | `path` | `not_implemented` until E-045 |
 | `remove` | `bindingId`, `ack?` (bool) | `not_implemented` until E-034 |
-| `shutdown` | `reason`: `update` \| `quit` \| `logout` | nothing new starts, in-flight work finishes (≤ 60 s), exit 0. **Never writes STOP**: syncing continues at the next start |
+| `shutdown` | `reason`: `update` \| `quit` \| `logout` | at once, also while the run process starts: no new effect or retry starts (not even inside the pass in flight), what is in flight finishes, exit 0. **Never writes STOP**: syncing continues at the next start |
 | `openURL` | `url` (`lfcp-bridge:` only) | acknowledged (`result.handled: false`) until the handoff of E-031 |
+
+No command waits for the run process to start. A command that fails while it runs (for example
+STOP cannot be written) gets `reply{ok:false, error:{code:"failed", detail:<error code>}}`; the
+next command runs as usual.
+
+**Deadline.** 60 s from the shutdown cover a start in progress and the stop. Past them the host
+exits at once with code 1, without releasing `run.lock` or closing `bridge.sqlite` under work that
+still runs: committed rows are durable, an effect in flight stays `effecting` for the next start's
+recovery, and the next host takes over the lock of the dead pid.
 
 `openURL` carries the base link's secret in its fragment: neither side logs it, and no error reply
 repeats a field's value.
@@ -57,4 +66,7 @@ repeats a field's value.
 - `shutdown`: the shell waits 70 s for the exit, then SIGTERM, then SIGKILL after 5 s.
 - Quit → `shutdown{quit}`; logout or power off → `shutdown{logout}`; installing an update (Sparkle,
   E-056) → `shutdown{update}`.
-- `lfcp-bridge://` URLs that arrive while no host runs wait (at most 8) and are sent after its `hello`.
+- `lfcp-bridge://` URLs go only to a host that said `hello` and has not exited since; until then they
+  wait (at most 8). A host that exits before its `hello`, or whose stdin refuses the line, does not
+  take them: the next host gets them after its `hello`.
+- The shell drops any host line longer than 65 536 bytes, however the pipe split it.
