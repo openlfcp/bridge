@@ -4,8 +4,9 @@
 // be untrusted); then a row for the driver binary alone, and for each ancestor process alone, to find
 // the one tccd holds responsible; then, under the nearest sufficient single row and nothing else
 // (control again, then insert without a tccd restart), read the label and press the button through
-// AXUIElement. Writes results.json and summary.md; exit 1 unless both controls are untrusted and the
-// read and press pass. macOS CI only: it edits the runner's system TCC.db.
+// AXUIElement. Writes results.json and summary.md; exit 1 unless both controls are real refusals (check
+// ran, found the app, untrusted and AXWindows = -25211 kAXErrorAPIDisabled) and the read and press
+// pass. macOS CI only: it edits the runner's system TCC.db.
 //
 // Usage: node scripts/spike-s5/scenarios.mjs <build-dir> <results-dir>
 import { execFileSync, spawnSync } from "node:child_process";
@@ -104,13 +105,23 @@ function driver(args, timeoutMs = 60_000) {
   return { code: r.status, json };
 }
 const check = () => {
-  const { json } = driver(["check", BUNDLE_ID]);
+  const { code, json } = driver(["check", BUNDLE_ID]);
   return {
+    code,
+    appFound: json?.appFound ?? null,
     trusted: json?.trusted ?? null,
     windowsAXError: json?.windowsAXError ?? null,
     chain: json?.chain ?? [],
   };
 };
+const AX_API_DISABLED = -25211;
+/** A negative control holds only on a real refusal: check exited 0, found the app, made the AX call,
+ * and got kAXErrorAPIDisabled while untrusted. A missing probe or any other error fails the control. */
+const refused = (c) =>
+  c.code === 0 &&
+  c.appFound === true &&
+  c.trusted === false &&
+  c.windowsAXError === AX_API_DISABLED;
 
 const res = {
   runner: process.env.RUNNER_LABEL ?? null,
@@ -146,9 +157,18 @@ writeFileSync(path.join(R, "rows-before.txt"), `${res.rowsBefore}\n`);
 
 const variant = (name, extra = {}) => {
   const c = check();
-  const v = { name, ...extra, trusted: c.trusted, windowsAXError: c.windowsAXError };
+  const v = {
+    name,
+    ...extra,
+    checkExit: c.code,
+    appFound: c.appFound,
+    trusted: c.trusted,
+    windowsAXError: c.windowsAXError,
+  };
   res.variants.push(v);
-  log(`== ${name}: trusted=${c.trusted} windowsAXError=${c.windowsAXError}`);
+  log(
+    `== ${name}: exit=${c.code} appFound=${c.appFound} trusted=${c.trusted} windowsAXError=${c.windowsAXError}`,
+  );
   return c;
 };
 const revokeAll = () => sql(`DELETE FROM access WHERE service=${quote(SERVICE)}`);
@@ -169,7 +189,7 @@ res.chain = base.chain;
 // Control: no Accessibility row at all.
 revokeAll();
 await restartTccd();
-res.controlUntrusted = variant("control: no rows (after tccd restart)").trusted === false;
+res.controlUntrusted = refused(variant("control: no rows (after tccd restart)"));
 
 // Which single row is enough? The driver binary itself first, then each ancestor alone.
 const sufficient = [];
@@ -192,7 +212,7 @@ const clients = sufficient.length ? [sufficient[0]] : chain;
 // Drive under the smallest grant, alone in the table: control, insert without restart, then read and press.
 revokeAll();
 await restartTccd();
-const control2 = variant("drive config: control, no rows (after tccd restart)").trusted === false;
+const control2 = refused(variant("drive config: control, no rows (after tccd restart)"));
 granted = grantAll(clients);
 let restartNeeded = false;
 if (!variant(`drive config: ${clients.join(" + ")} (no restart)`, { granted }).trusted) {
@@ -218,11 +238,13 @@ const md = [
   `## Spike S-5 — ${res.runner} (macOS ${res.os} ${res.build}, ${res.arch})`,
   "",
   `${res.sip}  `,
-  `accepted: **${res.accepted}**; control (no rows) untrusted: **${res.controlUntrusted}**; drive grant: **${res.winner ? `${res.winner.clients.map((c) => `\`${c}\``).join(" + ")}${res.winner.tccdRestart ? ", after tccd restart" : ", no restart"}` : "none"}**; single rows that suffice: ${(res.sufficient ?? []).map((c) => `\`${c}\``).join(", ") || "none"}`,
+  `accepted: **${res.accepted}**; control (no rows) refused (untrusted, AXWindows -25211): **${res.controlUntrusted}**; drive grant: **${res.winner ? `${res.winner.clients.map((c) => `\`${c}\``).join(" + ")}${res.winner.tccdRestart ? ", after tccd restart" : ", no restart"}` : "none"}**; single rows that suffice: ${(res.sufficient ?? []).map((c) => `\`${c}\``).join(", ") || "none"}`,
   "",
-  "| variant | AXIsProcessTrusted | AXWindows error on the app |",
-  "|---|---|---|",
-  ...res.variants.map((v) => `| ${v.name} | ${v.trusted} | ${v.windowsAXError} |`),
+  "| variant | check exit | app found | AXIsProcessTrusted | AXWindows error on the app |",
+  "|---|---|---|---|---|",
+  ...res.variants.map(
+    (v) => `| ${v.name} | ${v.checkExit} | ${v.appFound} | ${v.trusted} | ${v.windowsAXError} |`,
+  ),
   "",
   `process chain: ${res.chain.map((p) => `\`${p.path}\``).join(" ← ")}`,
   "",

@@ -3,7 +3,8 @@
 //
 //   s5-ax check [<bundle-id>]
 //       AXIsProcessTrusted() (never prompts) and, with a bundle id, a real AX call (AXWindows) against
-//       that running app: -25211 kAXErrorAPIDisabled when untrusted.
+//       that running app: -25211 kAXErrorAPIDisabled when untrusted. Exit 1 when the app is not
+//       running (no probe was made), so a caller never mistakes a missing probe for a refusal.
 //   s5-ax drive <bundle-id> <expected-code> <events.jsonl> [--menu]
 //       Finds the running app, reads the label `s5-code`, presses the button `s5-confirm`, re-reads
 //       `s5-status`, and waits for the app's own "pressed" record. With --menu also opens the status
@@ -82,11 +83,17 @@ out["trusted"] = AXIsProcessTrusted()
 out["chain"] = processChain()
 
 if argv[1] == "check" {
-  if argv.count >= 3, let app = NSRunningApplication.runningApplications(withBundleIdentifier: argv[2]).first {
-    let el = AXUIElementCreateApplication(app.processIdentifier)
-    AXUIElementSetMessagingTimeout(el, 3)
-    out["windowsAXError"] = attr(el, kAXWindowsAttribute).0.rawValue  // -25211 = kAXErrorAPIDisabled
+  guard argv.count >= 3 else { emit(0) }
+  guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: argv[2]).first else {
+    out["appFound"] = false
+    out["error"] = "app \(argv[2]) is not running: no AX probe"
+    emit(1)
   }
+  out["appFound"] = true
+  out["appPid"] = Int(app.processIdentifier)
+  let el = AXUIElementCreateApplication(app.processIdentifier)
+  AXUIElementSetMessagingTimeout(el, 3)
+  out["windowsAXError"] = attr(el, kAXWindowsAttribute).0.rawValue  // -25211 = kAXErrorAPIDisabled
   emit(0)
 }
 
