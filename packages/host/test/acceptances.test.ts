@@ -379,3 +379,93 @@ describe("the window keeps its base until an acceptance is consumed (A§7.1, A§
     });
   });
 });
+
+describe("an empty current set is vanished, even while the window fires (A§7.1 row 1, A§8)", () => {
+  const imp = (task: string): NewIntent => ({
+    bindingId: "b",
+    taskId: task,
+    installationId: "i",
+    direction: "to_lfcp",
+    kind: "create_task",
+    fields: ["title"],
+    basis: null,
+    payload: {},
+  });
+  const unlinkedInTheHour = (n: number) => {
+    for (let k = 0; k < n; k++)
+      new Journal(db, () => t - 10 * 60_000).append("info", "link.unlinked", { bindingId: "b" });
+  };
+
+  it("unlinks: 4 unaccepted in the hour, {L10} held and answered, L10 back → vanished; the window stays", () => {
+    unlinkedInTheHour(4);
+    expect(limits().admit("b", { intents: [], unlinks: deleted(10) })).toMatchObject({
+      holds: ["guard_mass_unlink"],
+    });
+    holds().accept("b", "guard_mass_unlink");
+    const [a] = acceptances().pending("b");
+    t += 60_000;
+    // L10 came back; the window alone still fires: no acceptance covers it.
+    expect(limits().admit("b", { intents: [], unlinks: [] })).toMatchObject({
+      ok: false,
+      holds: ["guard_mass_unlink"],
+    });
+    expect(acceptances().get((a as { id: string }).id)).toMatchObject({
+      state: "void",
+      outcome: "vanished",
+    });
+    expect(holds().acceptedAt("b", "guard_mass_unlink")).toBeUndefined();
+    expect(limits().check("b", { intents: [], unlinks: deleted(15) })).toMatchObject({
+      ok: false,
+      holds: ["guard_mass_unlink"],
+    });
+  });
+
+  it("imports: 11 in the hour, {X} answered and gone → vanished; a new {Y} is held", () => {
+    const prepared = new Intents(db, () => t - 10 * 60_000);
+    for (let k = 0; k < 11; k++) prepared.prepare(imp(`W${k}`));
+    expect(limits().admit("b", { intents: [imp("X")], unlinks: 0 })).toMatchObject({
+      holds: ["guard_mass_import"],
+    });
+    holds().accept("b", "guard_mass_import");
+    t += 60_000;
+    expect(limits().admit("b", { intents: [], unlinks: 0 }).ok).toBe(false);
+    expect(
+      db.prepare("SELECT state, outcome FROM acceptances WHERE reason = 'guard_mass_import'").all(),
+    ).toEqual([{ state: "void", outcome: "vanished" }]);
+    expect(holds().acceptedAt("b", "guard_mass_import")).toBeUndefined();
+    holds().lift("b", "guard_mass_import");
+    expect(limits().admit("b", { intents: [imp("Y")], unlinks: 0 })).toMatchObject({
+      ok: false,
+      holds: ["guard_mass_import"],
+    });
+  });
+
+  it("opaque, the current set empty → vanished, the window not moved", () => {
+    unlinkedInTheHour(4);
+    holds().set("b", "guard_mass_unlink", { links: 20, unlinks: 5 });
+    holds().accept("b", "guard_mass_unlink");
+    expect(acceptances().pending("b")[0]?.kind).toBe("opaque");
+    limits().admit("b", { intents: [], unlinks: [] });
+    expect(db.prepare("SELECT state, outcome FROM acceptances").all()).toEqual([
+      { state: "void", outcome: "vanished" },
+    ]);
+    expect(holds().acceptedAt("b", "guard_mass_unlink")).toBeUndefined();
+  });
+
+  it("the one exception: a hold the window alone set (an empty set) is consumed by an empty plan", () => {
+    unlinkedInTheHour(4);
+    expect(limits().admit("b", { intents: [], unlinks: [] })).toMatchObject({
+      holds: ["guard_mass_unlink"],
+    });
+    expect(anomaly("guard_mass_unlink")).toMatchObject({ kind: "set", items: [] });
+    holds().accept("b", "guard_mass_unlink");
+    t += 60_000;
+    expect(limits().admit("b", { intents: [], unlinks: [] })).toEqual({
+      ok: true,
+      accepted: ["guard_mass_unlink"],
+    });
+    expect(holds().acceptedAt("b", "guard_mass_unlink")).toBe(new Date(t).toISOString());
+    // The window starts at the consumed answer: one new unlink passes.
+    expect(limits().check("b", { intents: [], unlinks: deleted(15) })).toEqual({ ok: true });
+  });
+});

@@ -131,10 +131,11 @@ export function compare(
   current: Pick<AnomalySnapshot, "kind" | "items" | "bases" | "effectSetHash">,
   present: boolean,
 ): AcceptanceOutcome {
-  // Nothing of the reason in this plan: gone (or, while the guard still fires on its window
-  // alone, nothing of it to let through — consumed, the window starts anew).
-  const empty = current.kind === "set" && current.items.length === 0;
-  if (empty) return present ? "consumed" : "vanished";
+  // Nothing of the reason in this plan: the anomaly is gone, whatever the window says (the plan is
+  // then admitted by the usual rules). Only an anomaly that was itself empty — a hold the window
+  // alone set — is consumed by an empty plan: the answer accepted exactly that.
+  if (current.kind === "set" && current.items.length === 0)
+    return accepted.kind === "set" && accepted.items.length === 0 ? "consumed" : "vanished";
   // No data to compare: never let it through.
   if (accepted.kind === "opaque" || current.kind === "opaque")
     return current.kind === "opaque" && !present ? "vanished" : "changed";
