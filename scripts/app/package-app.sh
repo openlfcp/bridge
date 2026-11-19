@@ -1,7 +1,8 @@
 #!/bin/bash
 # The release packaging of LFCP Bridge.app (PLAN §E-005, A§2.1, research/s-2-bundle.md): universal
 # (arm64 + x86_64, E2), macOS ≥ 15.0 (E15), signed from the inside out under the hardened runtime,
-# then a DMG. Notarization, Developer ID and the artifact manifest are the release chain (E-052).
+# then a DMG (scripts/app/make-dmg.sh). Notarization, Developer ID and the artifact manifest are the
+# release chain (E-052, .github/workflows/release.yml).
 #
 #   scripts/app/package-app.sh <out-dir>         (macOS with Xcode; after pnpm install --frozen-lockfile)
 #
@@ -13,6 +14,8 @@
 #   BUILD_NUMBER      CFBundleVersion; default 1
 #   SU_FEED_URL, SU_PUBLIC_ED_KEY   Sparkle's feed and EdDSA public key in Info.plist (A§2.3)
 #   NODE_CACHE        a directory keeping the Node tarballs between runs
+#   PACKAGE_DMG=0     stop after the signature: the release chain (E-052, .github/workflows/release.yml)
+#                     notarizes, staples and builds the artifact manifest before scripts/app/make-dmg.sh
 #
 # Output: <out-dir>/LFCP Bridge.app and <out-dir>/LFCP-Bridge-<version>.dmg (the app and an
 # /Applications link). The checks of T§2 L5 are scripts/app/check-app.sh.
@@ -138,7 +141,6 @@ xcrun lipo -create "$src/prebuilds/darwin-arm64.node" "$src/prebuilds/darwin-x64
 echo "== codesign ($IDENTITY, hardened runtime, inside out)"
 sign_flags=(--force --sign "$IDENTITY")
 if [ -n "${SIGN_KEYCHAIN:-}" ]; then sign_flags+=(--keychain "$SIGN_KEYCHAIN"); fi
-dmg_flags=("${sign_flags[@]}")
 sign_flags+=(--options runtime)
 if [ "${SIGN_TIMESTAMP:-}" = 1 ]; then sign_flags+=(--timestamp); else sign_flags+=(--timestamp=none); fi
 sign() { codesign "${sign_flags[@]}" "$@"; }
@@ -153,30 +155,15 @@ sign --identifier org.openlfcp.bridge.reminders-helper \
 sign --entitlements "$ROOT/app/Support/shell.entitlements" "$APP"
 codesign --verify --strict --deep --verbose=2 "$APP"
 
+if [ "${PACKAGE_DMG:-1}" = 0 ]; then
+  rm -rf "$WORK"
+  echo "== built $APP (no DMG: PACKAGE_DMG=0)"
+  du -sh "$APP"
+  exit 0
+fi
+
 echo "== DMG"
-stage="$WORK/dmg"
-mkdir -p "$stage"
-ditto "$APP" "$stage/LFCP Bridge.app"
-ln -s /Applications "$stage/Applications"
-# ULFO (lzfse): opens on every macOS the app supports (≥ 10.11).
-# hdiutil create on hosted runners now and then fails with "Resource busy" (another disk image
-# job of the system holds the device): retry that, and only that, a few times.
-for attempt in 1 2 3 4 5; do
-  if log="$(hdiutil create -volname "LFCP Bridge" -srcfolder "$stage" -fs HFS+ -format ULFO \
-    -ov "$DMG" 2>&1)"; then
-    break
-  fi
-  echo "$log" >&2
-  if ! grep -q 'Resource busy' <<< "$log" || [ "$attempt" = 5 ]; then
-    echo "package-app: hdiutil create failed (attempt $attempt)" >&2
-    exit 1
-  fi
-  echo "package-app: hdiutil create: Resource busy (attempt $attempt of 5), again in $((attempt * 10)) s" >&2
-  sleep $((attempt * 10))
-done
-# An ad-hoc signature means nothing on a disk image; a real identity signs it (E-052 notarizes it).
-if [ "$IDENTITY" != - ]; then codesign "${dmg_flags[@]}" "$DMG"; fi
-hdiutil verify "$DMG" >/dev/null
+SIGN_IDENTITY="$IDENTITY" "$ROOT/scripts/app/make-dmg.sh" "$APP" "$DMG"
 
 rm -rf "$WORK"
 echo "== built $APP"
