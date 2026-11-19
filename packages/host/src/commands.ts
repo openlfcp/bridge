@@ -124,8 +124,8 @@ export interface CliEnvironment {
   /** `run --app`: the shell's channel (default: stdin and stdout). */
   readonly app?: AppIo;
   /**
-   * `run --app`: 0.5's LaunchAgent, retired before the runtime opens bridge.sqlite (src/app/legacy.ts;
-   * default: the machine's paths and launchctl).
+   * `run --app`: 0.5's LaunchAgent and the data directory whose run.lock is taken, both before the
+   * runtime opens bridge.sqlite (src/app/legacy.ts; default: the machine's paths and launchctl).
    */
   readonly launchAgent05?: {
     readonly path: string;
@@ -173,25 +173,55 @@ export async function main(argv: readonly string[], env: CliEnvironment): Promis
     env.err(`${command.name}: not available in this build (D-010 PR ${command.pr})`);
     return EXIT.USAGE;
   }
-  // `run --app`: 0.5's agent goes before bridge.sqlite is opened and migrated (PLAN §E-007).
-  let retired: LaunchAgent05 | undefined;
-  if (command.name === "run" && options(argv.slice(1)).opts.get("app") === true) {
-    const legacy = env.launchAgent05 ?? {
-      path: bridgePaths().launchAgent,
-      home: bridgePaths().home,
-    };
-    retired = await retire05({
-      launchAgent: legacy.path,
-      home: legacy.home,
-      ...(legacy.launchctl === undefined ? {} : { launchctl: legacy.launchctl }),
-      ...(legacy.waitMs === undefined ? {} : { waitMs: legacy.waitMs }),
-    });
-  }
+  if (command.name === "run" && options(argv.slice(1)).opts.get("app") === true)
+    return appMain(env);
   const rt = await (env.runtime ?? (() => machineRuntime()))();
   try {
-    return await run(command.name, argv.slice(1), rt, env, retired);
+    return await run(command.name, argv.slice(1), rt, env);
   } finally {
     await rt.close();
+  }
+}
+
+/**
+ * `run --app`, in this order (PLAN §E-007): 0.5's LaunchAgent retired; run.lock taken; only then
+ * the runtime, which opens and migrates bridge.sqlite; run.lock released after the database is
+ * closed. A bootout that failed, or run.lock held by another run process, ends it before the
+ * database is touched: exit NEEDS_PERSON, and the shell starts it again with its back-off.
+ */
+async function appMain(env: CliEnvironment): Promise<ExitCode> {
+  const legacy = env.launchAgent05 ?? {
+    path: bridgePaths().launchAgent,
+    home: bridgePaths().home,
+  };
+  const retired = await retire05({
+    launchAgent: legacy.path,
+    home: legacy.home,
+    ...(legacy.launchctl === undefined ? {} : { launchctl: legacy.launchctl }),
+    ...(legacy.waitMs === undefined ? {} : { waitMs: legacy.waitMs }),
+  });
+  if (retired.state === "failed") {
+    env.err(
+      `run --app: the LaunchAgent of lfcp-bridge 0.5 could not be booted out (${retired.detail}); not started, it is tried again at the next start`,
+    );
+    return EXIT.NEEDS_PERSON;
+  }
+  const release = takeRunLock(legacy.home);
+  if (typeof release !== "function") {
+    env.err(`run --app: another lfcp-bridge run is running (pid ${release.held})`);
+    return EXIT.NEEDS_PERSON;
+  }
+  try {
+    const rt = await (env.runtime ?? (() => machineRuntime()))();
+    try {
+      if (rt.paths.home !== legacy.home)
+        throw new Error("run --app: run.lock and the runtime name different data directories");
+      return await appCommand(rt, env, retired);
+    } finally {
+      await rt.close();
+    }
+  } finally {
+    release();
   }
 }
 
@@ -199,14 +229,14 @@ export async function main(argv: readonly string[], env: CliEnvironment): Promis
 async function appCommand(
   rt: Runtime,
   env: CliEnvironment,
-  retired: LaunchAgent05 | undefined,
+  retired: LaunchAgent05,
 ): Promise<ExitCode> {
   const startProcess = rt.startProcess;
   if (startProcess === undefined) {
     env.err("run --app: not available on this machine");
     return EXIT.USAGE;
   }
-  if (retired?.removed === true) {
+  if (retired.state === "removed") {
     // A 0.5 agent with another LFCP_BRIDGE_HOME left its data there: said, never moved (E-007).
     const sameHome = retired.home === undefined || retired.home === rt.paths.home;
     rt.journal.append(sameHome ? "info" : "warn", "bridge.launch_agent_05_removed", {
@@ -219,7 +249,8 @@ async function appCommand(
   const r = await serveApp({
     home: rt.paths.home,
     version: VERSION,
-    lock: () => takeRunLock(rt.paths.home),
+    // Taken by appMain before the runtime opened bridge.sqlite; released there after it is closed.
+    lock: () => () => {},
     start: startProcess,
     sections: () =>
       (
@@ -415,13 +446,13 @@ async function run(
   args: readonly string[],
   rt: Runtime,
   env: CliEnvironment,
-  retired?: LaunchAgent05,
 ): Promise<ExitCode> {
   const { positional, opts } = options(args);
   const stopped = () => stopState(rt.paths.home) !== undefined;
   switch (name) {
     case "run":
-      return opts.get("app") === true ? appCommand(rt, env, retired) : runCommand(rt, env);
+      // `run --app` is appMain's, before any runtime.
+      return runCommand(rt, env);
     case "dry-run":
       return dryRunCommand(rt, positional[0], env);
     case "approve":

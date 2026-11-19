@@ -18,7 +18,7 @@ import {
   schemaVersion,
 } from "../src/db/database.js";
 import { EXIT, main } from "../src/index.js";
-import { renderLaunchAgent, retireLaunchAgent05 } from "../src/launchd.js";
+import { BOOTOUT_NOT_LOADED, renderLaunchAgent, retireLaunchAgent05 } from "../src/launchd.js";
 import { runLockHolder, takeRunLock } from "../src/run/lock.js";
 import { machineRuntime, type Runtime } from "../src/runtime.js";
 
@@ -108,8 +108,17 @@ function fixture05(version: number) {
   return { paths, config };
 }
 
+/** An error of launchctl as execFileSync throws it: its exit status. */
+const exited = (status: number) =>
+  Object.assign(new Error(`Command failed: launchctl bootout (${status})`), { status });
+
 /** `run --app` through main over the machine's runtime of `paths`, with a run process that idles. */
-function startApp(paths: ReturnType<typeof bridgePaths>, ctl: (args: readonly string[]) => void) {
+function startApp(
+  paths: ReturnType<typeof bridgePaths>,
+  ctl: (args: readonly string[]) => void,
+  o: { readonly waitMs?: number } = {},
+) {
+  let runtimes = 0;
   const input = new PassThrough();
   const out: string[] = [];
   const err: string[] = [];
@@ -118,11 +127,16 @@ function startApp(paths: ReturnType<typeof bridgePaths>, ctl: (args: readonly st
     out: (l) => err.push(l),
     err: (l) => err.push(l),
     runtime: async (): Promise<Runtime> => ({
-      ...(await machineRuntime(env)),
+      ...(await (runtimes++, machineRuntime(env))),
       startProcess: async () => ({ stop: async () => {} }),
     }),
     app: { input, write: (l) => out.push(l) },
-    launchAgent05: { path: paths.launchAgent, home: paths.home, launchctl: ctl, waitMs: 5_000 },
+    launchAgent05: {
+      path: paths.launchAgent,
+      home: paths.home,
+      launchctl: ctl,
+      waitMs: o.waitMs ?? 5_000,
+    },
   });
   const events = () => out.map((l) => JSON.parse(l) as Record<string, unknown>);
   const running = async () => {
@@ -134,7 +148,7 @@ function startApp(paths: ReturnType<typeof bridgePaths>, ctl: (args: readonly st
     ).toBe(true);
   };
   const shutdown = () => input.write(`${line({ id: "s", cmd: "shutdown", reason: "quit" })}\n`);
-  return { done, events, err, running, shutdown };
+  return { done, events, err, running, shutdown, runtimes: () => runtimes };
 }
 
 describe("retireLaunchAgent05", () => {
@@ -145,24 +159,48 @@ describe("retireLaunchAgent05", () => {
       renderLaunchAgent({ node: "/n", cli: "/c", home: "/data & more", logs: "/l" }),
     );
     const { calls, ctl } = fakeLaunchctl();
-    expect(retireLaunchAgent05(path, ctl)).toEqual({ removed: true, home: "/data & more" });
+    expect(retireLaunchAgent05(path, ctl)).toEqual({
+      state: "removed",
+      home: "/data & more",
+    });
     expect(calls).toEqual([["bootout", SERVICE]]);
     expect(existsSync(path)).toBe(false);
   });
 
   it("without a plist calls no launchctl", () => {
     const { calls, ctl } = fakeLaunchctl();
-    expect(retireLaunchAgent05(join(dir, "none.plist"), ctl)).toEqual({ removed: false });
+    expect(retireLaunchAgent05(join(dir, "none.plist"), ctl)).toEqual({ state: "none" });
     expect(calls).toEqual([]);
   });
 
-  it("a bootout that fails (the job is not loaded) still removes the plist", () => {
-    const path = join(dir, "org.openlfcp.bridge.plist");
-    writeFileSync(path, "not a plist");
-    const r = retireLaunchAgent05(path, () => {
-      throw new Error("Boot-out failed: 3: No such process");
+  for (const status of BOOTOUT_NOT_LOADED)
+    it(`a bootout that says the job is not loaded (status ${status}) still removes the plist`, () => {
+      const path = join(dir, "org.openlfcp.bridge.plist");
+      writeFileSync(path, "not a plist");
+      const r = retireLaunchAgent05(path, () => {
+        throw exited(status);
+      });
+      expect(r).toEqual({ state: "removed", home: undefined });
+      expect(existsSync(path)).toBe(false);
     });
-    expect(r).toEqual({ removed: true, home: undefined });
+
+  it("any other bootout failure keeps the plist; the next try boots it out", () => {
+    const home = join(dir, "home");
+    mkdirSync(home);
+    const agent = run05(home);
+    const path = join(dir, "org.openlfcp.bridge.plist");
+    writeFileSync(path, renderLaunchAgent({ node: "/n", cli: "/c", home, logs: "/l" }));
+    for (const e of [exited(5), exited(36), Object.assign(new Error("spawn"), { code: "ENOENT" })])
+      expect(
+        retireLaunchAgent05(path, () => {
+          throw e;
+        }),
+      ).toEqual({ state: "failed", detail: "status" in e ? `status ${e.status}` : "ENOENT" });
+    expect(existsSync(path)).toBe(true);
+    expect(runLockHolder(home)).toBe(agent.pid);
+    const { calls, ctl } = fakeLaunchctl(agent);
+    expect(retireLaunchAgent05(path, ctl)).toEqual({ state: "removed", home });
+    expect(calls).toEqual([["bootout", SERVICE]]);
     expect(existsSync(path)).toBe(false);
   });
 });
@@ -177,7 +215,7 @@ describe("retire05", () => {
     expect(runLockHolder(home)).toBe(agent.pid);
     const { calls, ctl } = fakeLaunchctl(agent);
     expect(await retire05({ launchAgent: path, home, launchctl: ctl, pollMs: 10 })).toEqual({
-      removed: true,
+      state: "removed",
       home,
     });
     expect(calls).toEqual([["bootout", SERVICE]]);
@@ -283,12 +321,13 @@ describe("the first run --app over a bridge of 0.5 (L2)", () => {
 });
 
 describe("run.lock keeps a second host out (L2)", () => {
-  it("a second run --app over the same directory exits without serving; the first goes on", async () => {
+  it("a second run --app over the same directory exits without opening bridge.sqlite; the first goes on", async () => {
     const { paths } = fixture05(SCHEMA_VERSION);
     const first = startApp(paths, () => {});
     await first.running();
     const second = startApp(paths, () => {});
     expect(await second.done).toBe(EXIT.NEEDS_PERSON);
+    expect(second.runtimes()).toBe(0);
     expect(second.events()).toEqual([]);
     expect(second.err.join("\n")).toContain(
       `another lfcp-bridge run is running (pid ${process.pid})`,
@@ -298,5 +337,64 @@ describe("run.lock keeps a second host out (L2)", () => {
     first.shutdown();
     expect(await first.done).toBe(EXIT.OK);
     expect(runLockHolder(paths.home)).toBeUndefined();
+  }, 20_000);
+});
+
+describe("run --app never touches bridge.sqlite under another run (L2)", () => {
+  const schemaOf = (path: string) => {
+    const db = openBridgeDatabase(path, { migrate: false });
+    try {
+      return schemaVersion(db);
+    } finally {
+      db.close();
+    }
+  };
+
+  it("0.5's run outlives the wait: exit NEEDS_PERSON, no runtime, schema unchanged; the next start migrates", async () => {
+    const { paths } = fixture05(2);
+    const agent = run05(paths.home);
+    // launchd unloads the job, but its process has not exited yet when the wait ends.
+    const late = startApp(paths, () => {}, { waitMs: 50 });
+    expect(await late.done).toBe(EXIT.NEEDS_PERSON);
+    expect(late.runtimes()).toBe(0);
+    expect(late.events()).toEqual([]);
+    expect(late.err.join("\n")).toContain(`another lfcp-bridge run is running (pid ${agent.pid})`);
+    expect(schemaOf(paths.database)).toBe(2);
+    expect(runLockHolder(paths.home)).toBe(agent.pid);
+
+    agent.kill("SIGTERM");
+    for (let i = 0; i < 200 && runLockHolder(paths.home) !== undefined; i++)
+      await new Promise((r) => setTimeout(r, 10));
+    const next = startApp(paths, () => {});
+    await next.running();
+    next.shutdown();
+    expect(await next.done).toBe(EXIT.OK);
+    expect(schemaOf(paths.database)).toBe(SCHEMA_VERSION);
+  }, 20_000);
+
+  it("a bootout that fails with the job alive: not started, plist kept, schema unchanged; the next start retires it", async () => {
+    const { paths } = fixture05(2);
+    const agent = run05(paths.home);
+    const failing = startApp(paths, () => {
+      throw exited(5);
+    });
+    expect(await failing.done).toBe(EXIT.NEEDS_PERSON);
+    expect(failing.runtimes()).toBe(0);
+    expect(failing.events()).toEqual([]);
+    expect(failing.err.join("\n")).toContain("could not be booted out (status 5)");
+    expect(failing.err.join("\n")).not.toContain("was removed");
+    expect(existsSync(paths.launchAgent)).toBe(true);
+    expect(schemaOf(paths.database)).toBe(2);
+    expect(runLockHolder(paths.home)).toBe(agent.pid);
+
+    const { calls, ctl } = fakeLaunchctl(agent);
+    const next = startApp(paths, ctl);
+    await next.running();
+    next.shutdown();
+    expect(await next.done).toBe(EXIT.OK);
+    expect(calls).toEqual([["bootout", SERVICE]]);
+    expect(existsSync(paths.launchAgent)).toBe(false);
+    expect(schemaOf(paths.database)).toBe(SCHEMA_VERSION);
+    expect(next.err.join("\n")).toContain("the LaunchAgent of lfcp-bridge 0.5 was removed");
   }, 20_000);
 });
