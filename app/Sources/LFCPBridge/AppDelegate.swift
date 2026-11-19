@@ -152,7 +152,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   func setUpLoginItem() {
     let wanted = UserDefaults.standard.object(forKey: "startAtLogin") as? Bool ?? true
-    if wanted && loginItem.status == .notRegistered {
+    // Not registered yet reads as .notFound on macOS 15 (not only .notRegistered): register both.
+    let before = loginItem.status
+    if wanted && before != .enabled && before != .requiresApproval {
       do {
         try loginItem.register()
         log.info("login item: registered")
