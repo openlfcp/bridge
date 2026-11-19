@@ -6,9 +6,9 @@ name: app
 # (scripts/app/check-app.sh). Notarization and Developer ID are the release chain (E-052).
 on:
   push:
-    paths: ["app/**", "packages/host/**", "packages/transport-eventkit/**", "helper/**", "scripts/app/**", "scripts/bundle-host.mjs", "scripts/check-release-deps.mjs", "package.json", "pnpm-lock.yaml", ".node-version", ".github/workflows/app.yml"]
+    paths: ["app/**", "packages/host/**", "packages/transport-eventkit/**", "helper/**", "scripts/app/**", "scripts/bundle-host.mjs", "scripts/check-release-deps.mjs", "package.json", "pnpm-lock.yaml", "sdk-ts.lock", "scripts/sdk-ts-pack.mjs", ".node-version", ".github/workflows/app.yml"]
   pull_request:
-    paths: ["app/**", "packages/host/**", "packages/transport-eventkit/**", "helper/**", "scripts/app/**", "scripts/bundle-host.mjs", "scripts/check-release-deps.mjs", "package.json", "pnpm-lock.yaml", ".node-version", ".github/workflows/app.yml"]
+    paths: ["app/**", "packages/host/**", "packages/transport-eventkit/**", "helper/**", "scripts/app/**", "scripts/bundle-host.mjs", "scripts/check-release-deps.mjs", "package.json", "pnpm-lock.yaml", "sdk-ts.lock", "scripts/sdk-ts-pack.mjs", ".node-version", ".github/workflows/app.yml"]
 
 permissions:
   contents: read
@@ -35,11 +35,25 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
+      # The TypeScript SDK: until @openlfcp/* 0.7.0 is on npm, the eight packages of
+      # openlfcp/sdk-ts at the commit in sdk-ts.lock, packed by scripts/sdk-ts-pack.mjs into
+      # vendor/sdk-ts/; pnpm-lock.yaml holds each tarball's integrity (CONTRIBUTING.md).
+      - id: sdk-ts-lock
+        run: echo "commit=$(jq -er .commit sdk-ts.lock)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          repository: openlfcp/sdk-ts
+          ref: ${{ steps.sdk-ts-lock.outputs.commit }}
+          # Under vendor/ (gitignored): out of biome's and the boundary check's way.
+          path: vendor/sdk-ts-src
+          # Only what the packages build from (with the root files).
+          sparse-checkout: packages
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .node-version
           cache: pnpm
+      - run: node scripts/sdk-ts-pack.mjs --checkout vendor/sdk-ts-src
       - run: pnpm install --frozen-lockfile
       - name: Build the development app (native slice, ad-hoc, test hooks)
         run: TEST_HOOKS=1 scripts/app/build-dev-app.sh "$RUNNER_TEMP/app"
@@ -66,6 +80,19 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
+      # The TypeScript SDK: until @openlfcp/* 0.7.0 is on npm, the eight packages of
+      # openlfcp/sdk-ts at the commit in sdk-ts.lock, packed by scripts/sdk-ts-pack.mjs into
+      # vendor/sdk-ts/; pnpm-lock.yaml holds each tarball's integrity (CONTRIBUTING.md).
+      - id: sdk-ts-lock
+        run: echo "commit=$(jq -er .commit sdk-ts.lock)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          repository: openlfcp/sdk-ts
+          ref: ${{ steps.sdk-ts-lock.outputs.commit }}
+          # Under vendor/ (gitignored): out of biome's and the boundary check's way.
+          path: vendor/sdk-ts-src
+          # Only what the packages build from (with the root files).
+          sparse-checkout: packages
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
@@ -76,6 +103,7 @@ jobs:
       - name: The SDK comes from npm (tags)
         if: startsWith(github.ref, 'refs/tags/')
         run: node scripts/check-release-deps.mjs
+      - run: node scripts/sdk-ts-pack.mjs --checkout vendor/sdk-ts-src
       - run: pnpm install --frozen-lockfile
       - name: Toolchain
         run: |

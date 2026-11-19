@@ -25,13 +25,14 @@
   },
   "pnpm": {
     "overrides": {
-      "@openlfcp/client": "0.6.0",
-      "@openlfcp/core": "0.6.0",
-      "@openlfcp/crypto": "0.6.0",
-      "@openlfcp/shared-objects": "0.6.0",
-      "@openlfcp/storage": "0.6.0",
-      "@openlfcp/storage-node": "0.6.0",
-      "@openlfcp/wire": "0.6.0"
+      "@openlfcp/core": "file:vendor/sdk-ts/openlfcp-core-0.6.0.tgz",
+      "@openlfcp/crypto": "file:vendor/sdk-ts/openlfcp-crypto-0.6.0.tgz",
+      "@openlfcp/storage": "file:vendor/sdk-ts/openlfcp-storage-0.6.0.tgz",
+      "@openlfcp/wire": "file:vendor/sdk-ts/openlfcp-wire-0.6.0.tgz",
+      "@openlfcp/storage-idb": "file:vendor/sdk-ts/openlfcp-storage-idb-0.6.0.tgz",
+      "@openlfcp/shared-objects": "file:vendor/sdk-ts/openlfcp-shared-objects-0.6.0.tgz",
+      "@openlfcp/client": "file:vendor/sdk-ts/openlfcp-client-0.6.0.tgz",
+      "@openlfcp/storage-node": "file:vendor/sdk-ts/openlfcp-storage-node-0.6.0.tgz"
     }
   }
 }
