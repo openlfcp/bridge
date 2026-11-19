@@ -26,16 +26,29 @@ the menu's **Export diagnostics…** through the app channel's `export{path}`
 
 ## Sealing
 
-Every string of the tree becomes `h:` + the first 8 bytes (hex) of HMAC-SHA-256(k, value), unless
-its key is allow-listed as plain **and** the value has that key's form: a machine code
-(`store_conflict`, `effect.lost`, `EPIPE`, `OutcomeUnknownError`), an enumerated state, an id, a
-time, a version, a frame. Titles, URLs, paths and error texts are never plain. Equal strings within
-one export have equal HMACs; `k` is random per export, zeroed after it and never written, so two
-exports share no HMAC value.
+The tree is built field by field by its path in the schema; no object read from the database or
+a file is copied. Each string leaf is kept plain only when it belongs to its field's vocabulary —
+a **known** code (`src/diag/codes.ts`: helper, transport, SDK, SQLite and errno codes, the
+bridge's reasons and enumerated states), a journal key of `JOURNAL_TEXT` — or form (an id, a time,
+a version, a frame); otherwise it becomes `h:` + the first 8 bytes (hex) of HMAC-SHA-256(k, value).
+A value that only looks like a code (`PRIVATE_NOTE`, `private.example.com`) is sealed. A non-string
+where a string belongs (a nested object) is dropped. Crash signatures are rebuilt from `process`,
+`exception` and `frames` only, each checked. Titles, URLs, paths and error texts are always sealed.
+Equal strings within one export have equal HMACs; `k` is random per export, zeroed after it and
+never written, so two exports share no HMAC value.
+
+## Writing the zip
+
+The zip is written as a new file (0600, `O_EXCL | O_NOFOLLOW`) in the folder the path names, then
+renamed over the path: an existing regular file is replaced as a whole, never written into; a
+symlink, a directory or anything else at the path is refused (`EEXIST`); the folder must exist
+(the default `<data directory>/diagnostics/` is made, 0700). Crash reports are chosen by name, type
+(regular files only) and size before any is opened, and only the newest 10 are read.
 
 ## Never read
 
 Pairing links, keys and DEKs, the `meta` table beyond Safe Mode, intent payloads and evidence,
 link URLs and snapshots, hold details, journal parameters other than the code, raw crash reports.
 
-Errors are journaled as structured codes (`src/diag/errors.ts`), never as `String(error)`.
+Errors are journaled as structured codes (`src/diag/errors.ts`), never as `String(error)`: a
+known code, else a known class name, else `error`.
