@@ -35,6 +35,9 @@ importers:
 
   packages/host:
     dependencies:
+      '@automerge/automerge':
+        specifier: 3.5.0
+        version: 3.5.0
       '@openlfcp/bridge-reminders':
         specifier: workspace:*
         version: link:../reminders
