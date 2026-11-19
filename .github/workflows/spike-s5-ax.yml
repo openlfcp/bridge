@@ -1,0 +1,54 @@
+# Spike S-5 (T§4, PLAN §E-003): can a CI test drive the app through the Accessibility API — read a
+# window label, press a button — with no test hooks in the app? The grant is a kTCCServiceAccessibility
+# row in the runner's *system* TCC.db (SIP is off on hosted runners). The app is a throwaway Swift
+# menu-bar app (scripts/spike-s5/app), the test side a Swift AXUIElement driver (scripts/spike-s5/driver).
+# Green only when the control (no rows) is untrusted and the read and the press both pass.
+# Throwaway: lives on branch spike/s5-ax only (never merged).
+name: spike-s5-ax
+
+on:
+  push:
+    branches: [spike/s5-ax]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ax:
+    name: s5 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Paths and diagnostics
+        run: |
+          { echo "OUT=$RUNNER_TEMP/s5-out"; echo "R=$RUNNER_TEMP/s5-results"; } >> "$GITHUB_ENV"
+          sw_vers; uname -m; csrutil status; xcrun swiftc --version
+      - name: Build the probe app and the AX driver
+        run: scripts/spike-s5/build.sh "$OUT"
+      - name: Scenarios — baseline, control, grants, read and press
+        env:
+          RUNNER_LABEL: ${{ matrix.os }}
+        run: node scripts/spike-s5/scenarios.mjs "$OUT" "$R"
+      - name: Logs (tccd, app records)
+        if: always()
+        run: |
+          log show --last 20m --style compact --predicate 'process == "tccd"' 2>/dev/null \
+            | grep -iE 'accessibility|s5-ax|s5probe' | tail -400 > "$R/tccd.log" || true
+          echo "== app events"; cat "$R/app-state/events.jsonl" 2>/dev/null || true
+          echo "== tccd (tail)"; tail -60 "$R/tccd.log" | cut -c1-400
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s5-${{ matrix.os }}
+          path: ${{ env.R }}
+          if-no-files-found: warn
