@@ -84,12 +84,14 @@ public enum CodeCheck {
     return text ?? describe(status)
   }
 
-  /// (4): the cdhash of the code this process runs.
+  /// (4): the cdhash of the code this process runs. Its resources are (3)'s: a changed byte in
+  /// Resources/ must come back as an identity whose signature fails (code-invalid), not as an
+  /// unknown identity — so the running code is checked against its executable only.
   public static func runningCdhash() throws -> String {
     var me: SecCode?
     var status = SecCodeCopySelf(SecCSFlags(), &me)
     guard status == errSecSuccess, let me else { throw CodeCheckError(status) }
-    status = SecCodeCheckValidity(me, SecCSFlags(), nil)
+    status = SecCodeCheckValidity(me, SecCSFlags(rawValue: kSecCSDoNotValidateResources), nil)
     guard status == errSecSuccess else { throw CodeCheckError(status) }
     var staticCode: SecStaticCode?
     status = SecCodeCopyStaticCode(me, SecCSFlags(), &staticCode)
