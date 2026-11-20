@@ -120,11 +120,7 @@ function publicKeyFromRaw(raw: string): KeyObject {
 /** The file artifact-manifest.json: the canonical JSON of the manifest and its signature. */
 export function signManifest(manifest: ArtifactManifest, privateKey: KeyObject): string {
   validateManifest(manifest);
-  const signature: ManifestSignature = {
-    alg: "Ed25519",
-    publicKey: rawPublicKey(privateKey),
-    value: sign(null, manifestBytes(manifest), privateKey).toString("base64"),
-  };
+  const signature = signBody(manifest, privateKey);
   return canonicalJson({ manifest, signature } satisfies SignedArtifactManifest);
 }
 
@@ -143,23 +139,49 @@ export function parseSignedManifest(
     throw new ArtifactManifestError("malformed", "not JSON");
   }
   const doc = record(parsed, "document", ["manifest", "signature"]);
-  const sig = record(doc.signature, "signature", ["alg", "publicKey", "value"]);
+  const manifest = validateManifest(doc.manifest);
+  const bytes = verifySigned(parsed, doc.signature, manifest, text, trustedKeys);
+  return { manifest, manifestSha256: sha256(bytes) };
+}
+
+/**
+ * The signature part of a signed document `{<body>, signature}` (this manifest, and the public
+ * certification manifest of E-051): the whole text is canonical, the key is trusted and the
+ * Ed25519 signature is over the canonical bytes of `body`, which it returns.
+ */
+export function verifySigned(
+  parsed: unknown,
+  signature: unknown,
+  body: unknown,
+  text: string,
+  trustedKeys: readonly string[],
+): Buffer {
+  const sig = record(signature, "signature", ["alg", "publicKey", "value"]);
   if (sig.alg !== "Ed25519") throw new ArtifactManifestError("malformed", "signature.alg");
   const publicKey = str(sig.publicKey, "signature.publicKey");
   const value = str(sig.value, "signature.value");
-  const manifest = validateManifest(doc.manifest);
   if (canonicalJson(parsed) !== text) throw new ArtifactManifestError("not-canonical", "bytes");
   if (!trustedKeys.includes(publicKey)) throw new ArtifactManifestError("untrusted-key", publicKey);
-  const bytes = manifestBytes(manifest);
+  const bytes = Buffer.from(canonicalJson(body), "utf8");
   if (!verify(null, bytes, publicKeyFromRaw(publicKey), Buffer.from(value, "base64")))
     throw new ArtifactManifestError("bad-signature", "Ed25519");
-  return { manifest, manifestSha256: sha256(bytes) };
+  return bytes;
+}
+
+/** Signs `body` (canonical bytes) with an Ed25519 key: the `signature` of a signed document. */
+export function signBody(body: unknown, privateKey: KeyObject): ManifestSignature {
+  return {
+    alg: "Ed25519",
+    publicKey: rawPublicKey(privateKey),
+    value: sign(null, Buffer.from(canonicalJson(body), "utf8"), privateKey).toString("base64"),
+  };
 }
 
 const HEX40 = /^[0-9a-f]{40}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 
-function record(v: unknown, at: string, keys: readonly string[]): Record<string, unknown> {
+/** An object with exactly `keys`; anything else is ArtifactManifestError("malformed"). */
+export function record(v: unknown, at: string, keys: readonly string[]): Record<string, unknown> {
   if (typeof v !== "object" || v === null || Array.isArray(v))
     throw new ArtifactManifestError("malformed", `${at}: not an object`);
   const extra = Object.keys(v).filter((k) => !keys.includes(k));
@@ -169,7 +191,8 @@ function record(v: unknown, at: string, keys: readonly string[]): Record<string,
   return v as Record<string, unknown>;
 }
 
-function str(v: unknown, at: string, re?: RegExp): string {
+/** A non-empty string, matching `re` if given. */
+export function str(v: unknown, at: string, re?: RegExp): string {
   if (typeof v !== "string" || v === "" || (re && !re.test(v)))
     throw new ArtifactManifestError("malformed", at);
   return v;
