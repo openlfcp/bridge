@@ -97,6 +97,14 @@ describe("artifact manifest", () => {
     expect(() => canonicalJson({ a: 1.5 })).toThrow(TypeError);
   });
 
+  it("canonical JSON refuses a lone UTF-16 surrogate, in a value or a key (PB-41)", () => {
+    expect(canonicalJson("😀")).toBe('"😀"');
+    for (const lone of ["\ud800", "a\udfff", "\ude00\ud83d"]) {
+      expect(() => canonicalJson(lone)).toThrow(TypeError);
+      expect(() => canonicalJson({ [lone]: 1 })).toThrow(TypeError);
+    }
+  });
+
   it("Mach-O architectures: thin, universal, not Mach-O", () => {
     expect(machOArchs(fat(ARM, X86))).toEqual(["arm64", "x86_64"]);
     expect(machOArchs(thin(X86))).toEqual(["x86_64"]);
@@ -176,6 +184,16 @@ describe("artifact manifest", () => {
       expect(
         code(() => parseSignedManifest(JSON.stringify(JSON.parse(text()), null, 1), [PUB])),
       ).toBe("not-canonical");
+    });
+
+    it("a lone surrogate, escaped in the file or in the manifest to sign (PB-41)", () => {
+      const lone = text().replace(/"version":"[^"]*"/, '"version":"0.6.0\\ud800"');
+      expect(lone).toContain('"0.6.0\\ud800"');
+      expect(code(() => parseSignedManifest(lone, [PUB]))).toBe("malformed");
+      const doc = resign((m) => {
+        m.version = "0.6.0\ud800";
+      });
+      expect(code(() => signManifest(doc.manifest, KEY))).toBe("malformed");
     });
 
     it("another format, unknown fields, unsorted or non-NFC paths, bad hashes", () => {

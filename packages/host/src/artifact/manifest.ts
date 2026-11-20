@@ -69,10 +69,21 @@ export class ArtifactManifestError extends Error {
   }
 }
 
-/** RFC 8785 canonical JSON of strings, safe integers, booleans, null, arrays and objects. */
+/** A lone UTF-16 surrogate: RFC 8785 §3.2.2.2 (I-JSON) has no canonical form for it. */
+const LONE_SURROGATE = /[\uD800-\uDFFF]/u;
+
+function jsonString(s: string): string {
+  if (LONE_SURROGATE.test(s)) throw new TypeError("a lone UTF-16 surrogate");
+  return JSON.stringify(s);
+}
+
+/**
+ * RFC 8785 canonical JSON of strings, safe integers, booleans, null, arrays and objects. A string
+ * or key with a lone UTF-16 surrogate is not I-JSON and throws, as a non-integer number does.
+ */
 export function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === "boolean" || typeof value === "string")
-    return JSON.stringify(value);
+  if (value === null || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "string") return jsonString(value);
   if (typeof value === "number") {
     if (!Number.isSafeInteger(value)) throw new TypeError(`not a safe integer: ${value}`);
     return JSON.stringify(value);
@@ -84,7 +95,7 @@ export function canonicalJson(value: unknown): string {
     const obj = value as Record<string, unknown>;
     return `{${keys
       .filter((k) => obj[k] !== undefined)
-      .map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`)
+      .map((k) => `${jsonString(k)}:${canonicalJson(obj[k])}`)
       .join(",")}}`;
   }
   throw new TypeError(`not JSON: ${typeof value}`);
@@ -160,7 +171,13 @@ export function verifySigned(
   if (sig.alg !== "Ed25519") throw new ArtifactManifestError("malformed", "signature.alg");
   const publicKey = str(sig.publicKey, "signature.publicKey");
   const value = str(sig.value, "signature.value");
-  if (canonicalJson(parsed) !== text) throw new ArtifactManifestError("not-canonical", "bytes");
+  let canonical: string;
+  try {
+    canonical = canonicalJson(parsed);
+  } catch (e) {
+    throw new ArtifactManifestError("malformed", (e as Error).message);
+  }
+  if (canonical !== text) throw new ArtifactManifestError("not-canonical", "bytes");
   if (!trustedKeys.includes(publicKey)) throw new ArtifactManifestError("untrusted-key", publicKey);
   const bytes = Buffer.from(canonicalJson(body), "utf8");
   if (!verify(null, bytes, publicKeyFromRaw(publicKey), Buffer.from(value, "base64")))
@@ -191,9 +208,9 @@ export function record(v: unknown, at: string, keys: readonly string[]): Record<
   return v as Record<string, unknown>;
 }
 
-/** A non-empty string, matching `re` if given. */
+/** A non-empty string without a lone surrogate (PB-41), matching `re` if given. */
 export function str(v: unknown, at: string, re?: RegExp): string {
-  if (typeof v !== "string" || v === "" || (re && !re.test(v)))
+  if (typeof v !== "string" || v === "" || LONE_SURROGATE.test(v) || (re && !re.test(v)))
     throw new ArtifactManifestError("malformed", at);
   return v;
 }
