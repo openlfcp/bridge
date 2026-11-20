@@ -37,7 +37,7 @@ import { openNodeInstallation } from "@openlfcp/storage-node";
 import type { ShellCode } from "../app/serve.js";
 import { ManifestCache } from "../artifact/cache.js";
 import { TRUSTED_MANIFEST_KEYS } from "../artifact/keys.js";
-import { WriteGate } from "../artifact/write-gate.js";
+import { refreshGate, WriteGate } from "../artifact/write-gate.js";
 import { LIST_PREFIX, VERIFY_PREFIX } from "../bootstrap.js";
 import type { BridgeConfig, BridgePaths } from "../config.js";
 import type { BridgeDatabase } from "../db/database.js";
@@ -361,7 +361,9 @@ export async function machineProcess(o: {
     after: async () => process?.passAll(),
     journal,
   });
+  let stopRefresh: (() => void) | undefined;
   const release = async () => {
+    stopRefresh?.();
     await transport?.close().catch(() => {});
     await supervisor.stop().catch(() => {});
     opened?.close();
@@ -395,6 +397,13 @@ export async function machineProcess(o: {
     });
     process = started;
     await started.start();
+    // A§9.2: a withdrawal published while the helper keeps running turns writes off too.
+    stopRefresh = refreshGate({
+      gate,
+      changed: () => started.writesChanged(),
+      onError: (e) =>
+        journal.append("error", "cert.refresh_failed", { params: { code: errorCode(e) } }),
+    });
   } catch (e) {
     await process?.stop("failed to start").catch(() => {});
     await release();

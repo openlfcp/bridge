@@ -3,8 +3,13 @@
 //
 // - When: before writes are turned on (the start of the run process — also the first start after a
 //   Sparkle update, which relaunches the app) and before every start of the helper by the host
-//   (HelperSupervisor's start, restarts included). The decision of the last check is the one the
-//   run process writes by; until the first one it is preview.
+//   (HelperSupervisor's start, restarts included); and every CERTIFICATION_REFRESH_MS while it runs
+//   (refreshGate), so that a `withdrawn` published meanwhile turns writes off without a restart of
+//   the helper (A§9.2). The decision of the last check is the one the run process writes by; until
+//   the first one it is preview.
+// - Offline after a first online start, the kept, signed copies decide (A§9.1 "the app keeps its
+//   copy", A§9.2 "online, cache; the first start without network — preview"); a withdrawal reaches
+//   the app at its next successful download.
 // - Inputs: the kept manifests (cache.ts), refreshed online first — the artifact manifest of this
 //   version (next to the DMG, on the GitHub Release; the appcast's copy is E-056's) when no kept
 //   copy is of this version, and the public certification manifest (GitHub Release) at most every
@@ -27,7 +32,7 @@ const RELEASES = "https://github.com/openlfcp/bridge/releases";
 export const artifactManifestUrl = (version: string) =>
   `${RELEASES}/download/v${version}/artifact-manifest.json`;
 export const CERTIFICATION_MANIFEST_URL = `${RELEASES}/latest/download/certification-manifest.json`;
-export const CERTIFICATION_REFRESH_MS = 6 * 3_600_000;
+export const CERTIFICATION_REFRESH_MS = 3_600_000;
 const FETCH_TIMEOUT_MS = 15_000;
 /** The artifact manifests kept: this build's and the one before it (around an update). */
 export const ARTIFACT_MANIFESTS_KEPT = 2;
@@ -35,11 +40,43 @@ export const ARTIFACT_MANIFESTS_KEPT = 2;
 /** GET a URL as text; throws on anything but 200. */
 export type FetchText = (url: string) => Promise<string>;
 
-const fetchText: FetchText = async (url) => {
-  const r = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), redirect: "follow" });
-  if (r.status !== 200) throw new Error(`HTTP ${r.status}`);
-  return r.text();
-};
+/** Where a download may go: GitHub and the hosts it redirects release assets to, over HTTPS. */
+export const DOWNLOAD_HOSTS: ReadonlySet<string> = new Set([
+  "github.com",
+  "objects.githubusercontent.com",
+  "release-assets.githubusercontent.com",
+  "github-releases.githubusercontent.com",
+]);
+const MAX_REDIRECTS = 5;
+
+const allowed = (url: URL) => url.protocol === "https:" && DOWNLOAD_HOSTS.has(url.hostname);
+
+/**
+ * GET over `fetchImpl` following at most MAX_REDIRECTS redirects by hand: every hop, the first
+ * included, must be HTTPS to a DOWNLOAD_HOSTS host, or nothing is requested there.
+ */
+export function guardedFetchText(fetchImpl: typeof fetch = fetch): FetchText {
+  return async (start) => {
+    let url = new URL(start);
+    for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+      if (!allowed(url)) throw new Error(`download refused: ${url.protocol}//${url.hostname}`);
+      const r = await fetchImpl(url, {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        redirect: "manual",
+      });
+      const location = r.headers.get("location");
+      if (r.status >= 300 && r.status < 400 && location !== null) {
+        url = new URL(location, url);
+        continue;
+      }
+      if (r.status !== 200) throw new Error(`HTTP ${r.status}`);
+      return r.text();
+    }
+    throw new Error("download refused: too many redirects");
+  };
+}
+
+const fetchText = guardedFetchText();
 
 /** The slice this host runs as (node is universal; it runs as the shell does). */
 export const hostArch = (): Arch => (process.arch === "x64" ? "x86_64" : "arm64");
@@ -136,7 +173,7 @@ export class WriteGate {
   }
 
   /** Refreshes the kept manifests (best effort), asks the shell, decides (A§9.1). */
-  async check(when: "start" | "helper"): Promise<GateDecision> {
+  async check(when: "start" | "helper" | "refresh"): Promise<GateDecision> {
     const o = this.#o;
     await this.#refresh();
     const shell = o.shell;
@@ -197,4 +234,43 @@ export class WriteGate {
       }
     }
   }
+}
+
+/**
+ * Checks the gate again every `everyMs` while the run process runs (one check at a time); when
+ * the decision to write changes, `changed` (the helper's write mode follows it). Returns stop.
+ */
+export function refreshGate(o: {
+  readonly gate: Pick<WriteGate, "check" | "decision">;
+  readonly changed: (d: GateDecision) => Promise<void> | void;
+  readonly everyMs?: number;
+  readonly timers?: {
+    setInterval(fn: () => void, ms: number): unknown;
+    clearInterval(h: unknown): void;
+  };
+  readonly onError?: (e: unknown) => void;
+}): () => void {
+  const timers = o.timers ?? {
+    setInterval: (fn: () => void, ms: number) => {
+      const h = setInterval(fn, ms);
+      h.unref?.();
+      return h;
+    },
+    clearInterval: (h: unknown) => clearInterval(h as NodeJS.Timeout),
+  };
+  let busy = false;
+  const handle = timers.setInterval(() => {
+    if (busy) return;
+    busy = true;
+    const before = o.gate.decision.writes;
+    void (async () => {
+      const d = await o.gate.check("refresh");
+      if (d.writes !== before) await o.changed(d);
+    })()
+      .catch((e: unknown) => o.onError?.(e))
+      .finally(() => {
+        busy = false;
+      });
+  }, o.everyMs ?? CERTIFICATION_REFRESH_MS);
+  return () => timers.clearInterval(handle);
 }

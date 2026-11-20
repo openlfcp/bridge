@@ -346,6 +346,11 @@ export class BridgeProcess {
   }
 
   /** A full pass of every binding (start, rebuild, the timer, wake). */
+  /** The write gate's decision changed (A§9.2): the helper's own write mode follows it. */
+  async writesChanged(): Promise<void> {
+    if (this.#ready && !this.#stopping) await this.#writeMode();
+  }
+
   async passAll(): Promise<readonly PassOutcome[]> {
     return Promise.all(this.#bindings().map((b) => this.pass(b.id)));
   }

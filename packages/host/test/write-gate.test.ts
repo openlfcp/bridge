@@ -5,7 +5,7 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ShellCode } from "../src/app/serve.js";
 import { ManifestCache } from "../src/artifact/cache.js";
 import { signCertification } from "../src/artifact/certification.js";
@@ -15,9 +15,12 @@ import {
   artifactManifestUrl,
   CERTIFICATION_MANIFEST_URL,
   CERTIFICATION_REFRESH_MS,
+  DOWNLOAD_HOSTS,
   type FetchText,
+  guardedFetchText,
   keptGate,
   nestedMachO,
+  refreshGate,
   WriteGate,
 } from "../src/artifact/write-gate.js";
 import { openBridgeDatabase } from "../src/db/database.js";
@@ -256,5 +259,95 @@ describe("ManifestCache.prune: the artifact manifests kept are bounded", () => {
       { manifest_sha256: "b".repeat(64) },
       { manifest_sha256: "c".repeat(64) },
     ]);
+  });
+});
+
+describe("review #45-2: a withdrawal reaches a running process without a restart of the helper", () => {
+  it("certified at the start; withdrawn published; the next refresh turns writes off (A§9.2)", async () => {
+    let t = Date.parse("2026-11-20T00:00:00Z");
+    const files: Record<string, string> = {
+      [artifactManifestUrl("0.6.0")]: ARTIFACT_TEXT,
+      [CERTIFICATION_MANIFEST_URL]: CERTIFIED,
+    };
+    const s = shell();
+    const r = rig({ files, shell: s, now: () => t });
+    expect((await r.gate.check("start")).writes).toBe(true);
+    let tick: (() => void) | undefined;
+    const changed: boolean[] = [];
+    const stop = refreshGate({
+      gate: r.gate,
+      changed: (d) => void changed.push(d.writes),
+      timers: {
+        setInterval: (fn) => {
+          tick = fn;
+          return 1;
+        },
+        clearInterval: () => {
+          tick = undefined;
+        },
+      },
+    });
+    // The helper keeps running: no start, no restart. The certify workflow publishes seq 2.
+    files[CERTIFICATION_MANIFEST_URL] = signCertification(
+      cert(2, entry("15.4", { status: "withdrawn" })),
+      KEY,
+    );
+    t += CERTIFICATION_REFRESH_MS;
+    tick?.();
+    await vi.waitFor(() => expect(changed).toEqual([false]));
+    expect(r.gate.decision).toMatchObject({ state: "withdrawn", writes: false });
+    expect(keptGate(r.db)?.state).toBe("withdrawn");
+    // A refresh that changes nothing calls nothing; stop() ends the ticks.
+    t += CERTIFICATION_REFRESH_MS;
+    tick?.();
+    await vi.waitFor(() => expect(s.asked.length).toBe(3));
+    expect(changed).toEqual([false]);
+    stop();
+    expect(tick).toBeUndefined();
+  });
+});
+
+describe("review #45-3: downloads follow redirects only to GitHub over HTTPS", () => {
+  /** A fake network: url → [status, location?, body?]; what was requested. */
+  function net(routes: Record<string, [number, (string | undefined)?, string?]>) {
+    const asked: string[] = [];
+    const impl = (async (u: URL | string) => {
+      const url = String(u);
+      asked.push(url);
+      const [status, location, body] = routes[url] ?? [404];
+      return new Response(status >= 300 && status < 400 ? null : (body ?? ""), {
+        status,
+        headers: location === undefined ? {} : { location },
+      });
+    }) as typeof fetch;
+    return { asked, get: guardedFetchText(impl) };
+  }
+  const START = CERTIFICATION_MANIFEST_URL;
+  const ASSET = "https://release-assets.githubusercontent.com/github-production-release-asset/1";
+
+  it("a release asset through GitHub's own redirects is downloaded", async () => {
+    expect(DOWNLOAD_HOSTS.has("github.com")).toBe(true);
+    const n = net({
+      [START]: [302, "/openlfcp/bridge/releases/download/v0.6.0/certification-manifest.json"],
+      "https://github.com/openlfcp/bridge/releases/download/v0.6.0/certification-manifest.json": [
+        302,
+        ASSET,
+      ],
+      [ASSET]: [200, undefined, "signed"],
+    });
+    expect(await n.get(START)).toBe("signed");
+    expect(n.asked).toHaveLength(3);
+  });
+
+  it("a redirect elsewhere, to plain HTTP, or without end is refused before it is requested", async () => {
+    const elsewhere = net({ [START]: [302, "https://evil.example/m.json"] });
+    await expect(elsewhere.get(START)).rejects.toThrow("download refused: https://evil.example");
+    expect(elsewhere.asked).toEqual([START]);
+    const http = net({ [START]: [301, "http://objects.githubusercontent.com/x"] });
+    await expect(http.get(START)).rejects.toThrow("download refused: http:");
+    expect(http.asked).toEqual([START]);
+    const loop = net({ [START]: [302, START] });
+    await expect(loop.get(START)).rejects.toThrow("too many redirects");
+    await expect(net({}).get("https://evil.example/x")).rejects.toThrow("download refused");
   });
 });

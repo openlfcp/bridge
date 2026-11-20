@@ -93,6 +93,8 @@ export const JOURNAL_TEXT: Readonly<Record<string, (p: JournalParams) => string>
     p.state === "certified"
       ? `Writing to Reminders is on: ${String(p.text ?? "")}`
       : `Writing to Reminders is off (preview; cert.state ${String(p.state ?? "")}, ${String(p.reason ?? "")}): ${String(p.text ?? "")}`,
+  "cert.refresh_failed": (p) =>
+    `The write gate could not be checked again (${String(p.code ?? "")}); the last decision stays`,
   "effect.refused": (p) => `Reminders refused a write: ${String(p.code ?? "")}`,
   "intent.unknown_outcome": () =>
     "Whether a write to Reminders happened is not known: decide in `lfcp-bridge quarantine`",
