@@ -1,0 +1,251 @@
+name: release
+
+# The release chain of LFCP Bridge.app (PLAN §E-052, A§9.1–9.2, A§10, E3, E5): one build, signed
+# from the inside out → notarized → stapled → artifact-manifest.json (after the staple, outside the
+# bundle, EdDSA) → DMG (the same app, copied) → a draft GitHub Release. Nothing is rebuilt or
+# re-signed after the manifest: the cdhashes before and after it must be equal, and the app in the
+# DMG must be the manifest's build.
+#
+# Modes:
+#   dry-run (pushes of the chain's files, or by hand): a throwaway self-signed "LFCP Bridge Dev"
+#     certificate, notarization skipped, an ephemeral manifest key; the draft is named
+#     dry-run-<run>-<attempt>. No secret is read.
+#   developer-id (by hand only): the environment `release` (owner's approval, E-057) with
+#     DEVELOPER_ID_P12_BASE64, DEVELOPER_ID_P12_PASSWORD, NOTARY_API_KEY_P8_BASE64, NOTARY_KEY_ID,
+#     NOTARY_ISSUER_ID and ARTIFACT_MANIFEST_ED25519_KEY (PKCS#8 PEM); the SDK must come from npm.
+#     The draft is named candidate-<version>-<run>.
+# Drafts only: this workflow never publishes a release and never creates a version tag (v*); a
+# draft's tag exists only once someone publishes it (E-063).
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry-run (Dev certificate, no secrets) or developer-id (environment release)"
+        type: choice
+        options: [dry-run, developer-id]
+        default: dry-run
+  push:
+    branches-ignore: ["main"]
+    paths:
+      - ".github/workflows/release.yml"
+      - "scripts/release/**"
+      - "scripts/app/make-dmg.sh"
+      - "scripts/app/package-app.sh"
+      - "packages/host/src/artifact/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}-${{ inputs.mode || 'dry-run' }}
+  cancel-in-progress: false
+
+env:
+  MODE: ${{ inputs.mode || 'dry-run' }}
+
+jobs:
+  build:
+    runs-on: macos-15
+    # Developer ID secrets live only in the environment `release`, which asks the owner first.
+    environment: ${{ inputs.mode == 'developer-id' && 'release' || '' }}
+    outputs:
+      version: ${{ steps.manifest.outputs.version }}
+      sha256: ${{ steps.manifest.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v5
+      # A release is built from the @openlfcp/* npm packages only (scripts/check-release-deps.mjs).
+      - name: The SDK comes from npm (developer-id)
+        if: env.MODE == 'developer-id'
+        run: node scripts/check-release-deps.mjs
+      # Dry run: until @openlfcp/* 0.7.0 is on npm, the SDK pin of sdk-ts.lock (docs/devel/sdk-pin.md).
+      - id: sdk-ts-lock
+        if: env.MODE == 'dry-run' && hashFiles('sdk-ts.lock') != ''
+        run: echo "commit=$(jq -er .commit sdk-ts.lock)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        if: steps.sdk-ts-lock.outputs.commit
+        with:
+          repository: openlfcp/sdk-ts
+          ref: ${{ steps.sdk-ts-lock.outputs.commit }}
+          path: vendor/sdk-ts-src
+          sparse-checkout: packages
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - if: steps.sdk-ts-lock.outputs.commit
+        run: node scripts/sdk-ts-pack.mjs --checkout vendor/sdk-ts-src
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Toolchain
+        run: |
+          sw_vers
+          xcrun swift --version
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/node-cache
+          key: node-darwin-${{ hashFiles('.node-version', 'scripts/app/node-darwin.sha256') }}
+
+      - name: Signing identity (${{ env.MODE }})
+        id: identity
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ inputs.mode == 'developer-id' && secrets.DEVELOPER_ID_P12_BASE64 || '' }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ inputs.mode == 'developer-id' && secrets.DEVELOPER_ID_P12_PASSWORD || '' }}
+        run: |
+          kind=dev
+          if [ "$MODE" = developer-id ]; then kind=developer-id; fi
+          sha1="$(scripts/release/signing-keychain.sh "$kind" "$RUNNER_TEMP/release.keychain-db")"
+          echo "sha1=$sha1" >> "$GITHUB_OUTPUT"
+
+      - name: Build and sign from the inside out (universal, hardened runtime)
+        env:
+          PACKAGE_DMG: "0"
+          SIGN_IDENTITY: ${{ steps.identity.outputs.sha1 }}
+          SIGN_KEYCHAIN: ${{ runner.temp }}/release.keychain-db
+          SIGN_TIMESTAMP: ${{ env.MODE == 'developer-id' && '1' || '' }}
+          NODE_CACHE: ${{ runner.temp }}/node-cache
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: scripts/app/package-app.sh "$RUNNER_TEMP/out"
+      - name: No test hooks in the release build
+        run: scripts/app/check-no-test-hooks.sh "$RUNNER_TEMP/out/LFCP Bridge.app"
+      - name: Signature and designated requirement
+        run: |
+          app="$RUNNER_TEMP/out/LFCP Bridge.app"
+          codesign --verify --strict --deep --verbose=2 "$app"
+          codesign -d -r- "$app" 2>&1 | sed -n 's/^designated => /designated: /p'
+
+      - name: Notarize and staple the app (developer-id)
+        if: env.MODE == 'developer-id'
+        env:
+          NOTARY_API_KEY_P8_BASE64: ${{ secrets.NOTARY_API_KEY_P8_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: scripts/release/notarize.sh "$RUNNER_TEMP/out/LFCP Bridge.app"
+      - name: Notarization skipped (dry run)
+        if: env.MODE == 'dry-run'
+        run: |
+          echo "::notice::Notarization and staple skipped (dry run with the Dev certificate, no Developer ID, E-057)"
+
+      - name: Manifest key
+        id: key
+        env:
+          ARTIFACT_MANIFEST_ED25519_KEY: ${{ inputs.mode == 'developer-id' && secrets.ARTIFACT_MANIFEST_ED25519_KEY || '' }}
+        run: |
+          key="$RUNNER_TEMP/manifest-key.pem"
+          if [ "$MODE" = developer-id ]; then
+            : "${ARTIFACT_MANIFEST_ED25519_KEY:?no ARTIFACT_MANIFEST_ED25519_KEY (environment release)}"
+            (umask 077; printf '%s\n' "$ARTIFACT_MANIFEST_ED25519_KEY" > "$key")
+          else
+            scripts/release/artifact-manifest.mjs keygen "$key" >/dev/null
+            echo "::notice::Dry run: an ephemeral manifest key; its public key is artifact-manifest.pub"
+          fi
+          echo "path=$key" >> "$GITHUB_OUTPUT"
+
+      # A§9.1: after the staple, outside the bundle, without touching it.
+      - name: artifact-manifest.json (cdhashes before and after must be equal)
+        id: manifest
+        run: |
+          app="$RUNNER_TEMP/out/LFCP Bridge.app"
+          dist="$RUNNER_TEMP/dist"
+          mkdir -p "$dist"
+          scripts/release/artifact-manifest.mjs cdhashes "$app" > "$RUNNER_TEMP/cdhash-before.json"
+          sha="$(scripts/release/artifact-manifest.mjs build "$app" --key "${{ steps.key.outputs.path }}" \
+            --out "$dist/artifact-manifest.json")"
+          scripts/release/artifact-manifest.mjs cdhashes "$app" > "$RUNNER_TEMP/cdhash-after.json"
+          if ! cmp -s "$RUNNER_TEMP/cdhash-before.json" "$RUNNER_TEMP/cdhash-after.json"; then
+            echo "::error::cdhashes changed while building the manifest"
+            diff "$RUNNER_TEMP/cdhash-before.json" "$RUNNER_TEMP/cdhash-after.json" || true
+            exit 1
+          fi
+          codesign --verify --strict --deep "$app"
+          jq -er .signature.publicKey "$dist/artifact-manifest.json" > "$dist/artifact-manifest.pub"
+          scripts/release/artifact-manifest.mjs check "$app" --manifest "$dist/artifact-manifest.json" \
+            --public-key "$(cat "$dist/artifact-manifest.pub")"
+          jq . "$RUNNER_TEMP/cdhash-after.json"
+          echo "manifestSha256 $sha"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "version=$(jq -er .manifest.version "$dist/artifact-manifest.json")" >> "$GITHUB_OUTPUT"
+
+      # The control of the two checks above: a copy whose helper is re-signed (another valid
+      # signature, T§3 (c)) must change the cdhashes and fail the check.
+      - name: Control — a re-signed helper is caught
+        run: |
+          copy="$(mktemp -d)/LFCP Bridge.app"
+          ditto "$RUNNER_TEMP/out/LFCP Bridge.app" "$copy"
+          codesign --force --sign - --options runtime "$copy/Contents/MacOS/lfcp-reminders-helper"
+          scripts/release/artifact-manifest.mjs cdhashes "$copy" > "$RUNNER_TEMP/cdhash-control.json"
+          if cmp -s "$RUNNER_TEMP/cdhash-after.json" "$RUNNER_TEMP/cdhash-control.json"; then
+            echo "::error::the cdhash comparison did not see a re-signed helper"; exit 1
+          fi
+          if scripts/release/artifact-manifest.mjs check "$copy" --manifest "$RUNNER_TEMP/dist/artifact-manifest.json" \
+            --public-key "$(cat "$RUNNER_TEMP/dist/artifact-manifest.pub")"; then
+            echo "::error::the manifest check accepted a re-signed helper"; exit 1
+          fi
+          echo "control ok: the re-signed helper is caught"
+
+      - name: DMG (the same app, copied)
+        env:
+          SIGN_IDENTITY: ${{ steps.identity.outputs.sha1 }}
+          SIGN_KEYCHAIN: ${{ runner.temp }}/release.keychain-db
+          SIGN_TIMESTAMP: ${{ env.MODE == 'developer-id' && '1' || '' }}
+        run: |
+          scripts/app/make-dmg.sh "$RUNNER_TEMP/out/LFCP Bridge.app" \
+            "$RUNNER_TEMP/dist/LFCP-Bridge-${{ steps.manifest.outputs.version }}.dmg"
+      - name: Notarize and staple the DMG (developer-id)
+        if: env.MODE == 'developer-id'
+        env:
+          NOTARY_API_KEY_P8_BASE64: ${{ secrets.NOTARY_API_KEY_P8_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: scripts/release/notarize.sh "$RUNNER_TEMP/dist/LFCP-Bridge-${{ steps.manifest.outputs.version }}.dmg"
+      - name: The DMG's app is the manifest's build
+        run: |
+          dist="$RUNNER_TEMP/dist"
+          mnt="$(mktemp -d)"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dist"/*.dmg
+          trap 'hdiutil detach "$mnt"' EXIT
+          codesign --verify --strict --deep "$mnt/LFCP Bridge.app"
+          scripts/release/artifact-manifest.mjs check "$mnt/LFCP Bridge.app" \
+            --manifest "$dist/artifact-manifest.json" --public-key "$(cat "$dist/artifact-manifest.pub")"
+      - name: Hashes
+        working-directory: ${{ runner.temp }}/dist
+        run: shasum -a 256 * | tee SHA256SUMS
+      - uses: actions/upload-artifact@v5
+        with:
+          name: release-${{ env.MODE }}
+          path: ${{ runner.temp }}/dist
+          if-no-files-found: error
+      - name: Remove the keychain and the manifest key
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/release.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/manifest-key.pem"
+
+  draft:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-${{ env.MODE }}
+          path: dist
+      - name: Draft release (never published here)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          MANIFEST_SHA256: ${{ needs.build.outputs.sha256 }}
+        run: |
+          case "$MODE" in
+            dry-run) tag="dry-run-${{ github.run_number }}-${{ github.run_attempt }}" ;;
+            developer-id) tag="candidate-$VERSION-${{ github.run_number }}" ;;
+          esac
+          case "$tag" in v*) echo "::error::refusing a version tag: $tag"; exit 1 ;; esac
+          notes="$(printf '%s\n' \
+            "$MODE build of LFCP Bridge $VERSION from ${{ github.sha }} (run ${{ github.run_id }})." \
+            "" "manifestSha256: \`$MANIFEST_SHA256\`" "" '```' "$(cat dist/SHA256SUMS)" '```')"
+          gh release create "$tag" --repo "${{ github.repository }}" --draft \
+            --target "${{ github.sha }}" --title "$tag" --notes "$notes" dist/*
+          gh release view "$tag" --repo "${{ github.repository }}" --json isDraft,tagName,assets \
+            --jq '{isDraft, tagName, assets: [.assets[].name]}'
