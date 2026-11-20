@@ -167,6 +167,17 @@ ok "host pid $HOST_PID: bundled node + bridge.mjs run --app, child of the shell"
 echo "SMOKE info: host state $(jq -r .host.state "$R") $(jq -r .host.reason "$R")"
 [ -f "$DATA/bridge.sqlite" ] || fail "the host opened no bridge.sqlite in $DATA"
 ok "host opened its database"
+# The write gate (A§9.1, E-051b): asked the shell before the helper's first start; this build is in
+# no trusted manifest, so the decision is preview and kept for status, Check and diagnostics.
+wait_until 30 "the write gate's code check" report_has '.codeChecks >= 1'
+cert_gate() { sqlite3 "$DATA/bridge.sqlite" "SELECT value FROM meta WHERE key = 'cert_gate'" 2>/dev/null; }
+cert_kept() { [ -n "$(cert_gate)" ]; }
+wait_until 30 "the write gate's decision" cert_kept
+CERT="$(cert_gate)"
+echo "SMOKE info: cert_gate $CERT"
+[ "$(echo "$CERT" | jq -r .state)" != certified ] || fail "an uncertified dev build is certified"
+[ "$(echo "$CERT" | jq -r .reason)" != no-identity ] || fail "the shell's code check did not reach the gate"
+ok "write gate: the shell answered codeCheck; preview ($(echo "$CERT" | jq -r '.state + " " + .reason'))"
 
 echo "== 3. control: pause writes STOP, resume removes it"
 [ ! -e "$DATA/STOP" ] || fail "STOP before pause"
@@ -201,7 +212,8 @@ ok "lfcp-bridge status over support.sock: peer uid accepted, exit 0, journaled a
 echo "== 4. lfcp-bridge:// handoff"
 open "lfcp-bridge://connect?c=smoke#k=$SECRET"
 wait_until 20 "the URL reached the host" report_has '.urls.forwarded == 1 and .urls.waiting == 0'
-wait_until 10 "the host's replies" report_has '.replies.ok == 3'
+# pause, resume, openURL, and one codeIdentity per code check of the write gate.
+wait_until 10 "the host's replies" report_has '.replies.ok == 3 + .codeChecks'
 check "no command was refused" '.replies.failed == 0'
 grep -qF "app: openURL received" "$LOGS/host.log" || fail "the host did not log the openURL"
 grep -qF "url: handed to the host" "$LOGS/shell.log" || fail "the shell did not log the handoff"

@@ -49,6 +49,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   var state = ShellState()
   var helloVersion: String?
   var replies = (ok: 0, failed: 0)
+  /// The write gate's code checks answered (codeIdentity sent; the L5 smoke reads it).
+  var codeChecks = 0
   /// Why the app is quitting: the host's shutdown reason.
   var terminateReason: ShutdownReason = .quit
   /// Set when the host has ended at termination (the L5 smoke reads it).
@@ -128,7 +130,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let report = CodeCheck.run(bundle: bundle, paths: paths)
         DispatchQueue.main.async {
           if case .failed(let why) = report { self?.log.info("shell: code check failed: \(why)") }
-          self?.supervisor.send(.codeIdentity(requestId: id, report))
+          if self?.supervisor.send(.codeIdentity(requestId: id, report)) != nil {
+            self?.codeChecks += 1
+          }
         }
       }
     case .reply(let id, let ok, let code):
