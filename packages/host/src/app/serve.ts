@@ -10,8 +10,8 @@
 // |                  | own stop gate), what is in flight finishes, exit 0. Never STOP — update, |
 // |                  | quit and logout continue at the next start (A§6.3)                      |
 // | openURL{url}     | accepted; the handoff itself is E-031. The URL is never logged          |
-// | answer, export,  | not_implemented until E-042, E-045, E-034                               |
-// | remove           |                                                                         |
+// | export{path}     | the diagnostics zip (src/diag/export.ts) at path: absolute, .zip         |
+// | answer, remove   | not_implemented until E-042, E-034                                      |
 //
 // stdin closing (the shell is gone) and SIGTERM/SIGINT are a shutdown too: a host without its
 // shell would be an orphan that nobody can pause.
@@ -22,6 +22,7 @@
 // an effect in flight stays `effecting` for the next start's recovery (§5.7), and the lock's pid
 // is dead, so the next host takes it over.
 
+import { isAbsolute } from "node:path";
 import { resume, stop, stopState } from "../db/stop.js";
 import { EXIT } from "../exit.js";
 import type { RunningProcess } from "../runtime.js";
@@ -74,6 +75,8 @@ export interface AppHostOptions {
   readonly exit?: (code: number) => void;
   /** The support commands (support.sock); without it they are refused. */
   readonly support?: SupportRun;
+  /** Export diagnostics… (A§11): writes the zip at path; without it export is not_implemented. */
+  readonly exportDiagnostics?: (path: string) => void;
 }
 
 /** A safe detail for a failed command: the error's code, never its message (paths, values). */
@@ -304,8 +307,21 @@ export class AppHost {
         this.#o.log("app: openURL received");
         this.#ok(id, { handled: false });
         return;
-      case "answer":
       case "export":
+        if (this.#o.exportDiagnostics === undefined) {
+          this.#fail(id, "not_implemented", c.cmd);
+          return;
+        }
+        if (!isAbsolute(c.path) || !c.path.endsWith(".zip")) {
+          this.#fail(id, "bad_arguments", "path");
+          return;
+        }
+        // Synchronous: the reads see one state of bridge.sqlite. The path is never logged.
+        this.#o.exportDiagnostics(c.path);
+        this.#o.log("app: diagnostics exported");
+        this.#ok(id, { path: c.path });
+        return;
+      case "answer":
       case "remove":
         this.#fail(id, "not_implemented", c.cmd);
         return;
@@ -371,6 +387,7 @@ export async function serveApp(o: {
   readonly signals?: boolean;
   readonly shutdownWaitMs?: number;
   readonly exit?: (code: number) => void;
+  readonly exportDiagnostics?: AppHostOptions["exportDiagnostics"];
   /** support.sock (src/app/support.ts) and its commands. */
   readonly support?: {
     readonly path: string;
@@ -395,6 +412,7 @@ export async function serveApp(o: {
     ...(o.shutdownWaitMs === undefined ? {} : { shutdownWaitMs: o.shutdownWaitMs }),
     ...(o.exit === undefined ? {} : { exit: o.exit }),
     ...(o.support === undefined ? {} : { support: o.support.run }),
+    ...(o.exportDiagnostics === undefined ? {} : { exportDiagnostics: o.exportDiagnostics }),
   });
   // Not fatal: the menu works without it; support sees the log line.
   const server =

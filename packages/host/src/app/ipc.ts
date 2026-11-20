@@ -46,7 +46,7 @@ export type ErrorCode =
   | "unknown_command"
   /** A known cmd with a missing or wrong field. */
   | "bad_arguments"
-  /** Known, not built yet (answer: E-042, export: E-045, remove: E-034). */
+  /** Known, not built yet (answer: E-042, remove: E-034). */
   | "not_implemented"
   /** The host is shutting down: nothing new starts. */
   | "shutting_down"

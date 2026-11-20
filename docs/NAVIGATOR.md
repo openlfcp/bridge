@@ -46,6 +46,7 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 | `src/run/process.ts` | **the run process**: start (Safe Mode, sections, ownership, recovery, write mode, a full pass), one pass at a time per binding (plan → write gate B16/§7.6 → LinkApplier → decisions → intents), triggers (remote nodes, rebuild, LIVE back, the change hint; debounce 400 ms / 3 s; wake; 15 min), delivery, stop | 9b |
 | `src/run/machine.ts` | the process on the machine: installations (the SDK's `openNodeInstallation` with its defaults, `storePairedResources`, a SectionHost on the coordinator of `pairedResources`, an AccessTracker with revocationStatus, the root from `deviceIdentity`), the EventKit transport over the supervised helper (restart → reopen; > 3 in 5 min → helper_unavailable; a second stall on one list within 5 min → helper_stall on that binding only), writesVerified | 9b |
 | `src/app/ipc.ts`, `src/app/serve.ts` | `run --app`: the host under `LFCP Bridge.app`, commands on stdin, events on stdout (`docs/reference/app-ipc-v1.md`) | E-004 |
+| `src/diag/` | Export diagnostics (A§11, E20): structured error codes (`errors.ts`), crash signatures (`crash.ts`), the `diag-schema v1` allow-list, the per-export HMAC and the zip (`export.ts`; `docs/reference/diag-schema-v1.md`) | E-045 |
 | `src/run/cli.ts` | `run` (run.lock, until SIGTERM / SIGINT), `dry-run`, `approve` (a planned dry run ≤ 1 h old, ownership not lost, strict 24 h), `pair` (storage-node pair), `sections` (`pairedResources`; "(not ready)" when the SDK says it is not usable here) | 9b |
 
 ## Adapter (`packages/reminders/src/adapter/`, PR 8)
@@ -102,6 +103,7 @@ SDK's bridge API directly, with no fallbacks of its own: `openNodeInstallation`
 | Document | What |
 |---|---|
 | `docs/reference/app-ipc-v1.md` | the shell ↔ host channel v1: transport, commands, events, restart and shutdown |
+| `docs/reference/diag-schema-v1.md` | Export diagnostics: what the zip holds (`diag-schema v1`), what is sealed by HMAC, what is never read |
 
 ## Guides
 

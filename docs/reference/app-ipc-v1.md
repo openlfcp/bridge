@@ -25,7 +25,7 @@ The host runs them one at a time, in order.
 | `pause` | — | writes STOP (`db/stop.ts`): no effect runs until `resume`. Permanent, survives restarts |
 | `resume` | — | removes STOP; a run process that failed to start is tried again |
 | `answer` | `questionId`, `choice` | `not_implemented` until E-042 |
-| `export` | `path` | `not_implemented` until E-045 |
+| `export` | `path` (absolute, `.zip`) | writes the diagnostics zip (`diag-schema v1`, A§11) there; `result.path`. A relative path or another extension: `bad_arguments`. The path is never logged |
 | `remove` | `bindingId`, `ack?` (bool) | `not_implemented` until E-034 |
 | `shutdown` | `reason`: `update` \| `quit` \| `logout` | at once, also while the run process starts: no new effect or retry starts (not even inside the pass in flight), what is in flight finishes, exit 0. **Never writes STOP**: syncing continues at the next start |
 | `openURL` | `url` (`lfcp-bridge:` only) | acknowledged (`result.handled: false`) until the handoff of E-031 |
