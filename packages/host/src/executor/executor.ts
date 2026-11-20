@@ -37,8 +37,8 @@
 // and writes nothing. With it and no `permit`, it writes to Apple only through
 // the fake transport and to LFCP only through a port marked `offlineTestPort`
 // (tests, the crash suite; review PR 7 #4). The run process (PR 9b) passes
-// `permit`: the write gate of §7.6 / B16 — a verification binding, or
-// writesVerified for this helper build and macOS.
+// `permit`: the write gate of §7.6 / B16 — a verification binding, or the
+// write gate by the manifests (A§9.1, src/artifact/write-gate.ts).
 
 import { randomUUID } from "node:crypto";
 import type {
@@ -104,6 +104,8 @@ export interface Gates {
   accessCheckedNow(installationId: string, resource: ResourceId): boolean;
   offlineCommitAllowed(installationId: string, resource: ResourceId): boolean;
   connected(installationId: string): boolean;
+  /** The write gate by the manifests (A§9.1, E-051); without it, the transport's capability. */
+  writes?(): boolean;
 }
 
 /** What only the adapter knows: the bases of a finalize, the LFCP basis. */
@@ -132,7 +134,7 @@ export interface ExecutorOptions {
   /**
    * Effects. Without `permit`, only the fake transport and an offlineTestPort write (tests,
    * the crash suite). With it (the run process, PR 9b), an effect runs when `permit` says so:
-   * the write gate of §7.6 / B16 — a verification binding, or writesVerified.
+   * the write gate of §7.6 / B16 — a verification binding, or the manifests' gate (A§9.1).
    */
   readonly effects?: {
     readonly enabled: boolean;
@@ -458,7 +460,7 @@ export class Executor {
       accessCheckedNow: g.accessCheckedNow(b.installation_id, R),
       offlineCommitAllowed: g.offlineCommitAllowed(b.installation_id, R),
       connected: g.connected(b.installation_id),
-      writesVerified: t.capabilities.writesVerified,
+      writesVerified: g.writes?.() ?? t.capabilities.writesVerified,
     };
   }
 

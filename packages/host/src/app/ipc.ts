@@ -7,12 +7,17 @@
 //   shell → host   {"v":1,"id":"7","cmd":"pause"}
 //                  pause · resume · answer{questionId,choice} · export{path} · remove{bindingId,ack?}
 //                  shutdown{reason} · openURL{url}
+//                  codeIdentity{requestId, …}: the answer to codeCheck (A§9.1 (3)–(5), E-051b)
 //   host → shell   {"v":1,"type":"hello","version":"0.5.0","pid":123}          once, first
 //                  {"v":1,"type":"status","state":"running",…}
 //                  {"v":1,"type":"question",…} · {"v":1,"type":"needsAttention",…}
 //                  {"v":1,"type":"reply","id":"7","ok":true}  /  "ok":false,"error":{"code":…}
+//                  {"v":1,"type":"codeCheck","id":"c1","paths":[…]}: the write gate asks the shell
 //
 // This file is pure: parsing and encoding only. src/app/serve.ts runs it.
+
+import type { CodeIdentity } from "../artifact/gate.js";
+import { ARCHS, type Arch } from "../artifact/manifest.js";
 
 export const IPC_VERSION = 1;
 
@@ -29,7 +34,13 @@ export type Command =
   | { readonly cmd: "export"; readonly path: string }
   | { readonly cmd: "remove"; readonly bindingId: string; readonly ack: boolean }
   | { readonly cmd: "shutdown"; readonly reason: ShutdownReason }
-  | { readonly cmd: "openURL"; readonly url: string };
+  | { readonly cmd: "openURL"; readonly url: string }
+  | {
+      readonly cmd: "codeIdentity";
+      readonly requestId: string;
+      /** What the shell's Security.framework says, or why it could not say. */
+      readonly identity: CodeIdentity | { readonly error: string };
+    };
 
 export type CommandName = Command["cmd"];
 
@@ -94,6 +105,16 @@ export type Event =
       readonly code: string | null;
     }
   | {
+      /**
+       * The write gate (A§9.1 (3)–(5)): the shell answers with codeIdentity{requestId: id} —
+       * SecStaticCodeCheckValidity of its bundle, its own cdhash and the cdhash of every one of
+       * `paths` (bundle-relative Mach-O files) for its arch.
+       */
+      readonly type: "codeCheck";
+      readonly id: string;
+      readonly paths: readonly string[];
+    }
+  | {
       readonly type: "reply";
       /** null: the line could not be read far enough to know its id. */
       readonly id: string | null;
@@ -120,6 +141,30 @@ const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 
 const nonEmpty = (v: unknown): v is string => typeof v === "string" && v !== "";
+
+const HEX40 = /^[0-9a-f]{40}$/;
+
+/** codeIdentity's fields; a string is what is wrong. */
+function codeIdentity(v: Record<string, unknown>): CodeIdentity | { error: string } | string {
+  if (v.error !== undefined) return nonEmpty(v.error) ? { error: v.error } : "error";
+  if (!ARCHS.includes(v.arch as Arch)) return "arch";
+  if (typeof v.valid !== "boolean") return "valid";
+  if (v.detail !== undefined && typeof v.detail !== "string") return "detail";
+  if (typeof v.shell !== "string" || !HEX40.test(v.shell)) return "shell";
+  if (!Array.isArray(v.nested)) return "nested";
+  const nested = [];
+  for (const n of v.nested as unknown[]) {
+    if (!isObject(n) || !nonEmpty(n.path) || typeof n.cdhash !== "string" || !HEX40.test(n.cdhash))
+      return "nested";
+    nested.push({ path: n.path, cdhash: n.cdhash });
+  }
+  return {
+    arch: v.arch as Arch,
+    validity: v.valid ? { ok: true } : { ok: false, detail: (v.detail as string) || "invalid" },
+    runningShell: v.shell,
+    nested,
+  };
+}
 
 /**
  * Reads one command line. The detail of an error never repeats the line or a field's value: an
@@ -162,6 +207,12 @@ export function parseCommand(line: string): Parsed {
     case "openURL":
       if (!nonEmpty(v.url) || !v.url.startsWith("lfcp-bridge:")) return bad("url: lfcp-bridge:");
       return done({ cmd: "openURL", url: v.url });
+    case "codeIdentity": {
+      if (!nonEmpty(v.requestId)) return bad("requestId");
+      const identity = codeIdentity(v);
+      if (typeof identity === "string") return bad(identity);
+      return done({ cmd: "codeIdentity", requestId: v.requestId, identity });
+    }
     default:
       return { ok: false, id, code: "unknown_command", detail: "unknown cmd" };
   }

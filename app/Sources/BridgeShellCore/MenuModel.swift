@@ -39,7 +39,7 @@ public struct ShellState: Equatable {
       var open = questions[b] ?? []
       if resolved { open.remove(q) } else { open.insert(q) }
       questions[b] = open.isEmpty ? nil : open
-    case .hello, .reply, .unknown:
+    case .hello, .reply, .codeCheck, .unknown:
       break
     }
   }

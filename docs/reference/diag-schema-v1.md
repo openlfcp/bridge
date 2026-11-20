@@ -12,8 +12,9 @@ the menu's **Export diagnostics…** through the app channel's `export{path}`
 |---|---|
 | `schema`, `version` | `"diag-schema"`, `1` |
 | `createdAt` | the time of the export |
-| `versions` | bridge, Node, OS, arch, the verified helper and macOS, the database's schema version |
-| `artifactSliceId`, `certTestMode` | A§9.1 and A§9.4; `null` and `false` until E-051 and E-050 |
+| `versions` | bridge, Node, OS, arch, macOS as the write gate saw it, the database's schema version; `helper` is `null` (nested code of the app, checked by cdhash) |
+| `artifactSliceId`, `cert` | A§9.1, the write gate's last decision: the running shell's cdhash; `{state, reason, at}` (`cert.state` and its reason code), `null` before the first check. Its text is not exported |
+| `certTestMode` | A§9.4; `false` until E-050 |
 | `stop`, `safeMode` | STOP present; Safe Mode's start |
 | `paths.home` | the data directory (sealed) |
 | `counters` | bindings, links and intents by state; holds by reason; journal entries by level |

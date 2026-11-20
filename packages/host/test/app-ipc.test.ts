@@ -115,6 +115,100 @@ describe("parseCommand", () => {
   });
 });
 
+describe("codeIdentity: the shell's answer to codeCheck (A§9.1 (3)–(5), E-051b)", () => {
+  const SHELL = "0c".repeat(20);
+  const HELPER = { path: "Contents/MacOS/lfcp-reminders-helper", cdhash: "30".repeat(20) };
+  const answer = { id: "s1", cmd: "codeIdentity", requestId: "c1", arch: "arm64", shell: SHELL };
+
+  it("reads a pass, a failed signature check, and the shell's own error", () => {
+    expect(parseCommand(line({ ...answer, valid: true, nested: [HELPER] }))).toEqual({
+      ok: true,
+      envelope: {
+        id: "s1",
+        command: {
+          cmd: "codeIdentity",
+          requestId: "c1",
+          identity: {
+            arch: "arm64",
+            validity: { ok: true },
+            runningShell: SHELL,
+            nested: [HELPER],
+          },
+        },
+      },
+    });
+    const invalid = parseCommand(
+      line({ ...answer, valid: false, detail: "a sealed resource is missing", nested: [] }),
+    );
+    expect(invalid.ok && invalid.envelope.command).toMatchObject({
+      identity: { validity: { ok: false, detail: "a sealed resource is missing" } },
+    });
+    const error = parseCommand(
+      line({ id: "s2", cmd: "codeIdentity", requestId: "c2", error: "x" }),
+    );
+    expect(error.ok && error.envelope.command).toMatchObject({ identity: { error: "x" } });
+  });
+
+  it("refuses a wrong arch, cdhash or nested entry, or no requestId", () => {
+    for (const [bad, field] of [
+      [{ ...answer, arch: "arm64e", valid: true, nested: [] }, "arch"],
+      [{ ...answer, shell: "XY", valid: true, nested: [] }, "shell"],
+      [{ ...answer, valid: "yes", nested: [] }, "valid"],
+      [{ ...answer, valid: true, nested: [{ path: "a", cdhash: "1" }] }, "nested"],
+      [{ ...answer, requestId: "", valid: true, nested: [] }, "requestId"],
+    ] as const)
+      expect(parseCommand(line(bad))).toMatchObject({
+        ok: false,
+        code: "bad_arguments",
+        detail: field,
+      });
+  });
+
+  it("the start waits for the shell's answer, outside the queue; no answer → an error", async () => {
+    const events: (Event & { v: number })[] = [];
+    let identity: unknown;
+    const host = new AppHost({
+      home,
+      version: "0.6.0-test",
+      pid: 1,
+      codeCheckWaitMs: 50,
+      start: async (_down, shell) => {
+        identity = await shell.identity([HELPER.path]);
+        await shell.identity([]).catch((e: Error) => {
+          identity = [identity, e.message];
+        });
+        return { stop: async () => {} };
+      },
+      sections: () => [],
+      write: (l) => {
+        const e = JSON.parse(l);
+        events.push(e);
+        // The shell answers the first check only.
+        if (e.type === "codeCheck" && e.id === "c1")
+          setImmediate(() =>
+            host.input(
+              `${line({ id: "s1", cmd: "codeIdentity", requestId: e.id, arch: "arm64", valid: true, shell: SHELL, nested: [HELPER] })}\n`,
+            ),
+          );
+      },
+      log: () => {},
+    });
+    await host.begin();
+    expect(events.filter((e) => e.type === "codeCheck")).toEqual([
+      { v: 1, type: "codeCheck", id: "c1", paths: [HELPER.path] },
+      { v: 1, type: "codeCheck", id: "c2", paths: [] },
+    ]);
+    expect(identity).toEqual([
+      { arch: "arm64", validity: { ok: true }, runningShell: SHELL, nested: [HELPER] },
+      "the shell did not answer the code check",
+    ]);
+    expect(events.filter((e) => e.type === "status").map((e) => e.state)).toEqual([
+      "starting",
+      "running",
+    ]);
+  });
+});
+
 describe("encodeEvent and LineSplitter", () => {
   it("puts v:1 on every event", () => {
     expect(JSON.parse(encodeEvent({ type: "hello", version: "0.6.0", pid: 1 }))).toEqual({

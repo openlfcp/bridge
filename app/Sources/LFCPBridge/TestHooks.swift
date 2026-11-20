@@ -76,6 +76,7 @@
           "reason": d.state.hostReason ?? "",
         ] as [String: Any],
         "replies": ["ok": d.replies.ok, "failed": d.replies.failed] as [String: Int],
+        "codeChecks": d.codeChecks,
         "urls": ["forwarded": d.handoff.forwarded, "waiting": d.handoff.waiting] as [String: Int],
         "loginItem": d.loginItemState().rawValue,
       ]

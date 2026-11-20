@@ -11,7 +11,8 @@
 //   restarts within 5 min → hold helper_unavailable on every binding until a person resumes;
 //   a stall on one binding's list restarts the helper outside that budget, and a second one
 //   within 5 min holds only that binding (helper_stall, the hang analysis G1);
-// - writesVerified for this helper build and macOS (sw_vers), §7.6.
+// - the write gate by the manifests (A§9.1, src/artifact/write-gate.ts): checked before the
+//   first start of the helper (before writes are turned on) and before every restart of it.
 //
 // `installationPorts` is the testable part (a live server in run.live.test.ts); the rest needs
 // the helper app and is the owner's verification run (docs/devel/testing/verification-run.md).
@@ -33,6 +34,10 @@ import {
 import { fromHex, type ResourceId, resourceId } from "@openlfcp/core";
 import { principalRef } from "@openlfcp/shared-objects";
 import { openNodeInstallation } from "@openlfcp/storage-node";
+import type { ShellCode } from "../app/serve.js";
+import { ManifestCache } from "../artifact/cache.js";
+import { TRUSTED_MANIFEST_KEYS } from "../artifact/keys.js";
+import { refreshGate, WriteGate } from "../artifact/write-gate.js";
 import { LIST_PREFIX, VERIFY_PREFIX } from "../bootstrap.js";
 import type { BridgeConfig, BridgePaths } from "../config.js";
 import type { BridgeDatabase } from "../db/database.js";
@@ -45,7 +50,6 @@ import { AccessTracker, metaAccessStore } from "../lfcp/access.js";
 import { SectionHost, type SectionHostOptions } from "../lfcp/section-host.js";
 import { DatabaseKV, type RunningProcess } from "../runtime.js";
 import { HelperSupervisor } from "../supervisor.js";
-import { type HelperIdentity, writesVerified } from "../verification.js";
 import { BridgeProcess, type InstallationPorts } from "./process.js";
 
 /** The ports of every active installation; close() closes their storage. */
@@ -105,7 +109,7 @@ export async function installationPorts(
   };
 }
 
-/** macOS's version (sw_vers), for writesVerified (§7.6); "" elsewhere. */
+/** macOS's version (sw_vers), for the write gate (A§9.3); "" elsewhere. */
 export function macOSVersion(): string {
   try {
     return execFileSync("sw_vers", ["-productVersion"], { encoding: "utf8" }).trim();
@@ -114,22 +118,18 @@ export function macOSVersion(): string {
   }
 }
 
-/** The run process of this machine, started; stop() stops it all. */
 /**
- * The EventKit transport for this helper build and macOS (review PR 9b #29): its capability
- * writesVerified — what the executor's permissions read for a normal binding — is the config's
- * verification record for exactly this helper and macOS (§7.6). The transport is made once the
- * helper answered, when its version is known.
+ * The EventKit transport over the supervised helper: its capability writesVerified is the write
+ * gate's decision when it is made (the executor reads the gate itself, through Gates.writes).
  */
 export function eventKitTransportFor(
-  config: BridgeConfig,
-  helper: HelperIdentity,
+  writes: boolean,
   o: { readonly appPath: string; readonly link: () => Promise<HelperLink> },
 ): EventKitTransport {
   return new EventKitTransport({
     appPath: o.appPath,
     writes: "off",
-    writesVerified: writesVerified(config, helper),
+    writesVerified: writes,
     link: o.link,
   });
 }
@@ -253,7 +253,9 @@ export async function machineProcess(o: {
   readonly appBundle?: string;
   /** The app's host is shutting down: no effect starts, also during the start (BridgeProcess). */
   readonly shuttingDown?: () => boolean;
-}): Promise<RunningProcess & { readonly process: BridgeProcess }> {
+  /** The shell of LFCP Bridge.app (its code checks, A§9.1 (3)–(5)) and this build's version. */
+  readonly app?: { readonly shell: ShellCode; readonly version: string };
+}): Promise<RunningProcess & { readonly process: BridgeProcess; readonly gate: WriteGate }> {
   const { db, config, paths } = o;
   const journal = new Journal(db);
   const holds = new Holds(db);
@@ -273,8 +275,17 @@ export async function machineProcess(o: {
     scope: { listTitlePrefixes: [LIST_PREFIX, VERIFY_PREFIX], listIds: lists as never[] },
   };
   const macOS = macOSVersion();
-  // The helper of the moment: a restart may bring another build (writesVerified follows it).
-  let helper: HelperIdentity = { helperVersion: "", macOS };
+  // Checked before every start of the helper: a restart may find other code on disk (A§9.1).
+  const gate = new WriteGate({
+    db,
+    cache: new ManifestCache(db, TRUSTED_MANIFEST_KEYS),
+    journal,
+    ...(o.app === undefined ? {} : { shell: o.app.shell }),
+    ...(o.appBundle === undefined ? {} : { appBundle: o.appBundle }),
+    version: o.app?.version ?? "",
+    macOS,
+  });
+  let helperStarts = 0;
   // LFCP_BRIDGE_FAULT (verification run, step 22): one shot for the whole run.
   const fault =
     o.fault === undefined
@@ -285,6 +296,7 @@ export async function machineProcess(o: {
   const supervisor = new HelperSupervisor({
     pidFile: paths.helperPid,
     start: async () => {
+      await gate.check(helperStarts++ === 0 ? "start" : "helper");
       // onUnmatched (transport-eventkit #18 on main): a helper line that answers nothing goes to
       // the journal. Passed as a variable: on a base without the option it is simply unused.
       const options = {
@@ -297,7 +309,6 @@ export async function machineProcess(o: {
       // The transport's link: with the verification run's fault, its next verification write
       // loses its answer (src/fault.ts). The supervisor pings and closes the helper itself.
       current = fault === undefined ? link : loseNextWriteAnswer(link, fault);
-      helper = { helperVersion: link.ready.helperVersion, macOS };
       const supervised = {
         pid: link.ready.pid,
         ping: async () => {
@@ -350,14 +361,16 @@ export async function machineProcess(o: {
     after: async () => process?.passAll(),
     journal,
   });
+  let stopRefresh: (() => void) | undefined;
   const release = async () => {
+    stopRefresh?.();
     await transport?.close().catch(() => {});
     await supervisor.stop().catch(() => {});
     opened?.close();
   };
   try {
     await supervisor.start();
-    transport = eventKitTransportFor(config, helper, {
+    transport = eventKitTransportFor(gate.decision.writes, {
       appPath,
       link: async () => {
         if (current === undefined) throw new Error("the helper is not running");
@@ -371,8 +384,8 @@ export async function machineProcess(o: {
       transport,
       installations: opened.ports,
       instanceId: config.bridgeInstanceId,
-      // The helper of the moment: another build after a restart is not verified by the old record.
-      writesVerified: () => writesVerified(config, helper),
+      // The gate's last decision: checked again before every start of the helper.
+      writesVerified: () => gate.decision.writes,
       stopped: () => stopState(paths.home) !== undefined,
       ...(o.shuttingDown === undefined ? {} : { shuttingDown: o.shuttingDown }),
       // resume --accept helper_unavailable: the supervisor gets a fresh budget (review PR 9b #28).
@@ -384,6 +397,13 @@ export async function machineProcess(o: {
     });
     process = started;
     await started.start();
+    // A§9.2: a withdrawal published while the helper keeps running turns writes off too.
+    stopRefresh = refreshGate({
+      gate,
+      changed: () => started.writesChanged(),
+      onError: (e) =>
+        journal.append("error", "cert.refresh_failed", { params: { code: errorCode(e) } }),
+    });
   } catch (e) {
     await process?.stop("failed to start").catch(() => {});
     await release();
@@ -392,6 +412,7 @@ export async function machineProcess(o: {
   const running = process;
   return {
     process: running,
+    gate,
     transport: running.transport,
     exclusive: (fn) => running.exclusive(fn),
     connected: () => running.connected(),

@@ -3,6 +3,7 @@
 
 import { existsSync } from "node:fs";
 import type { RemindersTransport } from "@openlfcp/bridge-reminders/transport";
+import { keptGate } from "./artifact/write-gate.js";
 import type { BridgeDatabase } from "./db/database.js";
 import { SCHEMA_VERSION, schemaVersion } from "./db/database.js";
 import { stopState } from "./db/stop.js";
@@ -60,6 +61,18 @@ export async function doctor(d: DoctorDeps): Promise<readonly Check[]> {
     stopState(d.home) === undefined
       ? "no STOP"
       : "STOP is set: no effect runs until `lfcp-bridge resume`",
+  );
+
+  // The write gate by the manifests (A§9.1): its last decision, with the reason (U П4 Check).
+  const cert = keptGate(d.db);
+  add(
+    "writes",
+    cert?.state === "certified" ? "ok" : "warn",
+    cert === undefined
+      ? "the write gate has not been checked yet: normal bindings only preview"
+      : cert.state === "certified"
+        ? `cert.state certified: ${cert.detail}`
+        : `cert.state ${cert.state} (${cert.reason}): ${cert.detail}; normal bindings only preview`,
   );
 
   const installations = d.db.prepare("SELECT id, dir, status FROM installations").all() as {

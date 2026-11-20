@@ -50,3 +50,21 @@ the artifact manifest; one record per `(manifestSha256, artifactSliceId, arch, m
 `status: certified|withdrawn`. The bridge keeps only a greater `seq` (`artifact/cache.ts`), and a
 certified `x.y` covers `x.(<y)` of the same major down to 15.0 unless that minor has its own record
 (E14b). The write gate (`artifact/gate.ts`, A§9.1) reads both manifests.
+
+## Where the app gets them (E-051b)
+
+`artifact/write-gate.ts`, before the first start of the helper and before every restart:
+
+- the artifact manifest of its own version from the GitHub Release `v<version>`
+  (`releases/download/v<version>/artifact-manifest.json`), when no kept copy is of that version;
+  the two most recent copies are kept (around an update). The appcast's copy comes with E-056;
+- the public certification manifest from `releases/latest/download/certification-manifest.json`
+  at most every 6 hours, so the certify workflow (E-055) and the publication (E-063) attach it to
+  the latest release, replacing the asset with every `seq + 1`;
+- offline the kept copies decide; with no copy the gate says `unavailable` (preview).
+
+Both are verified against `TRUSTED_MANIFEST_KEYS` (`artifact/keys.ts`, built into `bridge.mjs`,
+so under the shell's resource seal). It is empty until the owner adds the public key of
+`ARTIFACT_MANIFEST_ED25519_KEY`: until then no manifest verifies and normal bindings stay preview.
+Checks (3)–(5) are the shell's (`app/Sources/BridgeShellCore/CodeCheck.swift`, IPC `codeCheck` /
+`codeIdentity`, `docs/reference/app-ipc-v1.md`).

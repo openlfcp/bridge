@@ -138,20 +138,22 @@ in a terminal instead, use `lfcp-bridge run`; Ctrl-C (or SIGTERM) stops it clean
 
    `approve` needs a dry run of that binding less than an hour old, and ownership not lost. The
    binding then runs with strict limits for 24 hours.
-4. **Verify writes once per helper version and macOS.** Until then normal bindings only dry-run
-   (`writesVerified: no` in `status`).
+4. **Writes follow the certification of the build.** Normal bindings write only when the write
+   gate (A§9.1) finds this build of LFCP Bridge.app certified for this macOS (`cert.state:
+   certified` in `status`); otherwise they only dry-run (preview). A terminal `lfcp-bridge run`
+   outside the app has no shell to check its code: preview. A verification binding still writes
+   to its own list:
 
    ```sh
    lfcp-bridge verify --section "Bridge test"   # a test section and its own list "LFCP Verify · …"
    ```
 
-   The verification run writes only to that list and that section, with the `run` process. The
-   owner's walk-through is `docs/devel/testing/verification-run.md` (PR 9b).
+   The owner's walk-through is `docs/devel/testing/verification-run.md` (PR 9b).
 
 ## Day to day: status, log, doctor
 
 ```sh
-lfcp-bridge status                            # STOP, writesVerified, bindings with their state and holds
+lfcp-bridge status                            # STOP, cert.state, bindings with their state and holds
 lfcp-bridge log [--binding <id>] [--limit N]  # the last N journal entries, oldest first (default 50)
 lfcp-bridge doctor                            # what blocks, and what to do
 ```
@@ -176,8 +178,7 @@ lfcp-bridge doctor                            # what blocks, and what to do
    ```
 
 4. If the helper changed (`helper/` in the diff), rebuild and sign it, then copy it to
-   `~/Applications`. A new helper version resets `writesVerified`: verify again before normal
-   bindings write.
+   `~/Applications`.
 5. Start again:
 
    ```sh
