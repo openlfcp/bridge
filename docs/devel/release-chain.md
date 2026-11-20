@@ -68,3 +68,26 @@ so under the shell's resource seal). It is empty until the owner adds the public
 `ARTIFACT_MANIFEST_ED25519_KEY`: until then no manifest verifies and normal bindings stay preview.
 Checks (3)–(5) are the shell's (`app/Sources/BridgeShellCore/CodeCheck.swift`, IPC `codeCheck` /
 `codeIdentity`, `docs/reference/app-ipc-v1.md`).
+
+## L5 artifact identity (E-051c)
+
+The job `l5-identity` of `release.yml` (dry run only, `macos-15`) runs
+`scripts/release/l5-identity.sh`: T§3 "artifact identity" on a real app in `/Applications`.
+
+- **Its own build.** `package-app.sh` with the Dev certificate; before it,
+  `l5-identity.mjs trust-key` writes this run's ephemeral manifest key into `artifact/keys.ts` of
+  the job's checkout. Only this build trusts it: the `build` job, the DMG and the draft release
+  never do, and the job uploads only the logs.
+- **The manifests reach the gate through its cache**, as a download would: after a first start
+  (which creates `bridge.sqlite`; nothing kept → `unavailable`, `no-artifact-manifest`),
+  `l5-identity.mjs seed` offers `artifact-manifest.json` and a certification manifest
+  (`l5-identity.mjs certify`, `seq` 1, certified on the runner's macOS for both slices) to
+  `ManifestCache`. The product has no other way in: no environment variable, no test path.
+- **Checks**, read from `meta.cert_gate` (and `lfcp-bridge status` for the first):
+  clean → `certified`; the helper replaced by the same program signed again with the same DR
+  (another page size, another cdhash) → `mismatch`/`nested-cdhash` before the helper's restart
+  (the helper is killed, the supervisor starts it again, the journal says `when: helper`) and after
+  an "update" (the app started again with that bundle); one byte appended to `bridge.mjs` without a
+  new signature → `code-invalid`; the same change with the bundle signed again → `shell-cdhash`
+  with the new `artifactSliceId`; clean again → `certified`.
+- The app is stopped with SIGTERM to the shell (its host sees stdin close; never STOP).
