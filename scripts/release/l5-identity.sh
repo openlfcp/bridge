@@ -42,7 +42,7 @@ last_when() {
 fail() {
   echo "L5 FAIL: $*"
   echo "cert_gate: $(gate)"
-  [ -f "$DB" ] && sqlite3 "$DB" "SELECT at, params_json FROM journal WHERE key = 'cert.state'" || true
+  [ -f "$DB" ] && sqlite3 "$DB" "SELECT ts, params_json FROM journal WHERE key = 'cert.state'" || true
   for f in shell.log host.log; do [ -f "$LOGS/$f" ] && { echo "--- $f"; tail -n 40 "$LOGS/$f"; }; done
   exit 1
 }
