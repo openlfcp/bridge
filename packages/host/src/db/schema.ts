@@ -13,6 +13,7 @@
 // Version 6: durable acceptances of anomaly snapshots (A§7.1, E18).
 // Version 7: authorizations of exact inverse sets, a person's decisions, ignored imports (A§7.1–7.2).
 // Version 8: the items of a decision, each finished on its own (A§7.2 "writes finished").
+// Version 9: the cache of the artifact and certification manifests (A§9.1–9.2, E-051).
 //
 // Beyond §3: STRICT tables, NOT NULL where a row has no meaning without the
 // value, and foreign keys to installations and bindings (PRAGMA
@@ -449,8 +450,32 @@ const V8: Migration = {
   down: ["DROP TABLE decision_items"],
 };
 
+// Version 9 (A§9.1–9.2, E-051): the write gate's copies of the signed manifests, as downloaded.
+// artifact_manifest: artifact-manifest.json of a build, by its manifestSha256 (the one running
+// and, around an update, the next). certification_manifest: the one public certification manifest
+// with the greatest `seq` seen — a smaller one is never taken (A§9.2). The text is kept as signed;
+// a reader verifies it again. Down drops both: the next start downloads them again.
+const V9: Migration = {
+  version: 9,
+  name: "manifest cache",
+  up: [
+    `CREATE TABLE artifact_manifest (
+      manifest_sha256 TEXT PRIMARY KEY,
+      text TEXT NOT NULL,
+      stored_at TEXT NOT NULL
+    ) STRICT, WITHOUT ROWID`,
+    `CREATE TABLE certification_manifest (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      seq INTEGER NOT NULL CHECK (seq >= 0),
+      text TEXT NOT NULL,
+      stored_at TEXT NOT NULL
+    ) STRICT`,
+  ],
+  down: ["DROP TABLE certification_manifest", "DROP TABLE artifact_manifest"],
+};
+
 /** Every migration, in order. */
-export const MIGRATIONS: readonly Migration[] = Object.freeze([V1, V2, V3, V4, V5, V6, V7, V8]);
+export const MIGRATIONS: readonly Migration[] = Object.freeze([V1, V2, V3, V4, V5, V6, V7, V8, V9]);
 
 /** The schema version this build writes. */
 export const SCHEMA_VERSION = MIGRATIONS.length;
