@@ -84,7 +84,7 @@ export interface BridgeProcessOptions {
   readonly installations: readonly InstallationPorts[];
   /** This bridge's instance id (config.json): its ownership markers (§6.5). */
   readonly instanceId: string;
-  /** writesVerified holds for this helper build and macOS (§7.6). */
+  /** The write gate by the manifests (A§9.1, E-051): normal bindings write only when true. */
   readonly writesVerified: () => boolean;
   /** STOP is set (§7.3). */
   readonly stopped: () => boolean;
@@ -205,6 +205,7 @@ export class BridgeProcess {
       accessCheckedNow: (i, R) => inst(i)?.access.accessCheckedNow(R) ?? false,
       offlineCommitAllowed: (i, R) => inst(i)?.access.offlineCommitAllowed(R) ?? false,
       connected: (i) => inst(i)?.host.connected ?? false,
+      writes: () => options.writesVerified(),
     };
     this.#executor = new Executor({
       db: options.db,

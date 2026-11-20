@@ -27,6 +27,7 @@ import {
 import { arch, platform, release } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { crc32 } from "node:zlib";
+import { keptGate } from "../artifact/write-gate.js";
 import type { BridgeConfig } from "../config.js";
 import type { BridgeDatabase } from "../db/database.js";
 import { JOURNAL_TEXT } from "../db/journal.js";
@@ -62,8 +63,7 @@ export interface DiagnosticsSource {
   readonly reports?: string;
   /** The bindings that need attention, with their A§7.3 codes (E-043). */
   readonly needsAttention?: () => readonly { readonly bindingId: string; readonly code: string }[];
-  /** A§9.1 (E-051) and A§9.4 (E-050); null and false until those come. */
-  readonly artifactSliceId?: () => string | null;
+  /** A§9.4 (E-050); false until it comes. */
   readonly certTestMode?: () => boolean;
   readonly now?: () => number;
 }
@@ -95,6 +95,7 @@ export function collect(s: DiagnosticsSource, h: Sealer): Row {
   const time = (v: unknown) => leaf(v, (x) => TIME.test(x));
   const version = (v: unknown) => leaf(v, (x) => VERSION.test(x));
   const text = (v: unknown) => leaf(v, () => false);
+  const hex = (v: unknown) => leaf(v, (x) => /^[0-9a-f]{40}$/.test(x));
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
   const counts = (sql: string) => {
     const out: Record<string, number> = {};
@@ -171,7 +172,8 @@ export function collect(s: DiagnosticsSource, h: Sealer): Row {
         ids: { bindingId: id(e.binding_id), taskId: id(e.task_id), intent: id(p?.intent) },
       };
     });
-  const wv = s.config.writesVerified;
+  // The write gate's last decision (A§9.1, E-051): its cert.state, slice and macOS.
+  const cert = keptGate(db);
   return {
     schema: DIAG_SCHEMA,
     version: DIAG_SCHEMA_VERSION,
@@ -181,11 +183,16 @@ export function collect(s: DiagnosticsSource, h: Sealer): Row {
       node: version(process.versions.node),
       os: version(`${platform()}-${release()}`),
       arch: version(arch()),
-      helper: version(wv?.helperVersion),
-      macOS: version(wv?.macOS),
+      // The helper is nested code of the app: its identity is its cdhash, checked by the gate.
+      helper: null,
+      macOS: version(cert?.macOS),
       database: num(db.pragma("user_version", { simple: true })),
     },
-    artifactSliceId: id(s.artifactSliceId?.()),
+    artifactSliceId: hex(cert?.artifactSliceId),
+    cert:
+      cert === undefined
+        ? null
+        : { state: code(cert.state), reason: code(cert.reason), at: time(cert.at) },
     certTestMode: s.certTestMode?.() === true,
     stop: stopState(s.home) !== undefined,
     safeMode: safeMode === undefined ? null : { since: time(safeMode.since) },

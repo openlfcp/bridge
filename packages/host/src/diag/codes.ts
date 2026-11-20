@@ -225,6 +225,18 @@ const WORDS = [
   "create_task",
   "update_task",
   "lfcp_commit",
+  // the write gate (A§9.1, E-051): cert.state and its reasons
+  "certified",
+  "mismatch",
+  "withdrawn",
+  "uncertified",
+  "unavailable",
+  "no-identity",
+  "no-artifact-manifest",
+  "code-invalid",
+  "shell-cdhash",
+  "nested-cdhash",
+  "no-certification-manifest",
 ];
 
 /** Codes, reasons and enumerated values: errno names too (a fixed vocabulary of the system). */

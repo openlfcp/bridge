@@ -2,7 +2,7 @@
 // each (§11). Until then a command answers "not available in this build"
 // (exit 2), and `status` lists it the same way.
 
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { retire05 } from "./app/legacy.js";
@@ -14,8 +14,9 @@ import {
   shellExecutable,
   shellPeerUid,
 } from "./app/support.js";
+import { keptGate } from "./artifact/write-gate.js";
 import { type BindOutcome, Bootstrap } from "./bootstrap.js";
-import { bridgePaths, loadConfig, saveConfig } from "./config.js";
+import { bridgePaths } from "./config.js";
 import { HOLD_REASONS, type HoldReason } from "./db/holds.js";
 import { Journal } from "./db/journal.js";
 import { resume, stop, stopState } from "./db/stop.js";
@@ -60,7 +61,6 @@ import {
 } from "./run/cli.js";
 import { bumpControl } from "./run/process.js";
 import { machineRuntime, type RunningProcess, type Runtime } from "./runtime.js";
-import { decideRecord, parseVerificationReport } from "./verification.js";
 
 export interface CommandInfo {
   readonly name: string;
@@ -108,7 +108,7 @@ export const COMMANDS: readonly CommandInfo[] = Object.freeze([
   { name: "refused", summary: "refused intents", pr: "7" },
   {
     name: "verify",
-    summary: "the verification run of the owner; --record <report.json> sets writesVerified",
+    summary: "a verification binding (--section): its own list, writes as in 0.5 (A§9.4)",
     pr: "9",
     ready: true,
   },
@@ -364,7 +364,7 @@ async function serveAppCommand(
     version: VERSION,
     // Taken by appMain before the runtime opened bridge.sqlite; released there after it is closed.
     lock: () => () => {},
-    start: startProcess,
+    start: (shuttingDown, shell) => startProcess(shuttingDown, { shell, version: VERSION }),
     sections: () =>
       (
         rt.db
@@ -499,51 +499,6 @@ function bindResult(r: BindOutcome, env: CliEnvironment): ExitCode {
   }
 }
 
-/**
- * `verify --record <report.json>` (§7.6): a green verification report sets writesVerified for the
- * helper that runs here and this macOS. Refused, config unchanged: a red or empty report, no
- * verification binding, no helper, or a report made with another helper or macOS.
- */
-async function recordCommand(
-  rt: Runtime,
-  file: string | true | undefined,
-  env: CliEnvironment,
-): Promise<ExitCode> {
-  if (typeof file !== "string") return usage(env, "lfcp-bridge verify --record <report.json>");
-  let text: string;
-  try {
-    text = readFileSync(file, "utf8");
-  } catch (e) {
-    env.err(`cannot read ${file}: ${(e as Error).message}`);
-    return EXIT.NOT_FOUND;
-  }
-  const report = parseVerificationReport(text);
-  if (typeof report === "string") {
-    env.err(`${file}: ${report} (docs/devel/testing/verification-report.template.json)`);
-    return EXIT.USAGE;
-  }
-  const binding = rt.db
-    .prepare("SELECT 1 FROM bindings WHERE verification = 1 AND state <> 'removed' LIMIT 1")
-    .get();
-  const decision = decideRecord(loadConfig(rt.paths.config), report, {
-    running: await rt.helperIdentity?.(),
-    verificationBinding: binding !== undefined,
-  });
-  if (decision.kind === "refused") {
-    env.err(
-      `verify --record refused (${decision.reason}): ${decision.detail}; writesVerified unchanged`,
-    );
-    return EXIT.NEEDS_PERSON;
-  }
-  saveConfig(rt.paths.config, decision.config);
-  const r = decision.record;
-  env.out(`writesVerified: helper ${r.helperVersion} on macOS ${r.macOS}, recorded ${r.at}`);
-  env.out(
-    "normal bindings may now write with this helper on this macOS; another helper build or macOS resets it",
-  );
-  return EXIT.OK;
-}
-
 const QUARANTINE_USAGE = `lfcp-bridge quarantine [list] [--binding <binding>]
        lfcp-bridge quarantine accept <intent>     the write happened: take Reminders as it is
        lfcp-bridge quarantine redo <intent>       write it again from LFCP
@@ -673,8 +628,13 @@ async function run(
     }
     case "bind":
     case "verify": {
-      if (name === "verify" && opts.has("record"))
-        return recordCommand(rt, opts.get("record"), env);
+      if (name === "verify" && opts.has("record")) {
+        // A§9.1, E-051: writes follow the manifests of the artifact and its certification.
+        env.err(
+          "verify --record is gone: writes are on when this build is certified for this macOS (lfcp-bridge status)",
+        );
+        return EXIT.USAGE;
+      }
       const transport = await rt.openTransport();
       const boot = new Bootstrap({
         db: rt.db,
@@ -758,9 +718,9 @@ async function run(
     case "status": {
       const s = stopState(rt.paths.home);
       env.out(`STOP: ${s === undefined ? "no" : `yes${s.at ? ` (since ${s.at})` : ""}`}`);
-      const wv = rt.config.writesVerified;
+      const cert = keptGate(rt.db);
       env.out(
-        `writesVerified: ${wv ? `helper ${wv.helperVersion} on macOS ${wv.macOS} (recorded ${wv.at}; another helper or macOS resets it)` : "no (dry run only; lfcp-bridge verify --record <report.json>)"}`,
+        `cert.state: ${cert === undefined ? "not checked yet (preview)" : `${cert.state}${cert.state === "certified" ? "" : " (preview)"}: ${cert.detail} (${cert.reason}, ${cert.at})`}`,
       );
       const rows = rt.db
         .prepare(

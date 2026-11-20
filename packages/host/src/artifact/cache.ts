@@ -53,6 +53,17 @@ export class ManifestCache {
     return manifestSha256;
   }
 
+  /** Keeps only the `n` most recently stored artifact manifests. */
+  prune(n: number): void {
+    this.#db
+      .prepare(
+        `DELETE FROM artifact_manifest WHERE manifest_sha256 NOT IN (
+           SELECT manifest_sha256 FROM artifact_manifest
+             ORDER BY stored_at DESC, manifest_sha256 DESC LIMIT ?)`,
+      )
+      .run(n);
+  }
+
   /** The kept artifact manifests that verify, oldest first. */
   artifacts(): CachedArtifactManifest[] {
     const rows = this.#db

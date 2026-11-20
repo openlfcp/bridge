@@ -18,7 +18,6 @@ import {
   uninstallLaunchAgent,
 } from "../src/launchd.js";
 import { markerUrl } from "../src/ownership.js";
-import { recordVerification, writeModeFor, writesVerified } from "../src/verification.js";
 
 const spec = {
   node: "/opt/node/bin/node",
@@ -71,34 +70,6 @@ describe("config", () => {
     const a = loadConfig(paths.config);
     expect(loadConfig(paths.config).bridgeInstanceId).toBe(a.bridgeInstanceId);
     expect(paths.launchAgent).toBe("/Users/x/Library/LaunchAgents/org.openlfcp.bridge.plist");
-  });
-});
-
-describe("write modes (§7.6; effect permissions, review r3 P2-4)", () => {
-  const helper = { helperVersion: "0.3.0", macOS: "26.5.2" };
-  const cfg = { bridgeInstanceId: "i" };
-  it("bootstrap, verification, verified and off", () => {
-    expect(writeModeFor("bootstrap", { verification: false }, cfg, helper)).toBe("bootstrap");
-    expect(writeModeFor("bootstrap", { verification: true }, cfg, helper)).toBe("verification");
-    expect(writeModeFor("sync", { verification: true }, cfg, helper)).toBe("verification");
-    expect(writeModeFor("sync", { verification: false }, cfg, helper)).toBe("off");
-    const green = recordVerification(cfg, { helper, checks: [{ name: "a", ok: true }] });
-    expect(writeModeFor("sync", { verification: false }, green, helper)).toBe("verified");
-    // A new helper build or macOS resets it.
-    expect(writesVerified(green, { ...helper, helperVersion: "0.3.1" })).toBe(false);
-    expect(writesVerified(green, { ...helper, macOS: "26.6" })).toBe(false);
-  });
-  it("a report with a failure or no checks changes nothing", () => {
-    expect(
-      recordVerification(cfg, {
-        helper,
-        checks: [
-          { name: "a", ok: true },
-          { name: "b", ok: false },
-        ],
-      }),
-    ).toBe(cfg);
-    expect(recordVerification(cfg, { helper, checks: [] })).toBe(cfg);
   });
 });
 

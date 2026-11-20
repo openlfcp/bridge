@@ -89,6 +89,10 @@ export const JOURNAL_TEXT: Readonly<Record<string, (p: JournalParams) => string>
     `The Reminders helper stalled ${String(p.stalls ?? 2)} times on this list (${String(p.op ?? "")}): this binding is paused, the others go on. Look at the list (a repeating reminder?), then \`lfcp-bridge resume --accept helper_stall --binding <id>\``,
   "helper.reconnect_failed": (p) =>
     `The Reminders helper came back but could not be reconnected (${String(p.code ?? p.error ?? "")})`,
+  "cert.state": (p) =>
+    p.state === "certified"
+      ? `Writing to Reminders is on: ${String(p.text ?? "")}`
+      : `Writing to Reminders is off (preview; cert.state ${String(p.state ?? "")}, ${String(p.reason ?? "")}): ${String(p.text ?? "")}`,
   "effect.refused": (p) => `Reminders refused a write: ${String(p.code ?? "")}`,
   "intent.unknown_outcome": () =>
     "Whether a write to Reminders happened is not known: decide in `lfcp-bridge quarantine`",

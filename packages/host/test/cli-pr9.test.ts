@@ -13,7 +13,6 @@ import { bridgePaths, loadConfig } from "../src/config.js";
 import { EXIT, Holds, Journal, main, openBridgeDatabase } from "../src/index.js";
 import type { MigrationPorts } from "../src/migration.js";
 import type { Runtime } from "../src/runtime.js";
-import { VERIFICATION_STEPS } from "../src/verification.js";
 import { type SupportHost, supportHost } from "./support/socket.js";
 
 /** The support hosts of a test: ended after it, none of them opened a transport of its own. */
@@ -280,122 +279,18 @@ describe("lfcp-bridge (PR 9 commands)", () => {
   });
 });
 
-describe("verify --record (§7.6): the owner's report sets writesVerified", () => {
-  const HELPER = { helperVersion: "0.3.1", macOS: "26.5.2" };
-  /** Every step of the checklist, ok (one of them `bad`, if given). */
-  const steps = (bad?: string) =>
-    VERIFICATION_STEPS.map((name) => ({ name, ok: name !== bad, note: "" }));
-  const green = (over: Record<string, unknown> = {}) => ({ ...HELPER, checks: steps(), ...over });
-  async function verified(o: { running?: typeof HELPER; bind?: boolean } = {}) {
-    const m = await machine(undefined, { helperIdentity: async () => o.running });
-    if (o.bind !== false) expect((await m.call("verify", "--section", "Test")).code).toBe(EXIT.OK);
-    const record = async (report: unknown) => {
-      const file = join(m.paths.home, "report.json");
-      writeFileSync(file, typeof report === "string" ? report : JSON.stringify(report));
-      return m.call("verify", "--record", file);
-    };
-    const config = () => readFileSync(m.paths.config, "utf8");
-    return { m, record, config };
-  }
-
-  it("a green report records the running helper and macOS; status shows it", async () => {
-    const { m, record } = await verified({ running: HELPER });
-    const r = await record(green());
-    expect(r.code).toBe(EXIT.OK);
-    expect(r.out).toContain("writesVerified: helper 0.3.1 on macOS 26.5.2, recorded ");
-    expect(loadConfig(m.paths.config).writesVerified).toMatchObject(HELPER);
-    expect((await m.support("status")).out).toMatch(
-      /writesVerified: helper 0\.3\.1 on macOS 26\.5\.2 \(recorded \d{4}-/,
-    );
-  });
-
-  it("a red check, a missing step or no checks: refused, exit 3, config unchanged", async () => {
-    const { record, config } = await verified({ running: HELPER });
-    const before = config();
-    const step22 = VERIFICATION_STEPS[21] as string;
-    const red = await record(green({ checks: steps(step22) }));
-    expect([red.code, red.err]).toEqual([
-      EXIT.NEEDS_PERSON,
-      expect.stringContaining(`not ok: ${step22}`),
-    ]);
-    // Every template step by name: one left out (or renamed) is refused even if the rest is ok.
-    const without = await record(green({ checks: steps().filter((c) => c.name !== step22) }));
-    expect([without.code, without.err]).toEqual([
-      EXIT.NEEDS_PERSON,
-      expect.stringContaining(`incomplete): steps missing from the report`),
-    ]);
-    expect(without.err).toContain(step22);
-    const renamed = await record(
-      green({ checks: steps().map((c) => (c.name === step22 ? { ...c, name: "22" } : c)) }),
-    );
-    expect(renamed.err).toContain("incomplete");
-    const empty = await record(green({ checks: [] }));
-    expect([empty.code, empty.err]).toEqual([
-      EXIT.NEEDS_PERSON,
-      expect.stringContaining("incomplete"),
-    ]);
-    // An added check of the person's counts too.
-    const extra = await record(
-      green({ checks: [...steps(), { name: "my own check", ok: false, note: "" }] }),
-    );
-    expect(extra.err).toContain("not ok: my own check");
-    expect(config()).toBe(before);
-  });
-
-  it("a report of another helper build or macOS than the running one is refused", async () => {
-    const { record, config } = await verified({
-      running: { helperVersion: "0.3.2", macOS: "26.5.2" },
-    });
-    const before = config();
-    const r = await record(green());
+describe("verify --record is gone (A§9.1, E-051): writes follow the manifests", () => {
+  it("refused as a usage error, config.json unchanged; status shows cert.state", async () => {
+    const m = await machine();
+    const before = loadConfig(m.paths.config);
+    const file = join(m.paths.home, "report.json");
+    writeFileSync(file, JSON.stringify({ helperVersion: "0.3.1", macOS: "26.5.2", checks: [] }));
+    const r = await m.call("verify", "--record", file);
     expect([r.code, r.err]).toEqual([
-      EXIT.NEEDS_PERSON,
-      expect.stringContaining("helper_mismatch"),
+      EXIT.USAGE,
+      expect.stringContaining("verify --record is gone"),
     ]);
-    expect(r.err).toContain("this machine runs helper 0.3.2 on macOS 26.5.2");
-    // Not filled in (the template's ""): refused, and the person learns what to write.
-    const blank = await record(green({ helperVersion: "", macOS: "" }));
-    expect([blank.code, blank.err]).toEqual([
-      EXIT.NEEDS_PERSON,
-      expect.stringContaining("does not say which helper and macOS"),
-    ]);
-    expect(blank.err).toContain("this machine runs helper 0.3.2 on macOS 26.5.2");
-    expect(config()).toBe(before);
-  });
-
-  it("refused without a verification binding, or without a running helper", async () => {
-    const unbound = await verified({ running: HELPER, bind: false });
-    expect((await unbound.record(green())).err).toContain("no_binding");
-    const noHelper = await verified({});
-    expect((await noHelper.record(green())).err).toContain("no_helper");
-    expect(loadConfig(noHelper.m.paths.config).writesVerified).toBeUndefined();
-  });
-
-  it("a malformed report is a usage error; --record needs a file", async () => {
-    const { m, record } = await verified({ running: HELPER });
-    expect((await record("{")).code).toBe(EXIT.USAGE);
-    expect((await record(green({ checks: [{ name: "1", ok: "yes" }] }))).err).toContain(
-      "ok must be true or false",
-    );
-    expect((await m.call("verify", "--record")).code).toBe(EXIT.USAGE);
-  });
-
-  it("the template lists steps 1–23, none ok yet: recorded as is, it is refused", async () => {
-    const { record } = await verified({ running: HELPER });
-    const template = JSON.parse(
-      readFileSync(
-        join(__dirname, "../../../docs/devel/testing/verification-report.template.json"),
-        "utf8",
-      ),
-    ) as { checks: { name: string; ok: boolean }[] };
-    // The template and the code name the same 23 steps, in order.
-    expect(template.checks.map((c) => c.name)).toEqual(VERIFICATION_STEPS);
-    expect(template.checks.map((c) => Number.parseInt(c.name, 10))).toEqual(
-      Array.from({ length: 23 }, (_, i) => i + 1),
-    );
-    expect(template.checks.every((c) => c.ok === false)).toBe(true);
-    const r = await record({ ...template, ...HELPER });
-    expect(r.code).toBe(EXIT.NEEDS_PERSON);
-    expect(r.err).toContain("not_green");
+    expect(loadConfig(m.paths.config)).toEqual(before);
+    expect((await m.support("status")).out).toContain("cert.state: not checked yet (preview)");
   });
 });

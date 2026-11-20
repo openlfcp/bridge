@@ -159,7 +159,6 @@ function source(over: Partial<DiagnosticsSource> = {}): DiagnosticsSource {
     config: {
       bridgeInstanceId: "inst",
       helperPath: `/Users/${CANARY}/helper.app`,
-      writesVerified: { helperVersion: "0.6.0", macOS: "15.1", at: T },
     },
     version: "0.6.0",
     now: () => Date.parse(T),
@@ -194,6 +193,18 @@ function hmacs(v: unknown, out = new Set<string>()): Set<string> {
 describe("Export diagnostics: T§3 canary (L0)", () => {
   it("no canary in the zip: titles, URLs, paths, causes, payload, evidence, crashes, pairing", () => {
     seed();
+    // The write gate's last decision (E-051): its detail may name paths; only codes go out.
+    const slice = "ab".repeat(20);
+    db.prepare("INSERT INTO meta (key, value) VALUES ('cert_gate', ?)").run(
+      JSON.stringify({
+        state: "mismatch",
+        reason: "nested-cdhash",
+        detail: `/Users/${CANARY}/x: cdhash`,
+        at: T,
+        macOS: "15.1",
+        artifactSliceId: slice,
+      }),
+    );
     mkdirSync(join(dir, "out"));
     const path = join(dir, "out", "diag.zip");
     const { bytes } = exportDiagnostics(source(), path);
@@ -207,7 +218,9 @@ describe("Export diagnostics: T§3 canary (L0)", () => {
     expect(text).not.toContain("secret");
     const d = JSON.parse(text);
     expect(d).toMatchObject({ schema: "diag-schema", version: 1, certTestMode: false });
-    expect(d.artifactSliceId).toBeNull();
+    expect(d.artifactSliceId).toBe(slice);
+    expect(d.cert).toEqual({ state: "mismatch", reason: "nested-cdhash", at: T });
+    expect(d.versions).toMatchObject({ macOS: "15.1", helper: null });
     // What support needs is plain: ids, states, codes; the title is there as an HMAC.
     expect(d.bindings).toEqual([
       {
