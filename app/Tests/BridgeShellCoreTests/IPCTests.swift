@@ -27,6 +27,26 @@ final class IPCTests: XCTestCase {
     }
   }
 
+  func testCodeIdentityLines() {
+    let i = CodeIdentity(
+      arch: "arm64", valid: false, detail: "a sealed resource is missing", shell: String(repeating: "0c", count: 20),
+      nested: [.init(path: "Contents/MacOS/lfcp-reminders-helper", cdhash: String(repeating: "30", count: 20))])
+    XCTAssertEqual(
+      NSDictionary(dictionary: decode(ShellCommand.codeIdentity(requestId: "c1", .identity(i)).line(id: "9"))),
+      NSDictionary(dictionary: [
+        "v": 1, "id": "9", "cmd": "codeIdentity", "requestId": "c1", "arch": "arm64", "valid": false,
+        "detail": "a sealed resource is missing", "shell": i.shell,
+        "nested": [["path": "Contents/MacOS/lfcp-reminders-helper", "cdhash": i.nested[0].cdhash]],
+      ]))
+    XCTAssertEqual(
+      NSDictionary(dictionary: decode(ShellCommand.codeIdentity(requestId: "c2", .failed("no")).line(id: "10"))),
+      NSDictionary(dictionary: ["v": 1, "id": "10", "cmd": "codeIdentity", "requestId": "c2", "error": "no"]))
+    XCTAssertEqual(
+      HostEvent.parse(#"{"v":1,"type":"codeCheck","id":"c1","paths":["Contents/Resources/node/bin/node"]}"#),
+      .codeCheck(id: "c1", paths: ["Contents/Resources/node/bin/node"]))
+    XCTAssertNil(HostEvent.parse(#"{"v":1,"type":"codeCheck","id":"c1"}"#))
+  }
+
   func testParsesEveryEvent() {
     XCTAssertEqual(
       HostEvent.parse(#"{"v":1,"type":"hello","version":"0.6.0","pid":12}"#),

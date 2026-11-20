@@ -121,6 +121,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     switch event {
     case .hello(let version, _):
       helloVersion = version
+    case .codeCheck(let id, let paths):
+      // The write gate (A§9.1): Security.framework reads the bundle, off the main queue.
+      let bundle = Bundle.main.bundleURL
+      DispatchQueue.global(qos: .utility).async { [weak self] in
+        let report = CodeCheck.run(bundle: bundle, paths: paths)
+        DispatchQueue.main.async {
+          if case .failed(let why) = report { self?.log.info("shell: code check failed: \(why)") }
+          self?.supervisor.send(.codeIdentity(requestId: id, report))
+        }
+      }
     case .reply(let id, let ok, let code):
       if ok {
         replies.ok += 1
