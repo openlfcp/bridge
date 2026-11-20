@@ -103,14 +103,33 @@ describe("doctor", () => {
   it("all green for a bound section", async () => {
     const r = await rig();
     await r.boot.bind({ installationId: "i1", resourceId: "R1", section: "Work" });
-    const checks = await doctor({
-      db: r.db,
-      home: r.home,
-      helperApp: r.app,
-      instanceId: "me",
-      transport: r.transport,
+    const run = () =>
+      doctor({
+        db: r.db,
+        home: r.home,
+        helperApp: r.app,
+        instanceId: "me",
+        transport: r.transport,
+      });
+    // Before the write gate was checked: preview, a warning with its reason (A§9.1, U П4).
+    expect((await run()).find((c) => c.name === "writes")).toMatchObject({
+      status: "warn",
+      detail: expect.stringContaining("not been checked"),
     });
-    expect(worst(checks)).toBe("ok");
+    const kept = (state: string, reason: string, detail: string) =>
+      r.db
+        .prepare(
+          "INSERT INTO meta (key, value) VALUES ('cert_gate', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        )
+        .run(
+          JSON.stringify({ state, reason, detail, at: "2026-11-20T00:00:00.000Z", macOS: "15.4" }),
+        );
+    kept("mismatch", "nested-cdhash", "nested code: Contents/MacOS/lfcp-reminders-helper: missing");
+    expect((await run()).find((c) => c.name === "writes")?.detail).toBe(
+      "cert.state mismatch (nested-cdhash): nested code: Contents/MacOS/lfcp-reminders-helper: missing; normal bindings only preview",
+    );
+    kept("certified", "certified", "certified on macOS 15.4");
+    expect(worst(await run())).toBe("ok");
   });
 
   it("names a missing helper, no TCC access, a gone list, a foreign marker, STOP", async () => {
