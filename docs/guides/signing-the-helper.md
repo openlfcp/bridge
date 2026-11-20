@@ -87,9 +87,9 @@ Choose **one** of the two.
       --notarize --notary-profile lfcp-notary
     cp -R "build/LFCP Reminders Helper.app" ~/Applications/
 
-Then run `lfcp-bridge doctor` (helper found, signature valid, Reminders access). A new helper
-version resets `writesVerified`: run the verification again (`lfcp-bridge verify --section <test section>`, see
-[running-the-bridge.md](running-the-bridge.md)) before normal bindings write.
+Then run `lfcp-bridge doctor` (helper found, signature valid, Reminders access). Normal bindings
+write only under a certified build of LFCP Bridge.app (the write gate, A§9.1; see
+[running-the-bridge.md](running-the-bridge.md)).
 
 TCC keeps Reminders access as long as the designated requirement stays the same: same bundle
 identifier, same Team ID. Moving from the dev certificate to Developer ID changes it **once**:
