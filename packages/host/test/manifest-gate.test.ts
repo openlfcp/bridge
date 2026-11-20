@@ -17,7 +17,7 @@ import {
   type GateDecision,
 } from "../src/artifact/gate.js";
 import type { Arch } from "../src/artifact/manifest.js";
-import { openBridgeDatabase } from "../src/db/database.js";
+import { type BridgeDatabase, openBridgeDatabase } from "../src/db/database.js";
 import {
   ARTIFACT,
   ARTIFACT_TEXT,
@@ -209,4 +209,63 @@ describe("checkGate: the cache and the code source", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+describe("checkGate: no rollback of the certification through the cache (review E-051a major)", () => {
+  const v1 = signCertification(cert(1, entry("15.4")), KEY);
+  const v2 = signCertification(cert(2, entry("15.4", { status: "withdrawn" })), KEY);
+  const source: CodeIdentitySource = { identity: async () => identity() };
+
+  async function withDb(run: (path: string) => Promise<void>) {
+    const dir = mkdtempSync(join(tmpdir(), "manifest-gate-"));
+    try {
+      await run(join(dir, "bridge.sqlite"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  /** Opens the database, runs `f` on its cache, closes it: every step a fresh start. */
+  async function open<T>(
+    path: string,
+    f: (c: ManifestCache, db: BridgeDatabase) => T | Promise<T>,
+  ) {
+    const db = openBridgeDatabase(path);
+    try {
+      return await f(new ManifestCache(db, [PUB]), db);
+    } finally {
+      db.close();
+    }
+  }
+  const gateOf = (path: string) =>
+    open(path, (cache) => checkGate({ cache, code: source, macOS: "15.4" }));
+
+  it("an older signed text in place of the withdrawn one: preview, also after a reopen", () =>
+    withDb(async (path) => {
+      await open(path, (c) => {
+        c.storeArtifact(ARTIFACT_TEXT);
+        c.offerCertification(v2);
+      });
+      expect(await gateOf(path)).toMatchObject({ state: "withdrawn", writes: false });
+      await open(path, (_, db) => {
+        db.prepare("UPDATE certification_manifest SET text = ?").run(v1);
+      });
+      expect(await gateOf(path)).toMatchObject({ writes: false });
+    }));
+
+  it("a damaged withdrawn text, then the older manifest offered: stale, preview after a reopen", () =>
+    withDb(async (path) => {
+      await open(path, (c) => {
+        c.storeArtifact(ARTIFACT_TEXT);
+        c.offerCertification(v2);
+      });
+      await open(path, (_, db) => {
+        db.prepare("UPDATE certification_manifest SET text = '{}'").run();
+      });
+      expect(await open(path, (c) => c.offerCertification(v1))).toEqual({
+        kind: "stale",
+        seq: 1,
+        kept: 2,
+      });
+      expect(await gateOf(path)).toMatchObject({ writes: false });
+    }));
 });

@@ -5,8 +5,11 @@
 //
 // The public certification manifest is taken only with a greater `seq` than the one kept (A§9.2):
 // an older one (a replay, a stale mirror) is refused, and so is another text with the same `seq`
-// (two different signed documents with one number). A kept row that no longer verifies (another
-// key, damaged) counts as nothing: a valid manifest replaces it.
+// (two different signed documents with one number). The kept `seq` column is the floor, whatever
+// the kept text: a text that does not verify, or verifies with another `seq` (an older signed
+// manifest put in place of a newer one), is not read — preview — and never lowers the floor; only
+// a valid manifest with at least that `seq` replaces it. A floor raised past every signed manifest
+// keeps preview until one reaches it (fail-safe; replacing the whole database is out of scope).
 
 import type { BridgeDatabase } from "../db/database.js";
 import { type CertificationManifest, parseCertification } from "./certification.js";
@@ -66,14 +69,19 @@ export class ManifestCache {
     return out;
   }
 
-  /** The kept certification manifest, if it verifies. */
-  certification(): CertificationManifest | undefined {
-    const row = this.#db.prepare("SELECT text FROM certification_manifest WHERE id = 1").get() as
-      | { text: string }
+  #kept(): { seq: number; text: string } | undefined {
+    return this.#db.prepare("SELECT seq, text FROM certification_manifest WHERE id = 1").get() as
+      | { seq: number; text: string }
       | undefined;
+  }
+
+  /** The kept certification manifest, if it verifies and is the kept `seq`. */
+  certification(): CertificationManifest | undefined {
+    const row = this.#kept();
     if (row === undefined) return undefined;
     try {
-      return parseCertification(row.text, this.#keys);
+      const m = parseCertification(row.text, this.#keys);
+      return m.seq === row.seq ? m : undefined;
     } catch {
       return undefined;
     }
@@ -88,14 +96,11 @@ export class ManifestCache {
       return { kind: "invalid", ...problem(e) };
     }
     return this.#db.transaction((): CertificationOffer => {
-      const kept = this.#db.prepare("SELECT text FROM certification_manifest WHERE id = 1").get() as
-        | { text: string }
-        | undefined;
-      const current = kept === undefined ? undefined : this.certification();
-      if (current !== undefined && kept !== undefined) {
-        if (incoming.seq < current.seq)
-          return { kind: "stale", seq: incoming.seq, kept: current.seq };
-        if (incoming.seq === current.seq)
+      const kept = this.#kept();
+      if (kept !== undefined) {
+        if (incoming.seq < kept.seq) return { kind: "stale", seq: incoming.seq, kept: kept.seq };
+        // The same seq: the kept one if it is readable (another text is a conflict), else a repair.
+        if (incoming.seq === kept.seq && this.certification() !== undefined)
           return kept.text === text
             ? { kind: "same", seq: incoming.seq }
             : { kind: "conflict", seq: incoming.seq };

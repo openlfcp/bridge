@@ -147,22 +147,38 @@ describe("the cache keeps only a greater seq (A§9.2)", () => {
     expect(cache.certification()?.seq).toBe(4);
   });
 
-  it("refuses an invalid one; a kept row that no longer verifies is as if none were kept", () => {
+  it("refuses an invalid one; a kept row whose text does not verify is not read", () => {
     const foreign = signCertification(cert(99, entry("15.4")), OTHER_KEY);
     expect(cache.offerCertification(foreign)).toMatchObject({
       kind: "invalid",
       code: "untrusted-key",
     });
     expect(cache.certification()).toBeUndefined();
-    // A row written past the cache (the seq raised in place): not trusted, does not block.
     const v1 = signCertification(cert(1, entry("15.4")), KEY);
     cache.offerCertification(v1);
-    const raised = v1.replace('"seq":1', '"seq":50');
-    db.prepare("UPDATE certification_manifest SET seq = 50, text = ?").run(raised);
+    db.prepare("UPDATE certification_manifest SET text = ?").run(v1.replace('"seq":1', '"seq":7'));
     expect(cache.certification()).toBeUndefined();
-    expect(cache.offerCertification(signCertification(cert(2), KEY))).toEqual({
-      kind: "stored",
-      seq: 2,
+  });
+
+  it("the kept seq is the floor, whatever the kept text (review E-051a major)", () => {
+    const v1 = signCertification(cert(1, entry("15.4")), KEY);
+    const v2 = signCertification(cert(2, entry("15.4", { status: "withdrawn" })), KEY);
+    cache.offerCertification(v2);
+    // An older signed text put in place of the newer one: its seq is not the kept one.
+    db.prepare("UPDATE certification_manifest SET text = ?").run(v1);
+    expect(cache.certification()).toBeUndefined();
+    // A damaged text does not lower the floor: the older one is still stale, the same seq repairs.
+    db.prepare("UPDATE certification_manifest SET text = '{}'").run();
+    expect(cache.offerCertification(v1)).toEqual({ kind: "stale", seq: 1, kept: 2 });
+    expect(cache.certification()).toBeUndefined();
+    expect(cache.offerCertification(v2)).toEqual({ kind: "stored", seq: 2 });
+    expect(cache.certification()?.entries[0]?.status).toBe("withdrawn");
+    // A seq raised in place (no text for it) blocks until a signed manifest reaches it: preview.
+    db.prepare("UPDATE certification_manifest SET seq = 50").run();
+    expect(cache.certification()).toBeUndefined();
+    expect(cache.offerCertification(signCertification(cert(3), KEY))).toMatchObject({
+      kind: "stale",
+      kept: 50,
     });
   });
 
