@@ -84,17 +84,31 @@ public enum CodeCheck {
     return text ?? describe(status)
   }
 
-  /// (4): the cdhash of the code this process runs.
+  /// (4): the cdhash of the code this process runs. SecCodeCheckValidity also checks that the code
+  /// on disk is the running one. On running code it takes no kSecCSDoNotValidateResources
+  /// (errSecCSInvalidFlags), so it validates the bundle's resources too: a resource error (a changed
+  /// byte in Resources/, another nested helper) is (3)'s to report. The cdhash is still read, and
+  /// the gate says code-invalid rather than "identity unknown". That is never a pass: whatever fails
+  /// the resources here fails (3), which checks the same bundle, strict, nested code included.
   public static func runningCdhash() throws -> String {
     var me: SecCode?
     var status = SecCodeCopySelf(SecCSFlags(), &me)
     guard status == errSecSuccess, let me else { throw CodeCheckError(status) }
     status = SecCodeCheckValidity(me, SecCSFlags(), nil)
-    guard status == errSecSuccess else { throw CodeCheckError(status) }
+    guard status == errSecSuccess || isResourceError(status) else { throw CodeCheckError(status) }
     var staticCode: SecStaticCode?
     status = SecCodeCopyStaticCode(me, SecCSFlags(), &staticCode)
     guard status == errSecSuccess, let staticCode else { throw CodeCheckError(status) }
     return try unique(staticCode)
+  }
+
+  /// The statuses of a bundle whose resources (sealed files, nested code) fail their seal.
+  static func isResourceError(_ status: OSStatus) -> Bool {
+    [
+      errSecCSBadResource, errSecCSResourcesInvalid, errSecCSResourceDirectoryFailed,
+      errSecCSResourcesNotFound, errSecCSResourcesNotSealed, errSecCSResourceRulesInvalid,
+      errSecCSBadNestedCode,
+    ].map { OSStatus($0) }.contains(status)
   }
 
   /// (5): the cdhash of one Mach-O for one slice.

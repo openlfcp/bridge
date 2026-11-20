@@ -88,6 +88,7 @@ SDK's bridge API directly, with no fallbacks of its own: `openNodeInstallation`
 | `helper` (`helper.yml`) | HelperCore tests, the app, smoke, sign-dev tests, the sign-release dry run, SwiftPM |
 | `helper-protocol` (`helper.yml`) | `transport-eventkit` against the helper (memory backend): unit tests, `transportContract`, open + FIFO |
 | `build`, `draft` (`release.yml`) | the release chain (`docs/devel/release-chain.md`): sign, notarize (Developer ID), manifest, DMG, draft release |
+| `l5-identity` (`release.yml`) | T§3 artifact identity at L5 on the job's own Dev-signed build: the write gate certified, then preview for a changed byte, a re-signed host, another helper (`scripts/release/l5-identity.sh`) |
 | `swift-test`, `smoke` (`app.yml`) | the shell's `swift test`; L5 smoke of a development `.app` (`scripts/app/smoke.sh`) |
 | `crash`, `e2e` | with PRs 7, 9 |
 
@@ -123,6 +124,7 @@ SDK's bridge API directly, with no fallbacks of its own: `openNodeInstallation`
 | `scripts/app/package-app.sh`, `scripts/app/make-dmg.sh`, `scripts/app/node-darwin.sha256` | the release `LFCP Bridge.app` and its DMG (`PACKAGE_DMG=0`: the app only, for `release.yml`): universal, Node pinned by `.node-version` and these SHA-256, better-sqlite3 subtree, signed inside out (ad-hoc or `SIGN_IDENTITY`), Sparkle keys in `Info.plist` |
 | `scripts/app/check-app.sh`, `scripts/app/check-no-test-hooks.sh` | T§2 L5 on the packaged app where it lies: Info.plist, universal Mach-O loadable on 15.0, signature and entitlements, Node and ABI, no test hooks, `bridge.mjs --self-test` |
 | `scripts/release/artifact-manifest.mjs` | the artifact manifest (A§9.1): `keygen`, `build` after the staple, `cdhashes` before/after, `check` of a bundle against it |
+| `scripts/release/l5-identity.sh`, `scripts/release/l5-identity.mjs` | the L5 job `l5-identity` (CI only): trust this run's key in the job's build, certify it, seed the gate's cache, the T§3 artifact identity checks |
 | `scripts/release/signing-keychain.sh`, `scripts/release/notarize.sh` | `release.yml`'s throwaway keychain (Developer ID from secrets, or a self-signed Dev identity) and notarytool + stapler |
 | `scripts/sdk-ts-pack.mjs` | the SDK pin: packs the eight `@openlfcp/*` packages of the sdk-ts commit in `sdk-ts.lock` into `vendor/sdk-ts/`, byte-identical on every system (`docs/devel/sdk-pin.md`); `--self-test` |
 | `scripts/check-release-deps.mjs` | refuses a release whose SDK is not exact npm versions (`sdk-ts.lock`, `file:`/`link:`, overrides); run by `sign-release.sh` and by `app.yml` on tags, for E-052 |

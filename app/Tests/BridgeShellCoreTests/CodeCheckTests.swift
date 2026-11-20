@@ -38,7 +38,17 @@ final class CodeCheckTests: XCTestCase {
       XCTAssertNotNil(h.range(of: "^[0-9a-f]{40}$", options: .regularExpression), h)
     } catch {
       XCTAssertTrue("\(error)".hasPrefix("OSStatus"))
+      // The flags themselves must be accepted on running code (a regression of E-051c).
+      XCTAssertNotEqual((error as? CodeCheckError)?.status, OSStatus(errSecCSInvalidFlags), "\(error)")
     }
+  }
+
+  func testOnlyAResourceErrorStillGivesTheRunningCdhash() {
+    XCTAssertTrue(CodeCheck.isResourceError(OSStatus(errSecCSBadResource)))
+    XCTAssertTrue(CodeCheck.isResourceError(OSStatus(errSecCSBadNestedCode)))
+    XCTAssertFalse(CodeCheck.isResourceError(OSStatus(errSecCSStaticCodeChanged)))
+    XCTAssertFalse(CodeCheck.isResourceError(OSStatus(errSecCSInvalidFlags)))
+    XCTAssertFalse(CodeCheck.isResourceError(errSecSuccess))
   }
 
   func testASignedSystemToolHasACdhashForItsSlice() throws {
