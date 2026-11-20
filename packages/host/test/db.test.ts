@@ -74,6 +74,8 @@ const LATER_TABLES = [
   "decisions",
   "ignored_imports",
   "decision_items",
+  "artifact_manifest",
+  "certification_manifest",
 ];
 
 const now = "2026-11-10T00:00:00.000Z";
@@ -571,5 +573,36 @@ describe("migration 8: decision items (A§7.2; E-041b)", () => {
     expect(d.prepare("SELECT state FROM decisions").all()).toEqual([{ state: "pending" }]);
     migrateTo(d, 8);
     expect(d.prepare("SELECT count(*) AS n FROM decision_items").get()).toEqual({ n: 0 });
+  });
+});
+
+describe("migration 9: the manifest cache (A§9.1–9.2; E-051)", () => {
+  it("forward creates both tables with their checks; back drops them, nothing else", () => {
+    const d = db({ migrate: false });
+    migrateTo(d, 8);
+    seedV1(d);
+    migrateTo(d, 9);
+    d.prepare(
+      "INSERT INTO artifact_manifest (manifest_sha256, text, stored_at) VALUES ('a', '{}', ?)",
+    ).run(now);
+    d.prepare(
+      "INSERT INTO certification_manifest (id, seq, text, stored_at) VALUES (1, 3, '{}', ?)",
+    ).run(now);
+    expect(() =>
+      d
+        .prepare(
+          "INSERT INTO certification_manifest (id, seq, text, stored_at) VALUES (2, 4, '{}', ?)",
+        )
+        .run(now),
+    ).toThrow(/CHECK/);
+    expect(() =>
+      d.prepare("UPDATE certification_manifest SET seq = -1 WHERE id = 1").run(),
+    ).toThrow(/CHECK/);
+    migrateTo(d, 8);
+    expect(tables(d)).not.toContain("artifact_manifest");
+    expect(tables(d)).not.toContain("certification_manifest");
+    expect(new Holds(d).of("b1").map((h) => h.reason)).toEqual(["ownership_lost"]);
+    migrateTo(d, 9);
+    expect(d.prepare("SELECT count(*) AS n FROM certification_manifest").get()).toEqual({ n: 0 });
   });
 });

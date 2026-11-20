@@ -40,3 +40,13 @@ canonical bytes of `manifest`. `slices.<arch>.shell` is the shell's cdhash (`art
 `Contents/_CodeSignature/*` and the staple ticket `Contents/CodeResources`, with `{path, symlink}`
 for a symbolic link. The shared fixture for readers (E-051) is
 `packages/host/test/fixtures/artifact-manifest/`.
+
+## The public certification manifest
+
+Separate from the artifact manifest and changed after the release (A§9.2): the certify workflow
+(E-055) adds records with `seq + 1`. Format and rules: `packages/host/src/artifact/certification.ts`
+(header comment) — canonical JSON `{certification: {format, seq, entries}, signature}`, signed like
+the artifact manifest; one record per `(manifestSha256, artifactSliceId, arch, macos)` with
+`status: certified|withdrawn`. The bridge keeps only a greater `seq` (`artifact/cache.ts`), and a
+certified `x.y` covers `x.(<y)` of the same major down to 15.0 unless that minor has its own record
+(E14b). The write gate (`artifact/gate.ts`, A§9.1) reads both manifests.
