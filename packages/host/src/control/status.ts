@@ -1,6 +1,10 @@
 // The status fields of `bindings/<X>` (A§3.2, §3.5): the generation, the last complete check and
 // what keeps "Up to date" away — open intents per direction, refused and unconfirmed ones (no
-// person has resolved them). The writer of `C` (E-030c) publishes them.
+// person has resolved them).
+//
+// This module only computes the fields. Their writer moves to E-030c: the runtime client of `C`
+// that publishes `service`/`status`/`bindings/<X>`, the 30-minute heartbeat, the write limit of
+// one per minute per binding (A§3.5) and the cleanup of the maps. E-030b has no code for them.
 
 import type { BridgeDatabase } from "../db/database.js";
 
