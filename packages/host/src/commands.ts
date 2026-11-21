@@ -39,6 +39,7 @@ import {
 } from "./launchd.js";
 import { MigrationError, type MigrationRow, Migrations } from "./migration.js";
 import {
+  acceptImportAmbiguous,
   acceptOutcome,
   candidates,
   ignoreReminder,
@@ -764,6 +765,18 @@ async function run(
             env,
             `lfcp-bridge resume --accept <${HOLD_REASONS.join("|")}> --binding <id>`,
           );
+        if (accept === "import_ambiguous" && rt.holds.has(binding, "import_ambiguous")) {
+          // Owner Q-3: the pending imports without a reminder are released with the acceptance.
+          const r = await acceptImportAmbiguous(rt.db, await rt.openTransport(), binding, {
+            journal: rt.journal,
+          });
+          if (r.kind === "refused") {
+            env.err(`resume --accept import_ambiguous refused: ${r.text}`);
+            return EXIT.NEEDS_PERSON;
+          }
+          env.out(r.text);
+          return EXIT.OK;
+        }
         env.out(
           rt.holds.accept(binding, accept as HoldReason)
             ? `hold ${accept} lifted and accepted on ${binding}: the next pass goes through`

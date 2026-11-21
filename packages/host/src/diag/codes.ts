@@ -163,6 +163,7 @@ const WORDS = [
   "helper_stall",
   "helper_unavailable",
   "import_ambiguous",
+  "import_released",
   "in_flight",
   "incomplete",
   "installation_not_active",

@@ -279,13 +279,14 @@ describe("A§7.3 recovery matrix through support.sock (L2)", () => {
     expect(b.link(task.id)?.state).toBe("linked");
   });
 
-  it("import_ambiguous: links → resume --accept import_ambiguous --binding <b> lifts the hold; OPEN: the next pass sets it again, the import does not go on", async () => {
+  it("import_ambiguous: links → resume --accept import_ambiguous --binding <b> releases the vanished import, lifts the hold, the import goes on", async () => {
     b = await bridge();
     // R2-9 (4): a pending import whose reminder vanished; a new reminder waits behind it.
     const first = b.person.create(b.list.id, "First");
     const plan = await b.pass.dryRun("b");
     if (plan.kind !== "planned") throw new Error(plan.kind);
-    b.e.prepare("b", { intents: plan.plan.intents, unlinks: 0 });
+    const [create] = b.e.prepare("b", { intents: plan.plan.intents, unlinks: 0 }) ?? [];
+    if (create === undefined) throw new Error("no create_task prepared");
     b.person.delete(first.ref);
     b.person.create(b.list.id, "Second");
     expect((await b.sync()).plan.holds).toEqual(["import_ambiguous"]);
@@ -297,16 +298,24 @@ describe("A§7.3 recovery matrix through support.sock (L2)", () => {
     const links = await lfcpBridge("links", "--binding", "b");
     expect(links.code).toBe(EXIT.OK);
     const r = await lfcpBridge("resume", "--accept", "import_ambiguous", "--binding", "b");
+    expect(r.code).toBe(EXIT.OK);
     expect(r.out).toBe(
-      "hold import_ambiguous lifted and accepted on b: the next pass goes through",
+      "hold import_ambiguous lifted and accepted on b: 1 pending import(s) without a reminder released; the next pass goes through",
     );
-    // OPEN (REPORT, escalated): A§7.3 says "hold lifted, the import goes on". In 0.5 code — kept
-    // by the design (research/response-r3: the release of the pending link was dropped) — the
-    // next pass finds the same vanished pending import and sets the hold again; Second waits.
-    await waitFor("the next pass after the acceptance", () => holdsOf("b").length === 1);
+    // Owner Q-3 (revising R2-8): the link is the tombstone unlinked, its create_task superseded.
+    expect(b.link(create.taskId)).toMatchObject({
+      state: "unlinked",
+      state_reason: "import_released",
+    });
+    expect(
+      b.db.prepare("SELECT state, state_reason FROM intents WHERE id = ?").get(create.id),
+    ).toEqual({ state: "superseded", state_reason: "import_released" });
+    // The next pass on the fake does not set the hold again; Second is imported.
+    await waitFor("the import after the acceptance", () => tasksTitled("Second").length === 1);
     await p.idle();
-    expect(holdsOf("b")).toEqual(["import_ambiguous"]);
-    expect(tasksTitled("Second")).toEqual([]);
+    expect(holdsOf("b")).toEqual([]);
+    expect(tasksTitled("Second")).toHaveLength(1);
+    expect(tasksTitled("First")).toEqual([]);
   });
 
   it("bootstrap.list.unknown: bind --resolve-list <b> <listId> continues the bootstrap", async () => {
