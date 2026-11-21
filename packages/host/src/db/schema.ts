@@ -12,7 +12,8 @@
 // Version 5: a person's decisions on refused and quarantined intents.
 // Version 6: durable acceptances of anomaly snapshots (A§7.1, E18).
 // Version 7: authorizations of exact inverse sets, a person's decisions, ignored imports (A§7.1–7.2).
-// Version 8: the durable execution of requests and answers of `C`, and a binding's generation and
+// Version 8: the items of a decision, each finished on its own (A§7.2 "writes finished").
+// Version 9: the durable execution of requests and answers of `C`, and a binding's generation and
 // last complete check (A§3.4–3.5).
 //
 // Beyond §3: STRICT tables, NOT NULL where a row has no meaning without the
@@ -430,14 +431,34 @@ const V7: Migration = {
   ],
 };
 
-// Version 8 (A§3.4, E-030): every request (`rid`) and answer (`aid`) of `C` the host has seen, written
+// Version 8 (A§7.2, E18): a decision is finished only when its writes are — Task by Task. An item
+// is `active` from the answer until a pass sees its Task agreed (the inverse write confirmed,
+// `done`; for recreate: linked again) or no longer in the state the person answered (`changed`).
+// Only active items turn the planner around: a finished one never reverses a later change of the
+// person's, an unfinished one keeps the opposite transfer out between passes. Down drops it.
+const V8: Migration = {
+  version: 8,
+  name: "decision items",
+  up: [
+    `CREATE TABLE decision_items (
+      decision_id TEXT NOT NULL REFERENCES decisions(id),
+      task_id TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('active','done','changed')),
+      ended_at TEXT,
+      PRIMARY KEY (decision_id, task_id)
+    ) STRICT, WITHOUT ROWID`,
+  ],
+  down: ["DROP TABLE decision_items"],
+};
+
+// Version 9 (A§3.4, E-030): every request (`rid`) and answer (`aid`) of `C` the host has seen, written
 // before any effect, in the transaction that plans its effects (`effect_ids_json`). A row is never
 // deleted: an id seen again — after the map is cleaned up, after a crash — is not executed again.
 // `state` is the event's (A§3.3), `accepted` standing for `received`. The binding gains its
 // `generation` (a request for another generation is `stale`) and `last_complete_check_at` (A§3.5).
 // Down drops the table and both columns (an older bridge does not read `C`).
-const V8: Migration = {
-  version: 8,
+const V9: Migration = {
+  version: 9,
   name: "control_exec, binding generation and last complete check",
   up: [
     `CREATE TABLE control_exec (
@@ -474,7 +495,7 @@ const V8: Migration = {
 };
 
 /** Every migration, in order. */
-export const MIGRATIONS: readonly Migration[] = Object.freeze([V1, V2, V3, V4, V5, V6, V7, V8]);
+export const MIGRATIONS: readonly Migration[] = Object.freeze([V1, V2, V3, V4, V5, V6, V7, V8, V9]);
 
 /** The schema version this build writes. */
 export const SCHEMA_VERSION = MIGRATIONS.length;

@@ -33,6 +33,7 @@ import {
 } from "@openlfcp/bridge-reminders/adapter";
 import { fromHex, type PrincipalId, resourceId } from "@openlfcp/core";
 import { sectionEnd } from "@openlfcp/shared-objects/sections";
+import { Authorizations } from "../db/authorizations.js";
 import type { BridgeDatabase } from "../db/database.js";
 import type { HoldReason } from "../db/holds.js";
 import { Limits } from "../executor/limits.js";
@@ -248,6 +249,10 @@ export class Pass {
       held.set(r.task_id, a);
     }
 
+    // A person's Restore answers waiting (A§7.2): the planner turns their status around, keeps the
+    // reminders answered "Keep only in Reminders" out of the imports.
+    const answers = new Authorizations(db, this.#now);
+    const restore = answers.restoring(b.id);
     const p = plan({
       binding: {
         id: b.id,
@@ -268,6 +273,8 @@ export class Pass {
       heldFields: (task) => held.get(task) ?? [],
       capabilities: t.capabilities,
       timeZone: this.#o.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+      ...(restore.size === 0 ? {} : { restore }),
+      ignoredImport: (key) => answers.ignored(b.id, key),
       ...(end === undefined || createdBy === undefined
         ? {}
         : {

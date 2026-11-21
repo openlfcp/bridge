@@ -73,6 +73,7 @@ const LATER_TABLES = [
   "authorizations",
   "decisions",
   "ignored_imports",
+  "decision_items",
   "control_exec",
 ];
 
@@ -539,14 +540,49 @@ describe("migration 7: authorizations, decisions, ignored imports (A§7.1–7.2;
   });
 });
 
-describe("migration 8: control_exec, binding generation and last complete check (A§3.4–3.5; E-030)", () => {
-  it("forward adds the table and the two columns, keeps the bindings; back drops them; again is a no-op", () => {
+describe("migration 8: decision items (A§7.2; E-041b)", () => {
+  it("forward creates the table with its checks; back drops it, the decisions as they were", () => {
     const d = db({ migrate: false });
     migrateTo(d, 7);
     seedV1(d);
+    d.prepare(
+      `INSERT INTO decisions (id, binding_id, anomaly_id, kind, task_ids_json, state, decided_at)
+         VALUES ('d1', 'b1', 'n1', 'prefer_lfcp_status', '["t1"]', 'pending', ?)`,
+    ).run(now);
+    migrateTo(d, 8);
+    d.prepare(
+      "INSERT INTO decision_items (decision_id, task_id, state) VALUES ('d1', 't1', 'active')",
+    ).run();
+    expect(() =>
+      d
+        .prepare(
+          "INSERT INTO decision_items (decision_id, task_id, state) VALUES ('d1', 't2', 'maybe')",
+        )
+        .run(),
+    ).toThrow(/CHECK/);
+    expect(() =>
+      d
+        .prepare(
+          "INSERT INTO decision_items (decision_id, task_id, state) VALUES ('nope', 't1', 'active')",
+        )
+        .run(),
+    ).toThrow(/FOREIGN KEY/);
+    migrateTo(d, 7);
+    expect(tables(d)).not.toContain("decision_items");
+    expect(d.prepare("SELECT state FROM decisions").all()).toEqual([{ state: "pending" }]);
+    migrateTo(d, 8);
+    expect(d.prepare("SELECT count(*) AS n FROM decision_items").get()).toEqual({ n: 0 });
+  });
+});
+
+describe("migration 9: control_exec, binding generation and last complete check (A§3.4–3.5; E-030)", () => {
+  it("forward adds the table and the two columns, keeps the bindings; back drops them; again is a no-op", () => {
+    const d = db({ migrate: false });
+    migrateTo(d, 8);
+    seedV1(d);
     const before = schema(d);
-    expect(migrateTo(d, 8)).toEqual([8]);
-    expect(migrateTo(d, 8)).toEqual([]);
+    expect(migrateTo(d, 9)).toEqual([9]);
+    expect(migrateTo(d, 9)).toEqual([]);
     expect(d.prepare("SELECT generation, last_complete_check_at FROM bindings").get()).toEqual({
       generation: 0,
       last_complete_check_at: null,
@@ -563,14 +599,14 @@ describe("migration 8: control_exec, binding generation and last complete check 
     bad(`INSERT INTO control_exec (id, kind, author, state, received_at)
            VALUES ('r1', 'request', 'root', 'accepted', ?)`);
     d.prepare("UPDATE bindings SET generation = 3, last_complete_check_at = ?").run(now);
-    expect(migrateTo(d, 7)).toEqual([7]);
+    expect(migrateTo(d, 8)).toEqual([8]);
     expect(tables(d)).not.toContain("control_exec");
     expect(schema(d)).toEqual(before);
     expect(d.prepare("SELECT id, state FROM bindings").all()).toEqual([
       { id: "b1", state: "bootstrapping" },
     ]);
     expect(new Holds(d).of("b1").map((h) => h.reason)).toEqual(["ownership_lost"]);
-    migrateTo(d, 8);
+    migrateTo(d, 9);
     expect(d.prepare("SELECT generation FROM bindings").get()).toEqual({ generation: 0 });
     expect(d.prepare("SELECT count(*) AS n FROM control_exec").get()).toEqual({ n: 0 });
   });

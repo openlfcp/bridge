@@ -393,6 +393,7 @@ export async function machineProcess(o: {
     process: running,
     transport: running.transport,
     exclusive: (fn) => running.exclusive(fn),
+    connected: () => running.connected(),
     // The helper and the storage are released whatever stop() says (review PR 9b #26).
     async stop(reason = "exit") {
       try {
