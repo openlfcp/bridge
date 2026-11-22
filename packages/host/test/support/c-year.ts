@@ -15,9 +15,12 @@
 // What it measures is in YearResult; c-year-cold.mjs measures a new personal client's cold
 // connection in its own process.
 
+import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import {
   connectionNetwork,
   DataUnitApplier,
@@ -101,10 +104,36 @@ export interface YearResult {
     readonly questions: number;
     readonly snapshots: number;
   };
-  /** control_exec rows and the ids the cleanup removed from C (dedup evidence, A§3.4 step 5). */
-  readonly controlExec: { readonly rows: number; readonly cleaned: number };
+  /**
+   * control_exec rows, the answers the cleanup removed from C, and how many of those still have
+   * their row, applied (the dedup evidence, A§3.4 step 5): `kept` must equal `cleaned`.
+   */
+  readonly controlExec: { readonly rows: number; readonly cleaned: number; readonly kept: number };
   readonly wallMs: number;
   stop(): Promise<void>;
+  /**
+   * Admission of the whole history (A§3.5): a fresh profile over the bridge's stored units, as at a
+   * restart with no state (replayStored). After stop().
+   */
+  admitHistory(): Promise<{ readonly ms: number; readonly units: number }>;
+}
+
+/** The measures of a new personal client's cold connection (c-year-cold.mjs, its own process). */
+export interface ColdResult {
+  readonly coldMs: number;
+  readonly admissionMs: number;
+  readonly maxRssBytes: number;
+}
+
+/** Runs c-year-cold.mjs as a new personal device of the year's root. */
+export async function coldConnect(url: string, y: YearResult): Promise<ColdResult> {
+  const arg = JSON.stringify({ url, C: toHex(y.C), ...y.personal, heartbeatAt: y.lastHeartbeatAt });
+  const script = fileURLToPath(new URL("./c-year-cold.mjs", import.meta.url));
+  const { stdout } = await promisify(execFile)(process.execPath, [script, arg], {
+    timeout: 600_000,
+    maxBuffer: 1 << 20,
+  });
+  return JSON.parse(stdout.trim().split("\n").at(-1) as string) as ColdResult;
 }
 
 const iso = (ms: number) => `${new Date(ms).toISOString().slice(0, 19)}Z`;
@@ -580,6 +609,9 @@ export async function synthesizeYear(o: YearOptions): Promise<YearResult> {
     (id) => s?.answers[id] !== undefined || s?.events[id] !== undefined,
   );
   const rows = (db.prepare("SELECT count(*) AS n FROM control_exec").get() as { n: number }).n;
+  const cleaned = [...cleanedIds].filter((id) => !stillInC.includes(id));
+  const applied = db.prepare("SELECT 1 FROM control_exec WHERE id = ? AND state = 'applied'");
+  const kept = cleaned.filter((id) => applied.get(id) !== undefined).length;
   const bu = await unitsBy(b.storage, C, toHex(B.signer.descriptor.principalId));
   const au = await unitsBy(b.storage, C, toHex(A.signer.descriptor.principalId));
   return {
@@ -589,12 +621,37 @@ export async function synthesizeYear(o: YearOptions): Promise<YearResult> {
     units: { bridge: bu.n, root: au.n },
     bytes: { bridge: bu.bytes, root: au.bytes },
     counts,
-    controlExec: { rows, cleaned: cleanedIds.size - stillInC.length },
+    controlExec: { rows, cleaned: cleaned.length, kept },
     wallMs: Date.now() - started,
     stop: async () => {
       await client.stop();
       await hostB.stop();
       await root.stop();
+    },
+    admitHistory: async () => {
+      const profile = await controlProfile(b.storage, C);
+      const view = await loadControlChain(b.storage, C);
+      if (view?.kind !== "linear") throw new Error("no chain of C");
+      const applier = new DataUnitApplier({
+        storage: b.storage,
+        dek: dekResolver(b.storage, b.secrets, C),
+        handlers: [
+          {
+            dataProfile: profile.dataProfile,
+            codecFor: (u) => profile.codecFor(u),
+            apply: (u, v) => profile.apply(u as never, v as never),
+            applyBatch: (units) => profile.applyBatch(units as never),
+            exclude: (ids) => profile.exclude(ids),
+            has: (id) => profile.has(id),
+            reset: () => profile.reset(),
+          },
+        ],
+      });
+      const t = performance.now();
+      const r = await applier.replayStored(view);
+      const ms = performance.now() - t;
+      if (r.skipped.length > 0) throw new Error(`replay skipped ${JSON.stringify(r.skipped[0])}`);
+      return { ms: Math.round(ms), units: r.replayed.length };
     },
   };
 }

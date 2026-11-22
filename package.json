@@ -13,6 +13,7 @@
     "build": "tsc -b",
     "typecheck": "tsc -b && tsc -p tsconfig.test.json",
     "test": "vitest run",
+    "c-year": "LFCP_C_YEAR=1 LFCP_REQUIRE_LIVE=1 vitest run packages/host/test/c-year.live.test.ts",
     "lint": "biome check . && node scripts/check-boundaries.mjs && node scripts/check-boundaries.mjs --self-test && node scripts/sdk-ts-pack.mjs --self-test",
     "format": "biome check --write ."
   },

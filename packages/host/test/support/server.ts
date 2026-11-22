@@ -10,6 +10,8 @@ import { join } from "node:path";
 
 export interface LiveServer {
   readonly url: string;
+  /** The server's state_dir: what it stores. */
+  readonly stateDir: string;
   stop(): Promise<void>;
   restart(): Promise<void>;
   dispose(): Promise<void>;
@@ -85,6 +87,7 @@ export async function startServer(): Promise<LiveServer> {
   await run();
   return {
     url,
+    stateDir: join(dir, "state"),
     stop,
     restart: run,
     dispose: async () => {
