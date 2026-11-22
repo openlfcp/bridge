@@ -15,5 +15,6 @@ export {
   type ExecState,
   eventOf,
   type Incoming,
+  LATE_CANCEL_DETAIL,
 } from "./exec.js";
 export { type BindingStatus, bindingStatus, markCompleteCheck, nextGeneration } from "./status.js";

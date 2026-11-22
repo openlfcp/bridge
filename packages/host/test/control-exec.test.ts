@@ -5,6 +5,12 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as A from "@automerge/automerge";
+import {
+  SERVICE_CONTROL_PROFILE_ID,
+  SERVICE_CONTROL_ROOT_KEYS,
+  validateServiceControl,
+} from "@openlfcp/shared-objects/service-control";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   type BridgeDatabase,
@@ -65,6 +71,21 @@ const answer = (id: string, qid: string): Incoming => ({
   author: "personal",
 });
 
+/** `C` holding one event as the host writes it, read back by the SDK's §5 validation. */
+const inC = (event: ReturnType<typeof eventOf>) => {
+  const rid = "019a8f00-0000-7000-8000-000000000001";
+  const s = (v: string) => new A.ImmutableString(v);
+  const doc = A.change(A.init<Record<string, unknown>>(), (c) => {
+    for (const k of SERVICE_CONTROL_ROOT_KEYS) c[k] = {};
+    c.profile = s(SERVICE_CONTROL_PROFILE_ID);
+    c.meta = { attemptId: s("a"), createdAt: s(now) };
+    (c.events as Record<string, unknown>)[rid] = Object.fromEntries(
+      Object.entries({ ...event, at: now }).map(([k, v]) => [k, typeof v === "string" ? s(v) : v]),
+    );
+  });
+  const v = validateServiceControl(doc, "R1");
+  return { problems: v.problems, event: v.events[rid] };
+};
 describe("events (A§3.3)", () => {
   it("move only forward; a final state never changes; request-ready and ready are pair-section's", () => {
     expect(canAdvance("received", "executing")).toBe(true);
@@ -215,10 +236,10 @@ describe("the cancel table (A§3.3), one test per row", () => {
     expect(x.cancel("r1")).toBe("late");
     expect(x.beforeEffect("r1", true)).toBe("go");
     expect([intentState("e1"), intentState("e2")]).toEqual(["prepared", "prepared"]);
-    expect(eventOf(x.advance("r1", "applied"))).toEqual({
-      state: "applied",
-      detail: { lateCancel: true },
-    });
+    const event = eventOf(x.advance("r1", "applied"));
+    expect(event).toEqual({ state: "applied", detail: "lateCancel" });
+    // The event is one C admits: `detail` is a string (SERVICE-CONTROL-PROFILE-01 §3).
+    expect(inC(event)).toEqual({ problems: [], event: { ...event, at: now } });
   });
 
   it("already applied or final: the cancel is ignored", () => {

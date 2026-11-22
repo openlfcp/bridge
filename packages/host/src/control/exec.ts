@@ -73,13 +73,16 @@ export interface AdmitOptions {
 
 export type Admitted = { readonly fresh: boolean; readonly row: ExecRow };
 
-/** The event `C` shows for a row (A§3.2 `events`). */
-export function eventOf(row: ExecRow): { state: EventState; code?: string; detail?: unknown } {
+/** `events.detail` of an applied request cancelled after its first effect (A§3.3). */
+export const LATE_CANCEL_DETAIL = "lateCancel";
+
+/** The event `C` shows for a row (A§3.2 `events`; `code` and `detail` are strings there). */
+export function eventOf(row: ExecRow): { state: EventState; code?: string; detail?: string } {
   const state: EventState = row.state === "accepted" ? "received" : row.state;
   return {
     state,
     ...(row.code !== null ? { code: row.code } : {}),
-    ...(row.state === "applied" && row.lateCancel ? { detail: { lateCancel: true } } : {}),
+    ...(row.state === "applied" && row.lateCancel ? { detail: LATE_CANCEL_DETAIL } : {}),
   };
 }
 
