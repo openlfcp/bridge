@@ -76,6 +76,7 @@ const LATER_TABLES = [
   "decision_items",
   "artifact_manifest",
   "certification_manifest",
+  "control_exec",
 ];
 
 const now = "2026-11-10T00:00:00.000Z";
@@ -604,5 +605,42 @@ describe("migration 9: the manifest cache (A§9.1–9.2; E-051)", () => {
     expect(new Holds(d).of("b1").map((h) => h.reason)).toEqual(["ownership_lost"]);
     migrateTo(d, 9);
     expect(d.prepare("SELECT count(*) AS n FROM certification_manifest").get()).toEqual({ n: 0 });
+  });
+});
+
+describe("migration 10: control_exec, binding generation and last complete check (A§3.4–3.5; E-030)", () => {
+  it("forward adds the table and the two columns, keeps the bindings; back drops them; again is a no-op", () => {
+    const d = db({ migrate: false });
+    migrateTo(d, 9);
+    seedV1(d);
+    const before = schema(d);
+    expect(migrateTo(d, 10)).toEqual([10]);
+    expect(migrateTo(d, 10)).toEqual([]);
+    expect(d.prepare("SELECT generation, last_complete_check_at FROM bindings").get()).toEqual({
+      generation: 0,
+      last_complete_check_at: null,
+    });
+    d.prepare(
+      `INSERT INTO control_exec (id, kind, op, binding_id, generation, author, state, received_at)
+         VALUES ('r1', 'request', 'check', 'b1', 0, 'root', 'accepted', ?)`,
+    ).run(now);
+    const bad = (sql: string) => expect(() => d.prepare(sql).run(now)).toThrow(/CHECK|UNIQUE/);
+    bad(`INSERT INTO control_exec (id, kind, author, state, received_at)
+           VALUES ('r2', 'event', 'root', 'accepted', ?)`);
+    bad(`INSERT INTO control_exec (id, kind, author, state, received_at)
+           VALUES ('r3', 'request', 'root', 'received', ?)`);
+    bad(`INSERT INTO control_exec (id, kind, author, state, received_at)
+           VALUES ('r1', 'request', 'root', 'accepted', ?)`);
+    d.prepare("UPDATE bindings SET generation = 3, last_complete_check_at = ?").run(now);
+    expect(migrateTo(d, 9)).toEqual([9]);
+    expect(tables(d)).not.toContain("control_exec");
+    expect(schema(d)).toEqual(before);
+    expect(d.prepare("SELECT id, state FROM bindings").all()).toEqual([
+      { id: "b1", state: "bootstrapping" },
+    ]);
+    expect(new Holds(d).of("b1").map((h) => h.reason)).toEqual(["ownership_lost"]);
+    migrateTo(d, 10);
+    expect(d.prepare("SELECT generation FROM bindings").get()).toEqual({ generation: 0 });
+    expect(d.prepare("SELECT count(*) AS n FROM control_exec").get()).toEqual({ n: 0 });
   });
 });

@@ -14,6 +14,8 @@
 // Version 7: authorizations of exact inverse sets, a person's decisions, ignored imports (A§7.1–7.2).
 // Version 8: the items of a decision, each finished on its own (A§7.2 "writes finished").
 // Version 9: the cache of the artifact and certification manifests (A§9.1–9.2, E-051).
+// Version 10: the durable execution of requests and answers of `C`, and a binding's generation and
+// last complete check (A§3.4–3.5).
 //
 // Beyond §3: STRICT tables, NOT NULL where a row has no meaning without the
 // value, and foreign keys to installations and bindings (PRAGMA
@@ -474,8 +476,62 @@ const V9: Migration = {
   down: ["DROP TABLE certification_manifest", "DROP TABLE artifact_manifest"],
 };
 
+// Version 10 (A§3.4, E-030): every request (`rid`) and answer (`aid`) of `C` the host has seen, written
+// before any effect, in the transaction that plans its effects (`effect_ids_json`). A row is never
+// deleted: an id seen again — after the map is cleaned up, after a crash — is not executed again.
+// `state` is the event's (A§3.3), `accepted` standing for `received`. The binding gains its
+// `generation` (a request for another generation is `stale`) and `last_complete_check_at` (A§3.5).
+// Down drops the table and both columns (an older bridge does not read `C`).
+const V10: Migration = {
+  version: 10,
+  name: "control_exec, binding generation and last complete check",
+  up: [
+    `CREATE TABLE control_exec (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind IN ('request','answer')),
+      op TEXT,
+      question_id TEXT,
+      binding_id TEXT,
+      generation INTEGER,
+      choice TEXT,
+      author TEXT NOT NULL,
+      effect_ids_json TEXT NOT NULL DEFAULT '[]',
+      state TEXT NOT NULL CHECK (state IN ('accepted','executing','request-ready','ready',
+        'applied','failed','rejected','stale','cancelled')),
+      code TEXT,
+      late_cancel INTEGER NOT NULL DEFAULT 0 CHECK (late_cancel IN (0,1)),
+      cancel_seen_at TEXT,
+      effect_started_at TEXT,
+      received_at TEXT NOT NULL,
+      ended_at TEXT
+    ) STRICT`,
+    "CREATE INDEX control_exec_open ON control_exec(state) WHERE ended_at IS NULL",
+    "CREATE INDEX control_exec_answers ON control_exec(question_id) WHERE kind = 'answer'",
+    "ALTER TABLE bindings ADD COLUMN generation INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE bindings ADD COLUMN last_complete_check_at TEXT",
+  ],
+  down: [
+    "ALTER TABLE bindings DROP COLUMN last_complete_check_at",
+    "ALTER TABLE bindings DROP COLUMN generation",
+    "DROP INDEX control_exec_answers",
+    "DROP INDEX control_exec_open",
+    "DROP TABLE control_exec",
+  ],
+};
+
 /** Every migration, in order. */
-export const MIGRATIONS: readonly Migration[] = Object.freeze([V1, V2, V3, V4, V5, V6, V7, V8, V9]);
+export const MIGRATIONS: readonly Migration[] = Object.freeze([
+  V1,
+  V2,
+  V3,
+  V4,
+  V5,
+  V6,
+  V7,
+  V8,
+  V9,
+  V10,
+]);
 
 /** The schema version this build writes. */
 export const SCHEMA_VERSION = MIGRATIONS.length;
