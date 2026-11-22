@@ -195,10 +195,11 @@ export class ControlExec {
         .prepare("SELECT generation, state FROM bindings WHERE id = ?")
         .get(i.binding) as { generation: number; state: string } | undefined;
       // A request for another generation, or for a binding no longer there, is stale (A§3.4).
+      // pair-section names the section it creates (A§4.3): no local row yet is no staleness.
       if (
-        b === undefined ||
-        b.state === "removed" ||
-        (i.generation ?? b.generation) !== b.generation
+        b === undefined
+          ? !(i.kind === "request" && i.op === "pair-section")
+          : b.state === "removed" || (i.generation ?? b.generation) !== b.generation
       )
         return { state: "stale" as const, code: "stale_generation" };
     }

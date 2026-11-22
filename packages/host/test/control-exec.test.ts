@@ -86,6 +86,14 @@ const inC = (event: ReturnType<typeof eventOf>) => {
   const v = validateServiceControl(doc, "R1");
   return { problems: v.problems, event: v.events[rid] };
 };
+/** A pair-section request for a section with no binding yet (A§4.3 step 1). */
+const pairReq = (id: string): Incoming => ({
+  kind: "request",
+  id,
+  op: "pair-section",
+  binding: "bX",
+  author: "root",
+});
 describe("events (A§3.3)", () => {
   it("move only forward; a final state never changes; request-ready and ready are pair-section's", () => {
     expect(canAdvance("received", "executing")).toBe(true);
@@ -272,7 +280,18 @@ describe("the cancel table (A§3.3), one test per row", () => {
 
   it("pair-section passes request-ready and ready before its outcome", () => {
     const x = new ControlExec(d);
-    x.admit({ kind: "request", id: "p1", op: "pair-section", author: "root" });
+    // The section it pairs has no binding yet: not stale (A§4.3 step 1).
+    let planned = 0;
+    const { row } = x.admit(pairReq("p1"), {
+      plan: () => {
+        planned++;
+        return [];
+      },
+    });
+    expect([row.state, row.binding, planned]).toEqual(["accepted", "bX", 1]);
+    // Other ops on a binding that is not there stay stale; so does pair-section's old generation.
+    expect(x.admit({ ...req("r1"), binding: "bX" }).row.state).toBe("stale");
+    expect(x.admit({ ...pairReq("p2"), binding: "b1", generation: 5 }).row.state).toBe("stale");
     x.advance("p1", "executing");
     expect(eventOf(x.advance("p1", "request-ready"))).toEqual({ state: "request-ready" });
     x.advance("p1", "ready");
