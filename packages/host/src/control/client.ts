@@ -33,6 +33,8 @@ import { bindingStatus } from "./status.js";
 export const HEARTBEAT_MS = 30 * 60_000;
 export const BINDING_WRITE_MS = 60_000;
 export const CLEANUP_EVERY_MS = 60 * 60_000;
+/** The longest wait before a repeatable outcome (or a thrown handler) runs its row again. */
+export const RETRY_MAX_MS = 5 * 60_000;
 
 /** What the client needs of `C` open on the host (SectionHost.openControl). */
 export interface ControlPort {
@@ -112,6 +114,8 @@ export class ControlClient {
   readonly #now: () => number;
   readonly #running = new Map<string, Promise<void>>();
   readonly #repeat = new Map<string, string>();
+  /** A row to run again not before `at`, after `tries` repeatable outcomes in a row. */
+  readonly #retry = new Map<string, { tries: number; at: number }>();
   readonly #bindingWritten = new Map<string, number>();
   #queue: Promise<void> = Promise.resolve();
   #recovered = false;
@@ -247,6 +251,7 @@ export class ControlClient {
 
   #run(row: ExecRow, s: ServiceControlValidation): void {
     if (this.#running.has(row.id) || this.#stopping) return;
+    if ((this.#retry.get(row.id)?.at ?? Number.NEGATIVE_INFINITY) > this.#now()) return;
     const entry = row.kind === "request" ? s.requests[row.id] : s.answers[row.id];
     const h = row.kind === "request" ? this.#o.ops?.[row.op ?? ""] : this.#o.answer;
     if (entry === undefined || h === undefined) return;
@@ -255,18 +260,31 @@ export class ControlClient {
     const p = h
       .run({ row, entry, effect })
       .then((out) => {
-        if ("repeat" in out) this.#repeat.set(row.id, out.repeat);
-        else {
+        if ("repeat" in out) {
+          this.#repeat.set(row.id, out.repeat);
+          this.#backoff(row.id);
+        } else {
           this.#repeat.delete(row.id);
+          this.#retry.delete(row.id);
           this.#exec.advance(row.id, out.state, out.code);
         }
       })
-      .catch((e) => this.#o.onError?.(e))
+      .catch((e) => {
+        this.#backoff(row.id);
+        this.#o.onError?.(e);
+      })
       .finally(() => {
         this.#running.delete(row.id);
         if (!this.#stopped) void this.tick();
       });
     this.#running.set(row.id, p);
+  }
+
+  /** The row stays open (`executing`) and runs again after tickMs, doubling up to RETRY_MAX_MS. */
+  #backoff(id: string): void {
+    const tries = (this.#retry.get(id)?.tries ?? 0) + 1;
+    const wait = Math.min(RETRY_MAX_MS, (this.#o.tickMs ?? 5000) * 2 ** (tries - 1));
+    this.#retry.set(id, { tries, at: this.#now() + wait });
   }
 
   /** `events` from control_exec, forward only; an applied answer resolves its question. */

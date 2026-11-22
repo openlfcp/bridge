@@ -287,4 +287,42 @@ describe("ControlClient", () => {
     expect(Object.keys(d.s.bindings)).toEqual([REF2]);
     expect(d.s.bindings[REF2]).toMatchObject({ list: "Private" });
   });
+
+  it("a repeatable outcome keeps the row executing and runs it again only after a backoff", async () => {
+    const c = fakeC();
+    let runs = 0;
+    c.s.requests.r = request("check");
+    const cc = client(c.port, {
+      check: {
+        run: async ({ effect }) => {
+          runs++;
+          effect();
+          return runs < 3 ? { repeat: "helper_unavailable" } : { state: "applied" };
+        },
+      },
+    });
+    const settle = async () => {
+      for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    };
+    await cc.tick();
+    await settle();
+    expect(runs).toBe(1);
+    expect(c.s.events.r).toMatchObject({ state: "executing", code: "helper_unavailable" });
+    now += 4999;
+    await cc.tick();
+    expect(runs).toBe(1);
+    now += 1;
+    await cc.tick();
+    await settle();
+    expect(runs).toBe(2);
+    now += 9999;
+    await cc.tick();
+    expect(runs).toBe(2);
+    now += 1;
+    await cc.tick();
+    await cc.stop();
+    await client(c.port).tick();
+    expect(runs).toBe(3);
+    expect(c.s.events.r).toMatchObject({ state: "applied" });
+  });
 });
