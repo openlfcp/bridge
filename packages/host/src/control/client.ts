@@ -310,6 +310,8 @@ export class ControlClient {
 
   /** The row stays open (`executing`) and runs again after tickMs, doubling up to RETRY_MAX_MS. */
   #backoff(id: string): void {
+    // Before its first effect too (A§3.3): no effect started, so a cancel still stops it.
+    if (this.#exec.get(id)?.state === "accepted") this.#exec.advance(id, "executing");
     const tries = (this.#retry.get(id)?.tries ?? 0) + 1;
     const wait = Math.min(RETRY_MAX_MS, (this.#o.tickMs ?? 5000) * 2 ** (tries - 1));
     this.#retry.set(id, { tries, at: this.#now() + wait });

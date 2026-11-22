@@ -326,6 +326,34 @@ describe("ControlClient", () => {
     expect(c.s.events.r).toMatchObject({ state: "applied" });
   });
 
+  it("a repeatable outcome before the first effect shows executing{code}; a cancel still stops it", async () => {
+    const c = fakeC();
+    let runs = 0;
+    c.s.requests.r = request("check");
+    const cc = client(c.port, {
+      check: {
+        run: async () => {
+          runs++;
+          return { repeat: "helper_unavailable" };
+        },
+      },
+    });
+    const settle = async () => {
+      for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    };
+    await cc.tick();
+    await settle();
+    expect(runs).toBe(1);
+    expect(c.s.events.r).toMatchObject({ state: "executing", code: "helper_unavailable" });
+    c.s.cancels.r = { at: "x" };
+    now += 5000;
+    await cc.tick();
+    await settle();
+    await cc.stop();
+    expect(runs).toBe(1);
+    expect(c.s.events.r).toMatchObject({ state: "cancelled" });
+  });
+
   it("cleans a superseded question and its answers 7 days after it was seen; control_exec stays", async () => {
     const c = fakeC();
     c.s.questions.q = { binding: REF1, generation: 0, snapshotHash: "h", superseded: { by: "q2" } };
