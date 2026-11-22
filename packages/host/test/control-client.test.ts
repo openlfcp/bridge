@@ -325,4 +325,27 @@ describe("ControlClient", () => {
     expect(runs).toBe(3);
     expect(c.s.events.r).toMatchObject({ state: "applied" });
   });
+
+  it("cleans a superseded question and its answers 7 days after it was seen; control_exec stays", async () => {
+    const c = fakeC();
+    c.s.questions.q = { binding: REF1, generation: 0, snapshotHash: "h", superseded: { by: "q2" } };
+    c.s.answers.a = { qid: "q", snapshotHash: "h", choice: "x", at: "2026-11-19T10:00:00Z" };
+    await client(c.port).tick();
+    expect(c.s.events.a).toMatchObject({ state: "rejected", code: "snapshot_changed" });
+    now += 6 * 24 * 3600_000;
+    await client(c.port).tick();
+    expect(c.s.questions.q).toBeDefined();
+    now += 2 * 24 * 3600_000;
+    await client(c.port).tick();
+    expect(c.s.questions.q).toBeUndefined();
+    expect(c.s.answers.a).toBeUndefined();
+    expect(c.s.events.a).toBeUndefined();
+    expect(db.prepare("SELECT state FROM control_exec WHERE id = 'a'").get()).toEqual({
+      state: "rejected",
+    });
+    await client(c.port).tick();
+    expect(
+      db.prepare("SELECT count(*) AS n FROM meta WHERE key LIKE 'control_superseded:%'").get(),
+    ).toEqual({ n: 0 });
+  });
 });

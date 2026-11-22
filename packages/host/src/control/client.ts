@@ -182,14 +182,42 @@ export class ControlClient {
       this.#recovered = true;
     }
     for (const rid of cancels) this.#exec.cancel(rid, at);
+    this.#noteSuperseded(s, at);
     this.#admit(s, at, cancels);
     for (const row of this.#exec.open()) this.#run(row, s);
     const intents = [...this.#events(s, at), ...this.#publish(s, now, at)];
     if (intents.length > 0) await this.#commit(intents);
     if (now - this.#cleanedAt >= CLEANUP_EVERY_MS) {
       this.#cleanedAt = now;
-      for (const change of serviceControlCleanup(s, now)) await this.#commit(change);
+      const supersededAt = (qid: string) => this.#supersededAt(qid);
+      for (const change of serviceControlCleanup(s, now, { supersededAt }))
+        await this.#commit(change);
     }
+  }
+
+  /**
+   * `superseded` holds no time (§2.1): the host records when it first saw it, durably, so the
+   * cleanup (§9) can count the 7 days; the record goes once the question is gone.
+   */
+  #noteSuperseded(s: ServiceControlValidation, at: string): void {
+    const prefix = `control_superseded:${this.#o.installation}:`;
+    const db = this.#o.db;
+    const put = db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)");
+    for (const [qid, q] of Object.entries(s.questions))
+      if (q.superseded !== undefined) put.run(prefix + qid, at);
+    const keys = db
+      .prepare("SELECT key FROM meta WHERE substr(key, 1, ?) = ?")
+      .all(prefix.length, prefix) as { key: string }[];
+    const del = db.prepare("DELETE FROM meta WHERE key = ?");
+    for (const { key } of keys)
+      if (s.questions[key.slice(prefix.length)] === undefined) del.run(key);
+  }
+
+  #supersededAt(qid: string): string | undefined {
+    const row = this.#o.db
+      .prepare("SELECT value FROM meta WHERE key = ?")
+      .get(`control_superseded:${this.#o.installation}:${qid}`) as { value: string } | undefined;
+    return row?.value;
   }
 
   #admit(s: ServiceControlValidation, at: string, cancels: ReadonlySet<string>): void {
