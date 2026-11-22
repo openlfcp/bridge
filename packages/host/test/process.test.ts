@@ -430,7 +430,7 @@ describe("review PR 9b", () => {
     const find = b.t.find.bind(b.t);
     b.t.find = async (q, sc) => ({
       ...(await find(q, sc)),
-      complete: "urlPrefix" in q ? false : true,
+      complete: !("urlPrefix" in q),
     });
     await b.edit(setTitle(b.now(task.id), "B"));
     await proc.pass("b");
