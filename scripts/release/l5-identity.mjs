@@ -3,7 +3,7 @@
 // what the job does with the host's own code (run `pnpm build` first) and never in a release build.
 //
 //   l5-identity.mjs trust-key <public-key>
-//       puts this one key into packages/host/src/artifact/keys.ts (the job's own build only: the
+//       adds this one key to packages/host/src/artifact/keys.ts (the job's own build only: the
 //       key is the job's ephemeral manifest key, A§9.1; the release chain never runs this)
 //   l5-identity.mjs certify <artifact-manifest.json> --key <private.pem> --macos <x.y> --os-build <b>
 //                   --out <certification-manifest.json>
@@ -48,9 +48,10 @@ switch (command) {
     if (!/^[A-Za-z0-9+/]{43}=$/.test(target)) usage("trust-key: a raw Ed25519 key in base64");
     const file = join(ROOT, "packages/host/src/artifact/keys.ts");
     const text = readFileSync(file, "utf8");
-    const empty = "Object.freeze([])";
-    if (text.split(empty).length !== 2) usage(`trust-key: ${file} has no single ${empty}`);
-    writeFileSync(file, text.replace(empty, `Object.freeze(["${target}"])`));
+    // Prepended to the list, whether it is empty or already holds the release key.
+    const open = "Object.freeze([";
+    if (text.split(open).length !== 2) usage(`trust-key: ${file} has no single ${open}`);
+    writeFileSync(file, text.replace(open, `${open}"${target}", `));
     break;
   }
   case "certify": {
