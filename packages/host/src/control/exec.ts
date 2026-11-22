@@ -12,6 +12,12 @@
 // | an effect started                         | carried through; applied{lateCancel}               |
 // | the event is final                        | ignored                                            |
 // | after a crash (recover)                   | the same rules by control_exec.state and cancels  |
+// | pair-section before consume of J_X        | cancelled; the unapproved D_X is dropped locally   |
+// | pair-section after consume (`ready`)      | no cancel (A§4.4): nothing changes, no lateCancel  |
+//
+// pair-section's effects (D_X, requestPairing, pairing/<rid>) come before the consume, so for it a
+// started effect is no limit: the plugin writes cancels only while it has not consumed J_X, and
+// the host reaches `ready` only after the approval phases, which begin with the consume.
 //
 // The executor asks `beforeEffect` before each effect of `effect_ids`.
 
@@ -73,6 +79,11 @@ export interface AdmitOptions {
 
 export type Admitted = { readonly fresh: boolean; readonly row: ExecRow };
 
+export interface ControlExecOptions {
+  /** Drops the unapproved D_X of a pair-section cancelled before consume, in its transaction. */
+  readonly dropUnapprovedDevice?: (row: ExecRow) => void;
+}
+
 /** `events.detail` of an applied request cancelled after its first effect (A§3.3). */
 export const LATE_CANCEL_DETAIL = "lateCancel";
 
@@ -131,7 +142,10 @@ const row = (r: Raw): ExecRow =>
 const finalState = (s: ExecState) => s !== "accepted" && isFinal(s);
 
 export class ControlExec {
-  constructor(private readonly db: BridgeDatabase) {}
+  constructor(
+    private readonly db: BridgeDatabase,
+    private readonly o: ControlExecOptions = {},
+  ) {}
 
   get(id: string): ExecRow | undefined {
     const r = this.db.prepare("SELECT * FROM control_exec WHERE id = ?").get(id) as Raw | undefined;
@@ -222,14 +236,18 @@ export class ControlExec {
   /**
    * `cancels/<rid>` seen for a row (A§3.3): before its first effect it is cancelled and its
    * prepared intents superseded; after, it is carried through (lateCancel); a final row ignores
-   * it. `unknown` — no row yet: `admit` is told `cancelled` when the request comes.
+   * it. `unknown` — no row yet: `admit` is told `cancelled` when the request comes. pair-section:
+   * before consume it is cancelled whatever it did, its unapproved D_X dropped; after consume
+   * (`ready`) it is `noncancellable` — left as it is, not a late cancel.
    */
-  cancel(id: string, now = iso()): "cancelled" | "late" | "ignored" | "unknown" {
+  cancel(id: string, now = iso()): "cancelled" | "late" | "ignored" | "noncancellable" | "unknown" {
     return this.db.transaction(() => {
       const r = this.get(id);
       if (r === undefined) return "unknown";
       if (finalState(r.state)) return "ignored";
-      if (r.effectStartedAt !== null) {
+      const pairing = r.op === "pair-section";
+      if (pairing && r.state === "ready") return "noncancellable";
+      if (r.effectStartedAt !== null && !pairing) {
         this.db
           .prepare(
             "UPDATE control_exec SET late_cancel = 1, cancel_seen_at = coalesce(cancel_seen_at, ?) WHERE id = ?",
@@ -242,6 +260,7 @@ export class ControlExec {
            WHERE id = ? AND state = 'prepared'`,
       );
       for (const e of r.effectIds) supersede.run(e);
+      if (pairing) this.o.dropUnapprovedDevice?.(r);
       this.db
         .prepare(
           `UPDATE control_exec SET state = 'cancelled', cancel_seen_at = coalesce(cancel_seen_at, ?),

@@ -94,6 +94,18 @@ const pairReq = (id: string): Incoming => ({
   binding: "bX",
   author: "root",
 });
+/** D_X as pair-section writes it before the approval: an installation of its own. */
+const device = (id: string) =>
+  d
+    .prepare(
+      "INSERT INTO installations (id, dir, principal, root, label, created_at) VALUES (?, ?, 'p', 'r', 'l', ?)",
+    )
+    .run(id, id, now);
+const devices = () =>
+  (d.prepare("SELECT id FROM installations ORDER BY id").all() as { id: string }[]).map(
+    (r) => r.id,
+  );
+
 describe("events (A§3.3)", () => {
   it("move only forward; a final state never changes; request-ready and ready are pair-section's", () => {
     expect(canAdvance("received", "executing")).toBe(true);
@@ -275,6 +287,46 @@ describe("the cancel table (A§3.3), one test per row", () => {
     expect(carried.map((r) => [r.id, r.state, r.lateCancel])).toEqual([
       ["r2", "executing", true],
       ["r3", "accepted", false],
+    ]);
+  });
+
+  it("pair-section before consume of J_X: cancelled, even after its effects; D_X dropped", () => {
+    const x = new ControlExec(d, {
+      dropUnapprovedDevice: (r) => {
+        expect(r.id).toBe("p1");
+        d.prepare("DELETE FROM installations WHERE id = 'dX'").run();
+      },
+    });
+    x.admit(pairReq("p1"), { plan: () => [] });
+    expect(x.beforeEffect("p1", false)).toBe("go");
+    device("dX"); // D_X, requestPairing, pairing/<rid>
+    x.advance("p1", "request-ready");
+    expect(x.cancel("p1")).toBe("cancelled");
+    expect(eventOf(x.get("p1") as never)).toEqual({ state: "cancelled" });
+    expect(devices()).toEqual(["i1"]);
+    // Not the generic late cancel: no applied{lateCancel} follows.
+    expect(x.get("p1")?.lateCancel).toBe(false);
+    expect(() => x.advance("p1", "ready")).toThrow(/cancelled → ready/);
+  });
+
+  it("pair-section after consume: no cancel; it goes on to its outcome, not lateCancel", () => {
+    let dropped = 0;
+    const x = new ControlExec(d, { dropUnapprovedDevice: () => dropped++ });
+    x.admit(pairReq("p1"));
+    x.beforeEffect("p1", false);
+    device("dX");
+    x.advance("p1", "request-ready");
+    x.advance("p1", "ready"); // the approval phases began with the consume (A§4.4)
+    expect(x.cancel("p1")).toBe("noncancellable");
+    expect(x.beforeEffect("p1", true)).toBe("go");
+    expect(x.recover(new Set(["p1"])).map((r) => [r.id, r.state])).toEqual([["p1", "ready"]]);
+    expect(dropped).toBe(0);
+    expect(devices()).toEqual(["dX", "i1"]);
+    const row = x.advance("p1", "applied");
+    expect([row.lateCancel, row.cancelSeenAt, eventOf(row)]).toEqual([
+      false,
+      null,
+      { state: "applied" },
     ]);
   });
 

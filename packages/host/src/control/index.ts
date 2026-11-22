@@ -11,6 +11,7 @@ export {
   type AdmitOptions,
   type Admitted,
   ControlExec,
+  type ControlExecOptions,
   type ExecRow,
   type ExecState,
   eventOf,
