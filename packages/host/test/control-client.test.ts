@@ -354,6 +354,35 @@ describe("ControlClient", () => {
     expect(c.s.events.r).toMatchObject({ state: "cancelled" });
   });
 
+  it("keeps the unknown fields of service's nested maps while it updates the known ones", async () => {
+    const c = fakeC();
+    c.s.service = {
+      instance: "old",
+      kind: "reminders",
+      cert: { level: "a", futureCert: "keep" },
+      protocol: { v: 1, ops: [], questionKinds: [], futureOption: "keep" },
+    };
+    const cc = new ControlClient({
+      db,
+      installation: "i1",
+      port: c.port,
+      ops: { check: { run: async () => ({ state: "applied" }) } },
+      service: () => ({ instance: "x", kind: "reminders", cert: { level: "b" } }),
+      status: () => ({ state: "running" }),
+      now: () => now,
+    });
+    await cc.tick();
+    expect(c.s.service).toEqual({
+      instance: "x",
+      kind: "reminders",
+      cert: { level: "b", futureCert: "keep" },
+      protocol: { v: 1, ops: ["check"], questionKinds: [], futureOption: "keep" },
+    });
+    const writes = c.commits.flat().filter((i) => i.intent === "service.put").length;
+    await cc.tick();
+    expect(c.commits.flat().filter((i) => i.intent === "service.put").length).toBe(writes);
+  });
+
   it("cleans a superseded question and its answers 7 days after it was seen; control_exec stays", async () => {
     const c = fakeC();
     c.s.questions.q = { binding: REF1, generation: 0, snapshotHash: "h", superseded: { by: "q2" } };

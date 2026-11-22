@@ -100,6 +100,19 @@ const same = (want: Readonly<Record<string, unknown>>, have: unknown) =>
     canon(
       Object.fromEntries(Object.keys(want).map((k) => [k, (have as Record<string, unknown>)[k]])),
     );
+const plain = (v: unknown): v is Record<string, unknown> =>
+  v !== null && typeof v === "object" && !Array.isArray(v);
+/**
+ * `want` over what `C` holds: `service.put` replaces a field's value whole, so a nested map keeps
+ * the keys it has that the host does not write (A§3.5a: unknown fields are kept).
+ */
+const keep = (have: unknown, want: unknown): unknown =>
+  plain(have) && plain(want)
+    ? {
+        ...have,
+        ...Object.fromEntries(Object.entries(want).map(([k, v]) => [k, keep(have[k], v)])),
+      }
+    : want;
 const resourceRef = (hex: string) => {
   try {
     return /^[0-9a-f]{64}$/.test(hex) ? toBase64url(fromHex(hex)) : undefined;
@@ -353,7 +366,7 @@ export class ControlClient {
   /** `service`, `status` and `bindings/<X>` (A§3.5). */
   #publish(s: ServiceControlValidation, now: number, at: string): ServiceControlIntent[] {
     const out: ServiceControlIntent[] = [];
-    const service = {
+    const fresh: Record<string, unknown> = {
       ...this.#o.service(),
       protocol: {
         v: 1,
@@ -361,6 +374,10 @@ export class ControlClient {
         questionKinds: [...(this.#o.questionKinds ?? [])],
       },
     };
+    const have = plain(s.service) ? s.service : {};
+    const service = Object.fromEntries(
+      Object.entries(fresh).map(([k, v]) => [k, keep(have[k], v)]),
+    );
     if (!same(service, s.service)) out.push({ intent: "service.put", fields: service });
     const st = this.#o.status();
     const cur = s.status as
