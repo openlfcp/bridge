@@ -1,4 +1,14 @@
 export {
+  BINDING_WRITE_MS,
+  CLEANUP_EVERY_MS,
+  ControlClient,
+  type ControlClientOptions,
+  type ControlPort,
+  HEARTBEAT_MS,
+  type OpHandler,
+  type OpOutcome,
+} from "./client.js";
+export {
   canAdvance,
   checkCode,
   EVENT_STATES,

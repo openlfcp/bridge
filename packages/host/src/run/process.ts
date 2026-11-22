@@ -18,6 +18,7 @@
 import type { RemindersTransport } from "@openlfcp/bridge-reminders";
 import type { BatchStatus, Receipt } from "@openlfcp/client";
 import { fromHex, type PrincipalId, type ResourceId, resourceId, toHex } from "@openlfcp/core";
+import type { ControlPort } from "../control/client.js";
 import type { BridgeDatabase } from "../db/database.js";
 import { Holds } from "../db/holds.js";
 import { Journal } from "../db/journal.js";
@@ -72,6 +73,8 @@ export interface InstallationPorts {
   readonly createdBy?: PrincipalId;
   /** A blocked batch (§5.9): the access tracker asks revocationStatus. */
   readonly onBlocked?: (resourceHex: string) => void;
+  /** The service resource `C` of this installation, open on its host (A§3.3–3.5). */
+  readonly control?: ControlPort;
 }
 
 export type WriteModeTransport = RemindersTransport & {

@@ -32,6 +32,8 @@ import {
   type SnapshotBinding,
   SyncClient,
   type SyncEvent,
+  serviceControlPort,
+  serviceControlSignerFacts,
   startSyncDriver,
   type UpgradeProbe,
   type WebSocketFactory,
@@ -45,9 +47,20 @@ import {
   type SectionsNodesChanged,
   SharedSectionsDataProfile,
 } from "@openlfcp/shared-objects/sections";
+import {
+  ServiceControlDataProfile,
+  type ServiceControlSignerClass,
+  serviceControlSignerClass,
+} from "@openlfcp/shared-objects/service-control";
 import type { LfcpStorage, SecretStore } from "@openlfcp/storage";
 import { nodeUpgradeProbe } from "@openlfcp/storage-node";
-import type { Signer } from "@openlfcp/wire";
+import {
+  type ControlState,
+  controlRecordSigner,
+  decodeControlRecord,
+  type Signer,
+} from "@openlfcp/wire";
+import type { ControlPort } from "../control/client.js";
 import { type BasisCheck, type GuardedBinding, guardCommitBinding } from "./commit-guard.js";
 import { type LiveChange, LiveTracker } from "./live.js";
 import { LIVENESS, type LivenessOptions, LivenessProbe } from "./liveness.js";
@@ -376,6 +389,69 @@ export class SectionHost {
     const opened: OpenedSection = { resource, profile, checkpointer, guard, unsubscribe };
     this.#sections.set(toHex(resource), opened);
     return opened;
+  }
+
+  /**
+   * Opens the service resource `C` (A§3.3–3.5) whose chain and keys are stored, as its service
+   * device: the port the ControlClient reads and writes it through. No checkpoint and no Snapshot
+   * of `C` (E-014): the replica is rebuilt from the units at each start; the state is read only
+   * while `C` is LIVE.
+   */
+  async openControl(
+    resource: ResourceId,
+    signerClass: ServiceControlSignerClass = "service-device",
+  ): Promise<ControlPort> {
+    if (this.#stopped) throw new Error("the section host is stopped");
+    const { storage, secrets } = this.#o;
+    const first = (await storage.control.records(resource))[0];
+    if (first === undefined) throw new Error("no Control Chain of C is stored here");
+    const genesis = decodeControlRecord(first.bytes);
+    if (genesis.body.type !== "GENESIS") throw new Error("C's chain does not start with a Genesis");
+    const profile = new ServiceControlDataProfile({
+      resource,
+      root: genesis.body.owner.principalId,
+      genesisSigner: controlRecordSigner(genesis),
+      signerClassOf: (u) =>
+        u.control === undefined
+          ? "other"
+          : serviceControlSignerClass(
+              serviceControlSignerFacts(u.control as ControlState, u.actor),
+            ),
+    });
+    this.#client.open({
+      resourceId: resource,
+      applier: new DataUnitApplier({
+        storage,
+        dek: dekResolver(storage, secrets, resource),
+        handlers: [
+          {
+            dataProfile: profile.dataProfile,
+            codecFor: (u) => profile.codecFor(u),
+            apply: (u, v) => profile.apply(u as never, v as never),
+            applyBatch: (units) => profile.applyBatch(units as never),
+            exclude: (ids) => profile.exclude(ids),
+            has: (id) => profile.has(id),
+            reset: () => profile.reset(),
+          },
+        ],
+      }),
+      commit: profile.commitBinding(this.me, signerClass) as CommitBinding<unknown>,
+    });
+    const port = serviceControlPort({
+      client: this.#client,
+      profile,
+      resource,
+      synchronised: () => this.#live.isLive(resource),
+    });
+    return {
+      state: () => port.state() as ReturnType<ControlPort["state"]>,
+      authorOf: (container, key) =>
+        profile.replica
+          .creatorsOf(container, key)
+          .find((c) => c.writerClass === "root" || c.writerClass === "personal")?.signer,
+      commit: (intents, operationId) => port.commit(intents, operationId),
+      onChanged: (l) => profile.onChanged(() => l()),
+    };
   }
 
   /** Connects and starts the sync driver. */

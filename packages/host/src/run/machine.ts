@@ -18,6 +18,7 @@
 // the helper app and is the owner's verification run (docs/devel/testing/verification-run.md).
 
 import { execFileSync } from "node:child_process";
+import { hostname } from "node:os";
 import {
   EventKitTransport,
   type HelperLink,
@@ -33,6 +34,7 @@ import {
 } from "@openlfcp/client";
 import { fromHex, type ResourceId, resourceId } from "@openlfcp/core";
 import { principalRef } from "@openlfcp/shared-objects";
+import { SERVICE_CONTROL_PROFILE_ID } from "@openlfcp/shared-objects/service-control";
 import { openNodeInstallation } from "@openlfcp/storage-node";
 import type { ShellCode } from "../app/serve.js";
 import { ManifestCache } from "../artifact/cache.js";
@@ -40,6 +42,7 @@ import { TRUSTED_MANIFEST_KEYS } from "../artifact/keys.js";
 import { refreshGate, WriteGate } from "../artifact/write-gate.js";
 import { LIST_PREFIX, VERIFY_PREFIX } from "../bootstrap.js";
 import type { BridgeConfig, BridgePaths } from "../config.js";
+import { ControlClient } from "../control/client.js";
 import type { BridgeDatabase } from "../db/database.js";
 import { Holds } from "../db/holds.js";
 import { Journal } from "../db/journal.js";
@@ -69,7 +72,8 @@ export async function installationPorts(
     // Idempotent: the rows of the ready paired sections an older pairing did not store.
     await storePairedResources(node);
     // The coordinator of the paired sections, whether or not each is ready (as before 0.6.0).
-    const url = (await pairedResources(node))[0]?.url;
+    const paired = await pairedResources(node);
+    const url = paired[0]?.url;
     if (url === undefined) continue;
     const host = new SectionHost({
       url,
@@ -87,6 +91,11 @@ export async function installationPorts(
       },
       now,
     });
+    // C on the same coordinator, opened before the host starts (A§3.3–3.5).
+    const C = paired.find(
+      (p) => p.profile === SERVICE_CONTROL_PROFILE_ID && p.ready && p.url === url,
+    )?.resource;
+    const control = C === undefined ? undefined : await host.openControl(C);
     const me = node.installation.signer.descriptor.principalId;
     const root = (await deviceIdentity(node))?.root;
     ports.push({
@@ -98,6 +107,7 @@ export async function installationPorts(
       createdBy: me,
       // §5.9: a blocked batch → the access tracker asks revocationStatus.
       onBlocked: (hex) => void access.refused(resourceId(fromHex(hex)), "blocked"),
+      ...(control === undefined ? {} : { control }),
     });
     closers.push(() => access.close());
   }
@@ -362,7 +372,9 @@ export async function machineProcess(o: {
     journal,
   });
   let stopRefresh: (() => void) | undefined;
+  const controls: ControlClient[] = [];
   const release = async () => {
+    await Promise.allSettled(controls.map((c) => c.stop()));
     stopRefresh?.();
     await transport?.close().catch(() => {});
     await supervisor.stop().catch(() => {});
@@ -397,6 +409,37 @@ export async function machineProcess(o: {
     });
     process = started;
     await started.start();
+    // The runtime client of C (E-030c); its ops come with E-031…E-036.
+    const sections = () =>
+      (
+        db.prepare("SELECT count(*) AS n FROM bindings WHERE state <> 'removed'").get() as {
+          n: number;
+        }
+      ).n;
+    for (const p of opened.ports) {
+      if (p.control === undefined) continue;
+      const client = new ControlClient({
+        db,
+        installation: p.id,
+        port: p.control,
+        service: () => ({
+          instance: config.bridgeInstanceId,
+          kind: "reminders",
+          label: hostname(),
+          platform: "macos",
+          app: o.app?.version ?? "",
+          artifactSliceId: gate.decision.artifactSliceId ?? "",
+          macos: macOS,
+          cert: { state: gate.decision.state, manifestSeq: 0, certTestMode: false },
+          capacity: { sections: sections(), max: 8, devicesFree: Math.max(0, 8 - sections()) },
+        }),
+        status: () => ({ state: "running" }),
+        onError: (e) =>
+          journal.append("error", "control.failed", { params: { code: errorCode(e) } }),
+      });
+      controls.push(client);
+      client.start();
+    }
     // A§9.2: a withdrawal published while the helper keeps running turns writes off too.
     stopRefresh = refreshGate({
       gate,
@@ -419,6 +462,7 @@ export async function machineProcess(o: {
     // The helper and the storage are released whatever stop() says (review PR 9b #26).
     async stop(reason = "exit") {
       try {
+        await Promise.allSettled(controls.map((c) => c.stop()));
         await running.stop(reason);
       } finally {
         await release();
