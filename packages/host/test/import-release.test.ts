@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { Holds, type Intent, Journal } from "../src/index.js";
 import { acceptImportAmbiguous } from "../src/quarantine.js";
+import { bridgeInstanceId } from "../src/reconcile/pass.js";
 import { type Bridge, bridge } from "./support/bridge.js";
 
 let b: Bridge;
@@ -77,6 +78,28 @@ describe("resume --accept import_ambiguous", () => {
     expect(holds()).toEqual([]);
     expect(tasksTitled("New")).toHaveLength(1);
     expect(tasksTitled("Gone")).toEqual([]);
+  });
+
+  it("a reminder with the Task's link for another section does not keep the import", async () => {
+    b = await bridge();
+    const gone = b.person.create(b.list.id, "Gone");
+    const [create] = await pendingImports();
+    if (create === undefined) throw new Error("no create_task");
+    b.person.delete(gone.ref);
+    const other = b.person.create(b.list.id, "Other section");
+    const me = bridgeInstanceId(b.db).slice(0, 8);
+    b.person.edit(other.ref, {
+      url: `lfcp://task/${create.taskId}?s=${"0".repeat(64)}&b=${me}`,
+    });
+    expect((await b.sync()).plan.holds).toContain("import_ambiguous");
+    expect((await accept()).kind).toBe("resolved");
+    expect(b.link(create.taskId)).toMatchObject({
+      state: "unlinked",
+      state_reason: "import_released",
+    });
+    expect(intentState(create)).toEqual({ state: "superseded", state_reason: "import_released" });
+    expect((await b.sync()).plan.holds).toEqual([]);
+    expect(holds()).toEqual([]);
   });
 
   it("refused, nothing written, when the list cannot be read completely", async () => {

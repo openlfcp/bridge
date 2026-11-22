@@ -30,13 +30,14 @@
 // Every decision is journaled (quarantine.resolved) and, for an intent, recorded in
 // intent_resolutions (what N8's quiescence reads).
 
-import type {
-  AppleItem,
-  AppleOpSuccess,
-  FindQuery,
-  RemindersTransport,
-  WritableSet,
-  WrittenFields,
+import {
+  type AppleItem,
+  type AppleOpSuccess,
+  type FindQuery,
+  isMarkerUrl,
+  type RemindersTransport,
+  type WritableSet,
+  type WrittenFields,
 } from "@openlfcp/bridge-reminders";
 import { parseTaskLink } from "@openlfcp/bridge-reminders/adapter";
 import type { BridgeDatabase } from "./db/database.js";
@@ -648,9 +649,9 @@ export async function acceptImportAmbiguous(
   const holds = new Holds(db, now);
   if (!holds.has(bindingId, "import_ambiguous"))
     return { kind: "resolved", text: `no hold import_ambiguous on ${bindingId}` };
-  const b = db.prepare("SELECT target_ref FROM bindings WHERE id = ?").get(bindingId) as
-    | { target_ref: string | null }
-    | undefined;
+  const b = db
+    .prepare("SELECT target_ref, resource_id FROM bindings WHERE id = ?")
+    .get(bindingId) as { target_ref: string | null; resource_id: string } | undefined;
   if (b?.target_ref == null) return { kind: "refused", text: `binding ${bindingId} has no list` };
   const snap = await transport
     .snapshot(b.target_ref as Parameters<RemindersTransport["snapshot"]>[0])
@@ -674,13 +675,22 @@ export async function acceptImportAmbiguous(
   const ignored = new Set(
     links.flatMap((l) => JSON.parse(l.ignored_external_ids_json) as string[]),
   );
+  // The same candidates as matching (adapter/matching.ts): no markers, no ignored copies, a Task
+  // link only when its section is absent or this binding's.
   const live = snap.items.filter(
-    (i) => i.ref.externalId === undefined || !ignored.has(i.ref.externalId),
+    (i) =>
+      !isMarkerUrl(i.linkUrl) && (i.ref.externalId === undefined || !ignored.has(i.ref.externalId)),
   );
+  const ownTask = (url: string | undefined) => {
+    const t = parseTaskLink(url);
+    return t !== undefined && (t.section === undefined || t.section === b.resource_id)
+      ? t.taskId
+      : undefined;
+  };
   const found = (l: (typeof links)[number]) =>
     live.some(
       (i) =>
-        parseTaskLink(i.linkUrl)?.taskId === l.task_id ||
+        ownTask(i.linkUrl) === l.task_id ||
         (l.rem_external_id !== null && i.ref.externalId === l.rem_external_id) ||
         (l.rem_id_cache !== null && i.ref.id === l.rem_id_cache),
     );
