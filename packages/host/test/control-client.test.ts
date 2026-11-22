@@ -262,9 +262,9 @@ describe("ControlClient", () => {
     });
   });
 
-  it("publishes and resolves only the bindings of its own installation", async () => {
+  it("publishes and resolves only the bindings of its own root", async () => {
     db.prepare(
-      "INSERT INTO installations (id, dir, principal, root, label, created_at) VALUES ('i2', 'j', 'p', 'r', 'l', 'x')",
+      "INSERT INTO installations (id, dir, principal, root, label, created_at) VALUES ('i2', 'j', 'p', 'r2', 'l', 'x')",
     ).run();
     db.prepare(
       "INSERT INTO bindings (id, installation_id, resource_id, adapter, transport, target_ref, target_title, state, created_at) VALUES ('b2', 'i2', ?, 'apple-reminders', 'eventkit', 't2', 'Private', 'active', 'x')",
@@ -352,6 +352,33 @@ describe("ControlClient", () => {
     await cc.stop();
     expect(runs).toBe(1);
     expect(c.s.events.r).toMatchObject({ state: "cancelled" });
+  });
+
+  it("publishes and resolves a binding owned by a section installation under C's root", async () => {
+    // A§4.1: C belongs to the base installation; A§4.3: the section X has its own installation.
+    db.prepare(
+      "INSERT INTO installations (id, dir, principal, root, label, created_at) VALUES ('base', 'k', 'p0', 'r', 'l', 'x')",
+    ).run();
+    const c = fakeC();
+    const seen: (string | null)[] = [];
+    c.s.requests.r = request("check");
+    const cc = client(
+      c.port,
+      {
+        check: {
+          run: async ({ row }) => {
+            seen.push(row.binding);
+            return { state: "applied" };
+          },
+        },
+      },
+      "base",
+    );
+    await cc.tick();
+    await cc.stop();
+    expect(Object.keys(c.s.bindings)).toEqual([REF1]);
+    expect(seen).toEqual(["b1"]);
+    expect(c.s.events.r).toMatchObject({ state: "applied" });
   });
 
   it("keeps the unknown fields of service's nested maps while it updates the known ones", async () => {

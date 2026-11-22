@@ -67,7 +67,11 @@ export interface OpHandler {
 
 export interface ControlClientOptions {
   readonly db: BridgeDatabase;
-  /** The installation owning this `C` (A§3: one `C` per bridge instance × root): only its bindings. */
+  /**
+   * The installation owning this `C` (A§3: one `C` per bridge instance × root). Its bindings are
+   * those of every installation of this bridge under the same root: the base (A§4.1) and each
+   * section's own installation (A§4.3); another root's are not.
+   */
   readonly installation: string;
   readonly port: ControlPort;
   readonly exec?: ControlExec;
@@ -176,12 +180,22 @@ export class ControlClient {
   /** The local id of a binding by its ResourceRef in `C`; the ref itself when none. */
   #local(ref: string | undefined): string | undefined {
     if (ref === undefined) return undefined;
-    const rows = this.#o.db
-      .prepare(
-        "SELECT id, resource_id AS r FROM bindings WHERE installation_id = ? AND state <> 'removed'",
-      )
-      .all(this.#o.installation) as { id: string; r: string }[];
+    const rows = this.#bindings() as { id: string; r: string }[];
     return rows.find((b) => resourceRef(b.r) === ref)?.id ?? ref;
+  }
+
+  /** The live bindings under this `C`'s root (see `installation`). */
+  #bindings(): unknown[] {
+    return this.#o.db
+      .prepare(
+        `SELECT b.id, b.resource_id AS r, b.state, b.target_title AS list, b.filter_mode AS filter
+           FROM bindings b JOIN installations i ON i.id = b.installation_id
+          WHERE b.state <> 'removed'
+            AND (b.installation_id = ?
+              OR (i.root <> '' AND i.root = (SELECT root FROM installations WHERE id = ?)))
+          ORDER BY b.id`,
+      )
+      .all(this.#o.installation, this.#o.installation);
   }
 
   async #tick(): Promise<void> {
@@ -395,12 +409,7 @@ export class ControlClient {
           message: st.message ?? null,
         },
       });
-    const rows = this.#o.db
-      .prepare(
-        `SELECT id, resource_id AS r, state, target_title AS list, filter_mode AS filter
-           FROM bindings WHERE installation_id = ? AND state <> 'removed' ORDER BY id`,
-      )
-      .all(this.#o.installation) as {
+    const rows = this.#bindings() as {
       id: string;
       r: string;
       state: string;
