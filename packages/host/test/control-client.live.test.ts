@@ -198,25 +198,25 @@ describe.skipIf(skip !== undefined)("ControlClient, live", { timeout: 180_000 },
       expect(s0?.status).toMatchObject({ state: "running", heartbeatAt: iso(T0) });
       expect(s0?.bindings[REF1]).toMatchObject({ state: "active", generation: 0 });
 
-      // ≤1 write a minute per binding; the heartbeat after 30 minutes.
-      db.prepare(
-        "UPDATE bindings SET last_complete_check_at = '2026-11-19T10:00:30Z' WHERE id = 'b1'",
-      ).run();
+      // ≤1 write a minute per binding (its lifecycle fields); the heartbeat rides on it, and
+      // comes alone 30 minutes after the last unit.
+      const rename = (t: string) =>
+        db.prepare("UPDATE bindings SET target_title = ? WHERE id = 'b1'").run(t);
+      rename("One");
       now = T0 + BINDING_WRITE_MS - 1000;
       await client.tick();
       // Changed, but written less than a minute ago: not written (its own view shows it at once).
-      expect(bridgeC.state()?.bindings[REF1]?.lastCompleteCheckAt).toBeUndefined();
+      expect(bridgeC.state()?.bindings[REF1]?.list).not.toBe("One");
       now = T0 + BINDING_WRITE_MS;
       await tickUntil(
         "the binding written after a minute",
-        seen((s) => s.bindings[REF1]?.lastCompleteCheckAt === "2026-11-19T10:00:30Z"),
+        seen((s) => s.bindings[REF1]?.list === "One"),
       );
-      const beats = rootC.state()?.status?.heartbeatAt;
-      expect(beats).toBe(iso(T0));
-      now = T0 + HEARTBEAT_MS;
+      expect(rootC.state()?.status?.heartbeatAt).toBe(iso(T0 + BINDING_WRITE_MS));
+      now = T0 + BINDING_WRITE_MS + HEARTBEAT_MS;
       await tickUntil(
         "a heartbeat",
-        seen((s) => s.status?.heartbeatAt === iso(T0 + HEARTBEAT_MS)),
+        seen((s) => s.status?.heartbeatAt === iso(T0 + BINDING_WRITE_MS + HEARTBEAT_MS)),
       );
 
       // Requests and cancels (A§3.3).

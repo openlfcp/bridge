@@ -8,7 +8,8 @@
 //   accepted ones by their handler, which asks `effect()` before each effect (A§3.3, B19);
 // - writes `events` from control_exec (forward only), `questions.resolved` for an applied answer,
 //   `service` when it differs, `status` on a change or the 30-minute heartbeat, `bindings/<X>` on a
-//   change but at most once a minute per binding (A§3.5);
+//   change but at most once a minute per binding (A§3.5) — only the fields that changed; the
+//   heartbeat and a binding's progress fields ride on the next unit written anyway (E-030d);
 // - deletes, once an hour, what has been final for 7 days (§9). control_exec is never touched: an
 //   id seen again after the cleanup is a duplicate (A§3.4 step 5).
 //
@@ -98,12 +99,6 @@ const canon = (v: unknown): string =>
         ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => (a < b ? -1 : 1)))
         : x,
   );
-const same = (want: Readonly<Record<string, unknown>>, have: unknown) =>
-  have !== undefined &&
-  canon(want) ===
-    canon(
-      Object.fromEntries(Object.keys(want).map((k) => [k, (have as Record<string, unknown>)[k]])),
-    );
 const plain = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v);
 /**
@@ -117,6 +112,26 @@ const keep = (have: unknown, want: unknown): unknown =>
         ...Object.fromEntries(Object.entries(want).map(([k, v]) => [k, keep(have[k], v)])),
       }
     : want;
+/**
+ * The fields of `want` that `C` does not hold as they are, `undefined` when none: `*.put` replaces
+ * a field's value whole, so a nested map keeps the keys it has that the host does not write
+ * (A§3.5a: unknown fields are kept), and an unchanged field is not written again.
+ */
+const changedFields = (
+  want: Readonly<Record<string, unknown>>,
+  have: unknown,
+): Record<string, unknown> | undefined => {
+  const h = plain(have) ? have : {};
+  const out = Object.fromEntries(
+    Object.entries(want)
+      .map(([k, v]) => [k, keep(h[k], v)] as const)
+      .filter(([k, v]) => h[k] === undefined || canon(v) !== canon(h[k])),
+  );
+  return Object.keys(out).length === 0 ? undefined : out;
+};
+/** Progress fields of a binding: written with the next unit, not on their own (A§3.5). */
+const LAZY = new Set(["lastCompleteCheckAt", "pending"]);
+type BindingRow = { id: string; r: string; state: string; list: string | null; filter: string };
 const resourceRef = (hex: string) => {
   try {
     return /^[0-9a-f]{64}$/.test(hex) ? toBase64url(fromHex(hex)) : undefined;
@@ -212,7 +227,8 @@ export class ControlClient {
     this.#noteSuperseded(s, at);
     this.#admit(s, at, cancels);
     for (const row of this.#exec.open()) this.#run(row, s);
-    const intents = [...this.#events(s, at), ...this.#publish(s, now, at)];
+    const events = this.#events(s, at);
+    const intents = [...events, ...this.#publish(s, now, at, events.length > 0)];
     if (intents.length > 0) await this.#commit(intents);
     if (now - this.#cleanedAt >= CLEANUP_EVERY_MS) {
       this.#cleanedAt = now;
@@ -377,8 +393,18 @@ export class ControlClient {
     return out;
   }
 
-  /** `service`, `status` and `bindings/<X>` (A§3.5). */
-  #publish(s: ServiceControlValidation, now: number, at: string): ServiceControlIntent[] {
+  /**
+   * `service`, `status` and `bindings/<X>` (A§3.5), only the fields that differ from `C`. A
+   * binding's lifecycle fields go at once (at most once a minute per binding); its progress fields
+   * (LAZY) and the heartbeat ride on the next unit the host writes anyway, or on the heartbeat 30
+   * minutes after the last write: the budget of `C`'s history (A§3.5, E-030d).
+   */
+  #publish(
+    s: ServiceControlValidation,
+    now: number,
+    at: string,
+    writing: boolean,
+  ): ServiceControlIntent[] {
     const out: ServiceControlIntent[] = [];
     const fresh: Record<string, unknown> = {
       ...this.#o.service(),
@@ -388,60 +414,62 @@ export class ControlClient {
         questionKinds: [...(this.#o.questionKinds ?? [])],
       },
     };
-    const have = plain(s.service) ? s.service : {};
-    const service = Object.fromEntries(
-      Object.entries(fresh).map(([k, v]) => [k, keep(have[k], v)]),
-    );
-    if (!same(service, s.service)) out.push({ intent: "service.put", fields: service });
+    const service = changedFields(fresh, s.service);
+    if (service !== undefined) out.push({ intent: "service.put", fields: service });
+    const lazy: ServiceControlIntent[] = [];
+    for (const b of this.#bindings() as BindingRow[]) {
+      const ref = resourceRef(b.r);
+      const st = bindingStatus(this.#o.db, b.id);
+      if (ref === undefined || st === undefined) continue;
+      const checked = Date.parse(st.lastCompleteCheckAt ?? "");
+      const fields = changedFields(
+        {
+          state: b.state,
+          generation: st.generation,
+          list: b.list ?? "",
+          filter: b.filter,
+          ...(Number.isNaN(checked) ? {} : { lastCompleteCheckAt: iso(checked) }),
+          pending: st.pending,
+          refused: st.refused,
+          unconfirmed: st.unconfirmed,
+        },
+        s.bindings[ref],
+      );
+      if (fields === undefined) continue;
+      if (now - (this.#bindingWritten.get(ref) ?? Number.NEGATIVE_INFINITY) < BINDING_WRITE_MS)
+        continue;
+      const put = (): ServiceControlIntent => {
+        this.#bindingWritten.set(ref, now);
+        return { intent: "binding.put", binding: ref, fields };
+      };
+      if (s.bindings[ref] === undefined || Object.keys(fields).some((k) => !LAZY.has(k)))
+        out.push(put());
+      else lazy.push({ intent: "binding.put", binding: ref, fields });
+    }
     const st = this.#o.status();
     const cur = s.status as
       | { state?: string; since?: string; heartbeatAt?: string; message?: string }
       | undefined;
     const changed = cur?.state !== st.state || cur?.message !== st.message;
-    const beat = Date.parse(cur?.heartbeatAt ?? "");
-    if (changed || !(now - beat < HEARTBEAT_MS))
-      out.push({
-        intent: "status.put",
-        fields: {
-          state: st.state,
-          since: changed || cur?.since === undefined ? at : cur.since,
-          heartbeatAt: at,
-          message: st.message ?? null,
-        },
-      });
-    const rows = this.#bindings() as {
-      id: string;
-      r: string;
-      state: string;
-      list: string | null;
-      filter: string;
-    }[];
-    for (const b of rows) {
-      const ref = resourceRef(b.r);
-      const st = bindingStatus(this.#o.db, b.id);
-      if (ref === undefined || st === undefined) continue;
-      const checked = Date.parse(st.lastCompleteCheckAt ?? "");
-      const want = {
-        state: b.state,
-        generation: st.generation,
-        list: b.list ?? "",
-        filter: b.filter,
-        ...(Number.isNaN(checked) ? {} : { lastCompleteCheckAt: iso(checked) }),
-        pending: st.pending,
-        refused: st.refused,
-        unconfirmed: st.unconfirmed,
-      };
-      // binding.put replaces a field's value whole: nested maps keep their unknown keys (A§3.5a).
-      const have = s.bindings[ref];
-      const fields = Object.fromEntries(
-        Object.entries(want).map(([k, v]) => [k, keep(plain(have) ? have[k] : undefined, v)]),
-      );
-      if (same(fields, have)) continue;
-      if (now - (this.#bindingWritten.get(ref) ?? Number.NEGATIVE_INFINITY) < BINDING_WRITE_MS)
-        continue;
-      this.#bindingWritten.set(ref, now);
-      out.push({ intent: "binding.put", binding: ref, fields });
+    const due = !(now - Date.parse(cur?.heartbeatAt ?? "") < HEARTBEAT_MS);
+    if (!(writing || changed || due || out.length > 0)) return out;
+    for (const l of lazy) {
+      if (l.intent === "binding.put") this.#bindingWritten.set(l.binding, now);
+      out.push(l);
     }
+    const status = changedFields(
+      {
+        state: st.state,
+        since: changed || cur?.since === undefined ? at : cur.since,
+        heartbeatAt: at,
+      },
+      cur,
+    );
+    const fields = {
+      ...status,
+      ...(cur?.message !== st.message ? { message: st.message ?? null } : {}),
+    };
+    if (Object.keys(fields).length > 0) out.push({ intent: "status.put", fields });
     return out;
   }
 
