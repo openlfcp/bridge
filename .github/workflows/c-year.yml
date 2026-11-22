@@ -1,0 +1,122 @@
+name: C year
+
+# T§3 "synthetic year of C" (A§3.5, E26 №8; E-030): a year of C's history — 8 sections, the
+# 30-minute heartbeat, 20 transitions a day per binding, previews, 2 questions a week per binding
+# with answers and events, the 7-day cleanup, a weekly Snapshot — written through the host's
+# ControlClient and sdk-ts against the reference server at server.lock, then held to the budget of
+# A§3.5: the server's bytes, a new personal client's cold connection and peak memory, the
+# admission of the whole history; control_exec keeps the dedup evidence through the cleanup.
+# Over budget = the job fails (a release blocker, A§3.5). The figures are the artifact and the
+# job summary (`pnpm c-year`, docs/devel/testing/c-year.md).
+on:
+  schedule:
+    # Nightly, the whole year.
+    - cron: "41 1 * * *"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: Simulated days
+        default: "365"
+      transitions:
+        description: Transitions a day per binding
+        default: "20"
+  # Its own files changed: a month, to check the job and see the trend where it changes.
+  push:
+    paths:
+      - ".github/workflows/c-year.yml"
+      - "packages/host/test/c-year.live.test.ts"
+      - "packages/host/test/support/c-year*"
+      - "packages/host/src/control/client.ts"
+  pull_request:
+    paths:
+      - ".github/workflows/c-year.yml"
+      - "packages/host/test/c-year.live.test.ts"
+      - "packages/host/test/support/c-year*"
+      - "packages/host/src/control/client.ts"
+
+permissions:
+  contents: read
+
+jobs:
+  year:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    env:
+      LFCP_C_DAYS: ${{ github.event_name == 'schedule' && '365' || github.event_name == 'workflow_dispatch' && inputs.days || '30' }}
+      LFCP_C_TRANSITIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.transitions || '20' }}
+      LFCP_C_REPORT: ${{ github.workspace }}/build/c-year/figures.json
+      LFCP_SERVER_BIN: ${{ github.workspace }}/vendor/server-src/target/release/lfcp-server
+    steps:
+      - uses: actions/checkout@v5
+      # The reference server at the commit in server.lock.
+      - id: locks
+        run: |
+          echo "server=$(jq -er .commit server.lock)" >> "$GITHUB_OUTPUT"
+          echo "sdk=$(jq -er .commit sdk-ts.lock)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          repository: openlfcp/server
+          ref: ${{ steps.locks.outputs.server }}
+          path: vendor/server-src
+      # The server builds against the sibling sdk-rs checkout at the commit in its sdk-rs.lock.
+      - id: sdk-rs-lock
+        run: echo "commit=$(jq -er .commit vendor/server-src/sdk-rs.lock)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          repository: openlfcp/sdk-rs
+          ref: ${{ steps.sdk-rs-lock.outputs.commit }}
+          path: vendor/sdk-rs
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vendor/server-src
+      - name: Build the server
+        working-directory: vendor/server-src
+        run: cargo build --release --locked -p lfcp-server
+      # The TypeScript SDK at the commit in sdk-ts.lock, packed into vendor/sdk-ts/
+      # (docs/devel/sdk-pin.md), as in ci.yml.
+      - uses: actions/checkout@v5
+        with:
+          repository: openlfcp/sdk-ts
+          ref: ${{ steps.locks.outputs.sdk }}
+          path: vendor/sdk-ts-src
+          sparse-checkout: packages
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: node scripts/sdk-ts-pack.mjs --checkout vendor/sdk-ts-src
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: macOS
+        run: sw_vers; uname -m
+      - name: The year
+        run: pnpm c-year
+      - name: Figures
+        if: always()
+        run: |
+          f="$LFCP_C_REPORT"
+          [ -f "$f" ] || { echo "No figures: the run did not finish." >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          jq -r --arg r "${{ matrix.runner }}" '
+            def mib: . / 1048576 * 100 | round / 100;
+            "### C year on \($r): \(.days) days, \(.transitionsPerDay) transitions/day",
+            "",
+            "| Measure | Value | Budget |", "|---|---|---|",
+            "| History on the server | \(.serverBytes | mib) MiB | \(.budget.serverBytes | mib) MiB |",
+            "| Cold connection | \(.coldMs) ms | \(.budget.coldMs) ms |",
+            "| Peak memory of the cold client | \(.maxRssBytes | mib) MiB | \(.budget.maxRssBytes | mib) MiB |",
+            "| Admission of the whole history | \(.admissionMs) ms (\(.admittedUnits) units) | \(.budget.admissionMs) ms |",
+            "| control_exec: answers cleaned / kept | \(.controlExec.cleaned) / \(.controlExec.kept) | equal |",
+            "",
+            "Units: bridge \(.units.bridge) (\(.unitBytes.bridge) B), root \(.units.root) (\(.unitBytes.root) B); run \(.wallMs / 1000 | round) s."
+          ' "$f" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: c-year-${{ matrix.runner }}
+          path: build/c-year
+          if-no-files-found: ignore
