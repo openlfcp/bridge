@@ -28,12 +28,13 @@ export function installation() {
 }
 export type Party = ReturnType<typeof installation>;
 
-/** A section Resource owned by `owner`: its Genesis (to host) and, stored in `storage`, its chain and key. */
+/** A section Resource (or one of `dataProfile`) owned by `owner`: its Genesis (to host) and, stored in `storage`, its chain and key. */
 export async function ownedSection(
   owner: Party,
   storage: LfcpStorage,
   secrets: InMemorySecretStore,
   url: string,
+  dataProfile: string = SECTIONS_PROFILE_ID,
 ): Promise<{ R: ResourceId; genesis: Uint8Array; dek: ResourceDEK }> {
   const R = generateResourceId();
   const dek = generateResourceDEK();
@@ -41,7 +42,7 @@ export async function ownedSection(
     { resourceId: R, controlSeq: 0n, prevControlId: null },
     {
       type: "GENESIS",
-      dataProfile: SECTIONS_PROFILE_ID,
+      dataProfile,
       owner: owner.signer.descriptor,
       dekCommitment: dekCommitment(R, dataEpoch(0n), dek),
       endpoints: [{ url, priority: 0n }],
