@@ -53,7 +53,9 @@ export const JOURNAL_TEXT: Readonly<Record<string, (p: JournalParams) => string>
   "link.unlinked": (p) =>
     p.reason === "moved_out"
       ? "You moved the reminder to another list: it is no longer synchronized (the task stays shared)"
-      : "You deleted the reminder: the task stays shared and does not come back to this list",
+      : p.reason === "import_released"
+        ? "A reminder being imported was not found and its import was dropped (resume --accept import_ambiguous): if it comes back, it is imported as new"
+        : "You deleted the reminder: the task stays shared and does not come back to this list",
   "link.relinked": () =>
     "The task is back in this list's filter: synchronized with its reminder again",
   "link.reprojected": () =>

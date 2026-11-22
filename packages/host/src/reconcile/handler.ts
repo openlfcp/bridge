@@ -102,7 +102,9 @@ export function bridgeHandler(o: HandlerOptions): IntentHandler {
     prepared(i, db) {
       if (i.kind !== "create_task") return;
       // §6.2: the pending link is durable with the intent — the next pass matches the reminder to
-      // it (externalId, id) and does not import it again.
+      // it (externalId, id) and does not import it again. An import released by `resume --accept
+      // import_ambiguous` (owner Q-3) left a tombstone without keys under the same stable Task id:
+      // its reminder, back, is a new import, so the tombstone becomes its pending link again.
       const r = (i.basis as PlannedBasis).reminder;
       if (r === undefined) return;
       const at = new Date(now()).toISOString();
@@ -110,7 +112,12 @@ export function bridgeHandler(o: HandlerOptions): IntentHandler {
         `INSERT INTO links (binding_id, task_id, rem_url, rem_external_id, rem_id_cache, rem_title_snapshot,
            origin, state, url_state, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, 'apple', 'pending_lfcp_create', ?, ?, ?)
-         ON CONFLICT (binding_id, task_id) DO NOTHING`,
+         ON CONFLICT (binding_id, task_id) DO UPDATE SET rem_url = excluded.rem_url,
+           rem_external_id = excluded.rem_external_id, rem_id_cache = excluded.rem_id_cache,
+           rem_title_snapshot = excluded.rem_title_snapshot, origin = 'apple',
+           state = 'pending_lfcp_create', state_reason = NULL, url_state = excluded.url_state,
+           updated_at = excluded.updated_at
+         WHERE links.state = 'unlinked' AND links.state_reason = 'import_released'`,
       ).run(
         i.bindingId,
         i.taskId,
