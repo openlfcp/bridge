@@ -64,7 +64,8 @@ function fakeC() {
       for (const i of intents)
         if (i.intent === "service.put") s.service = merge(s.service, i.fields);
         else if (i.intent === "status.put") s.status = merge(s.status, i.fields);
-        else if (i.intent === "binding.put") s.bindings[i.binding] = { ...i.fields };
+        else if (i.intent === "binding.put")
+          s.bindings[i.binding] = merge(s.bindings[i.binding], i.fields);
         else if (i.intent === "event.put") {
           const { intent: _, id, ...e } = i;
           s.events[id] = e;
@@ -379,6 +380,27 @@ describe("ControlClient", () => {
     expect(Object.keys(c.s.bindings)).toEqual([REF1]);
     expect(seen).toEqual(["b1"]);
     expect(c.s.events.r).toMatchObject({ state: "applied" });
+  });
+
+  it("keeps the unknown fields of a binding's nested maps; no write when nothing known changed", async () => {
+    const c = fakeC();
+    const cc = client(c.port);
+    await cc.tick();
+    const pending = c.s.bindings[REF1]?.pending as Record<string, unknown>;
+    c.s.bindings[REF1] = { ...c.s.bindings[REF1], pending: { ...pending, futureCounter: 9 } };
+    const puts = () => c.commits.flat().filter((i) => i.intent === "binding.put").length;
+    const before = puts();
+    now += BINDING_WRITE_MS;
+    await cc.tick();
+    expect(puts()).toBe(before);
+    db.prepare("UPDATE bindings SET target_title = 'Renamed' WHERE id = 'b1'").run();
+    now += BINDING_WRITE_MS;
+    await cc.tick();
+    expect(puts()).toBe(before + 1);
+    expect(c.s.bindings[REF1]).toMatchObject({
+      list: "Renamed",
+      pending: { ...pending, futureCounter: 9 },
+    });
   });
 
   it("keeps the unknown fields of service's nested maps while it updates the known ones", async () => {

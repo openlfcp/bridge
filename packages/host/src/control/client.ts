@@ -421,7 +421,7 @@ export class ControlClient {
       const st = bindingStatus(this.#o.db, b.id);
       if (ref === undefined || st === undefined) continue;
       const checked = Date.parse(st.lastCompleteCheckAt ?? "");
-      const fields = {
+      const want = {
         state: b.state,
         generation: st.generation,
         list: b.list ?? "",
@@ -431,7 +431,12 @@ export class ControlClient {
         refused: st.refused,
         unconfirmed: st.unconfirmed,
       };
-      if (same(fields, s.bindings[ref])) continue;
+      // binding.put replaces a field's value whole: nested maps keep their unknown keys (A§3.5a).
+      const have = s.bindings[ref];
+      const fields = Object.fromEntries(
+        Object.entries(want).map(([k, v]) => [k, keep(plain(have) ? have[k] : undefined, v)]),
+      );
+      if (same(fields, have)) continue;
       if (now - (this.#bindingWritten.get(ref) ?? Number.NEGATIVE_INFINITY) < BINDING_WRITE_MS)
         continue;
       this.#bindingWritten.set(ref, now);
