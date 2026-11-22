@@ -296,6 +296,25 @@ describe("a support command is serialized with the passes (A§7.3, E-006)", () =
   });
 });
 
+describe("Reminders not answering (E-006c: helper_unavailable through support.sock)", () => {
+  it("a pass is skipped, never a rejection; Reminders back runs it by itself", async () => {
+    b = await bridge();
+    const task = await b.task("Buy milk");
+    const proc = processOf();
+    await proc.start();
+    await quiet(proc);
+    b.t.setStatus({ state: "unavailable", reason: "helper_crashed" });
+    await b.edit(setTitle(b.now(task.id), "Buy bread"));
+    expect(await proc.pass("b")).toEqual({ kind: "skipped", reason: "transport_not_ready" });
+    expect(reminders()[0]?.title).toBe("Buy milk");
+    // access_changed schedules the pass; nobody asks for it here.
+    b.t.setStatus({ state: "ok" });
+    for (let i = 0; i < 300 && reminders()[0]?.title !== "Buy bread"; i++)
+      await new Promise((r) => setTimeout(r, 10));
+    expect(reminders()[0]?.title).toBe("Buy bread");
+  });
+});
+
 describe("holds, resume, stop", () => {
   it("helper_stall (hang analysis G1): the binding's pass reads nothing until the hold is accepted", async () => {
     b = await bridge();
@@ -411,7 +430,7 @@ describe("review PR 9b", () => {
     const find = b.t.find.bind(b.t);
     b.t.find = async (q, sc) => ({
       ...(await find(q, sc)),
-      complete: "urlPrefix" in q ? false : true,
+      complete: !("urlPrefix" in q),
     });
     await b.edit(setTitle(b.now(task.id), "B"));
     await proc.pass("b");

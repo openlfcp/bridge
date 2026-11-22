@@ -134,10 +134,13 @@ function startApp(
   const done = main(["run", "--app"], {
     out: (l) => err.push(l),
     err: (l) => err.push(l),
-    runtime: async (): Promise<Runtime> => ({
-      ...(await (runtimes++, machineRuntime(env))),
-      startProcess: async () => ({ stop: async () => {} }),
-    }),
+    runtime: async (): Promise<Runtime> => {
+      runtimes++;
+      return {
+        ...(await machineRuntime(env)),
+        startProcess: async () => ({ stop: async () => {} }),
+      };
+    },
     app: { input, write: (l) => out.push(l) },
     launchAgent05: {
       path: paths.launchAgent,

@@ -7,7 +7,8 @@
 //   ~/Applications/LFCP Reminders Helper.app            (config.helperPath overrides)
 //
 // config.json holds the bridgeInstanceId (created once, never changed: it names this bridge's
-// ownership markers, §6.5) and the writesVerified record of the verification run (§7.6).
+// ownership markers, §6.5). Writes follow the manifests (A§9.1, src/artifact/write-gate.ts); a
+// writesVerified left by 0.5 is ignored.
 
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -45,17 +46,9 @@ export function bridgePaths(
   };
 }
 
-/** The verification run passed for this helper build on this macOS (§7.6); a change resets it. */
-export interface WritesVerified {
-  readonly helperVersion: string;
-  readonly macOS: string;
-  readonly at: string;
-}
-
 export interface BridgeConfig {
   readonly bridgeInstanceId: string;
   readonly helperPath?: string;
-  readonly writesVerified?: WritesVerified;
 }
 
 /** Reads config.json, creating it (with a new bridgeInstanceId) when missing. */

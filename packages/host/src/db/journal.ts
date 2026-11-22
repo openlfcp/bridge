@@ -53,7 +53,9 @@ export const JOURNAL_TEXT: Readonly<Record<string, (p: JournalParams) => string>
   "link.unlinked": (p) =>
     p.reason === "moved_out"
       ? "You moved the reminder to another list: it is no longer synchronized (the task stays shared)"
-      : "You deleted the reminder: the task stays shared and does not come back to this list",
+      : p.reason === "import_released"
+        ? "A reminder being imported was not found and its import was dropped (resume --accept import_ambiguous): if it comes back, it is imported as new"
+        : "You deleted the reminder: the task stays shared and does not come back to this list",
   "link.relinked": () =>
     "The task is back in this list's filter: synchronized with its reminder again",
   "link.reprojected": () =>
@@ -88,7 +90,13 @@ export const JOURNAL_TEXT: Readonly<Record<string, (p: JournalParams) => string>
   "helper.stall_hold": (p) =>
     `The Reminders helper stalled ${String(p.stalls ?? 2)} times on this list (${String(p.op ?? "")}): this binding is paused, the others go on. Look at the list (a repeating reminder?), then \`lfcp-bridge resume --accept helper_stall --binding <id>\``,
   "helper.reconnect_failed": (p) =>
-    `The Reminders helper came back but could not be reconnected: ${String(p.error ?? "")}`,
+    `The Reminders helper came back but could not be reconnected (${String(p.code ?? p.error ?? "")})`,
+  "cert.state": (p) =>
+    p.state === "certified"
+      ? `Writing to Reminders is on: ${String(p.text ?? "")}`
+      : `Writing to Reminders is off (preview; cert.state ${String(p.state ?? "")}, ${String(p.reason ?? "")}): ${String(p.text ?? "")}`,
+  "cert.refresh_failed": (p) =>
+    `The write gate could not be checked again (${String(p.code ?? "")}); the last decision stays`,
   "effect.refused": (p) => `Reminders refused a write: ${String(p.code ?? "")}`,
   "intent.unknown_outcome": () =>
     "Whether a write to Reminders happened is not known: decide in `lfcp-bridge quarantine`",

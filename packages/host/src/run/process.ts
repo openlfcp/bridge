@@ -84,7 +84,7 @@ export interface BridgeProcessOptions {
   readonly installations: readonly InstallationPorts[];
   /** This bridge's instance id (config.json): its ownership markers (§6.5). */
   readonly instanceId: string;
-  /** writesVerified holds for this helper build and macOS (§7.6). */
+  /** The write gate by the manifests (A§9.1, E-051): normal bindings write only when true. */
   readonly writesVerified: () => boolean;
   /** STOP is set (§7.3). */
   readonly stopped: () => boolean;
@@ -205,6 +205,7 @@ export class BridgeProcess {
       accessCheckedNow: (i, R) => inst(i)?.access.accessCheckedNow(R) ?? false,
       offlineCommitAllowed: (i, R) => inst(i)?.access.offlineCommitAllowed(R) ?? false,
       connected: (i) => inst(i)?.host.connected ?? false,
+      writes: () => options.writesVerified(),
     };
     this.#executor = new Executor({
       db: options.db,
@@ -345,6 +346,11 @@ export class BridgeProcess {
   }
 
   /** A full pass of every binding (start, rebuild, the timer, wake). */
+  /** The write gate's decision changed (A§9.2): the helper's own write mode follows it. */
+  async writesChanged(): Promise<void> {
+    if (this.#ready && !this.#stopping) await this.#writeMode();
+  }
+
   async passAll(): Promise<readonly PassOutcome[]> {
     return Promise.all(this.#bindings().map((b) => this.pass(b.id)));
   }
@@ -408,6 +414,11 @@ export class BridgeProcess {
     // The helper stalls on this binding's list (hang analysis G1): no pass reads it until a person
     // accepts the hold; the other bindings go on.
     if (this.#holds.has(b.id, "helper_stall")) return { kind: "skipped", reason: "helper_stall" };
+    // Reminders does not answer (the helper is down, no access): a pass would only fail on its
+    // first read, and a pass asked in the background (a control look, a timer) must not reject.
+    // The transport coming back runs it: access_changed, or the helper reconnect's full pass.
+    if (this.#o.transport.status().state !== "ok")
+      return { kind: "skipped", reason: "transport_not_ready" };
     // §6.5: ownership on every pass, before any transition or effect (review PR 9b #23); an
     // incomplete search leaves the binding unchecked, so the executor writes nothing.
     await this.#ownership.check(b.id, b.resource_id);

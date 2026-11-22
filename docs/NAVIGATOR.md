@@ -21,6 +21,8 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 |---|---|---|
 | `src/cli.ts`, `src/commands.ts`, `src/exit.ts` | the command table and exit codes; later commands answer "not available in this build" | 1 |
 | `src/self-test.ts` | `bridge.mjs --self-test` of the packaged host (T§2 L5): the bundle's node and better-sqlite3, sqlite (WAL), Automerge, helper `ping` (memory backend) | E-005 |
+| `src/artifact/manifest.ts` | the detached artifact manifest (A§9.1): canonical JSON, Ed25519, shape, bundle walk, Mach-O slices, comparison with a bundle; built by `release.yml`, read by the write gate | E-052 |
+| `src/artifact/certification.ts`, `cache.ts`, `gate.ts`, `write-gate.ts`, `keys.ts` | the write gate by the manifests (A§9.1–9.3): the public certification manifest, the cache of both manifests (`seq` floor), the decision over five checks, when it is checked (first helper start, every restart), the online refresh, `cert.state` in `meta`/status/diagnostics; the trusted key | E-051 |
 | `src/db/` | `bridge.sqlite` on better-sqlite3 (WAL, synchronous=FULL, foreign keys): `schema.ts` (migrations over `user_version`, each with its `down`), `database.ts` (open, `migrateTo`, newer schema refused), `holds.ts` (a set per binding), `journal.ts`, `stop.ts` (the STOP file) | 2 |
 | `src/lfcp/section-host.ts` | SectionHost: one SyncClient per coordinator (with the SDK's 429 upgrade probe); restore/rebuild of checkpoints, applier, snapshot binding (load only, never publish), sync driver, outbound; `commitGuarded` is the only commit; `onNodesChanged`; `isLive` / `generation` | 3a |
 | `src/lfcp/commit-guard.ts` | the atomic basis check (§5.8): a wrapper of `CommitBinding.stage` with a guard registry by array object; unguarded stage → `UnguardedCommitError`, failed check → `BasisChangedError` | 3a |
@@ -37,7 +39,7 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 | `src/reconcile/handler.ts` | the adapter's part of the executor (§5.6, §5.8): finalize by direction (R2-1: to_apple — LFCP base from the basis, Apple base from `written`; create also links; to_lfcp — LFCP base from the stored intents applied, Apple base from the basis), B14 journal, the basis check inside stage; `currentLfcp` for delivery (§5.9) | 10 |
 | `src/bootstrap.ts`, `src/ownership.ts` | bind: scan → list → marker (§6.5, B16/B17), unknown outcomes resolved by a person; the ownership check (foreign_bridge, ownership_lost) | 9 |
 | `src/supervisor.ts` | the helper process: ping 30 s, restart with backoff (1 s → 60 s, reset after 5 min healthy), 3 in 5 min → helper_unavailable (a stall tied to one binding's list does not count), orphan from helper.pid | 9 |
-| `src/launchd.ts`, `src/doctor.ts`, `src/verification.ts`, `src/runtime.ts`, `src/config.ts` | LaunchAgent, preflight (§7.4), write modes and writesVerified (§7.6), the machine, paths and config.json | 9 |
+| `src/launchd.ts`, `src/doctor.ts`, `src/runtime.ts`, `src/config.ts` | LaunchAgent, preflight (§7.4), the machine, paths and config.json | 9 |
 | `src/migration.ts` | N8 from quiescence (§9 r4, B17 P1-1): precondition, the atomic freeze with quiescence checked again, fresh LIVE, switch, revocation, abort before switching; phase, `blocked_reason` and `aborted_reason` apart | 13 |
 | `src/reconcile/links.ts` | a pass's application (§6.1–6.4, B4, B11): global finds first (complete only; several candidates → quarantine), then the whole pass — intents, real unlinks, the dry run's count drop — against the limits on the state before any change (r2 §7.2); then the transitions and the intents; task_gone / out_of_filter, a global find before unlinked (moved_out, deleted_in_apple) and before a new projection on a return (R2-9 (3)), relink as a first link, orphans, quarantine, recurring copies, status_locked; nothing deleted anywhere | 12 |
 | `src/reconcile/import-task.ts` | a new reminder's Task (§6.2): its id stable for the reminder (UUIDv7 from a hash of section, binding and the reminder's externalId or id), no assignee | 11 |
@@ -45,6 +47,7 @@ Where things are in lfcp-bridge, and where they will be. The design is D-010
 | `src/run/process.ts` | **the run process**: start (Safe Mode, sections, ownership, recovery, write mode, a full pass), one pass at a time per binding (plan → write gate B16/§7.6 → LinkApplier → decisions → intents), triggers (remote nodes, rebuild, LIVE back, the change hint; debounce 400 ms / 3 s; wake; 15 min), delivery, stop | 9b |
 | `src/run/machine.ts` | the process on the machine: installations (the SDK's `openNodeInstallation` with its defaults, `storePairedResources`, a SectionHost on the coordinator of `pairedResources`, an AccessTracker with revocationStatus, the root from `deviceIdentity`), the EventKit transport over the supervised helper (restart → reopen; > 3 in 5 min → helper_unavailable; a second stall on one list within 5 min → helper_stall on that binding only), writesVerified | 9b |
 | `src/app/ipc.ts`, `src/app/serve.ts` | `run --app`: the host under `LFCP Bridge.app`, commands on stdin, events on stdout (`docs/reference/app-ipc-v1.md`) | E-004 |
+| `src/diag/` | Export diagnostics (A§11, E20): structured error codes (`errors.ts`), crash signatures (`crash.ts`), the `diag-schema v1` allow-list, the per-export HMAC and the zip (`export.ts`; `docs/reference/diag-schema-v1.md`) | E-045 |
 | `src/run/cli.ts` | `run` (run.lock, until SIGTERM / SIGINT), `dry-run`, `approve` (a planned dry run ≤ 1 h old, ownership not lost, strict 24 h), `pair` (storage-node pair), `sections` (`pairedResources`; "(not ready)" when the SDK says it is not usable here) | 9b |
 
 ## Adapter (`packages/reminders/src/adapter/`, PR 8)
@@ -84,6 +87,8 @@ SDK's bridge API directly, with no fallbacks of its own: `openNodeInstallation`
 | `unit` | vitest |
 | `helper` (`helper.yml`) | HelperCore tests, the app, smoke, sign-dev tests, the sign-release dry run, SwiftPM |
 | `helper-protocol` (`helper.yml`) | `transport-eventkit` against the helper (memory backend): unit tests, `transportContract`, open + FIFO |
+| `build`, `draft` (`release.yml`) | the release chain (`docs/devel/release-chain.md`): sign, notarize (Developer ID), manifest, DMG, draft release |
+| `l5-identity` (`release.yml`) | T§3 artifact identity at L5 on the job's own Dev-signed build: the write gate certified, then preview for a changed byte, a re-signed host, another helper (`scripts/release/l5-identity.sh`) |
 | `swift-test`, `smoke` (`app.yml`) | the shell's `swift test`; L5 smoke of a development `.app` (`scripts/app/smoke.sh`) |
 | `crash`, `e2e` | with PRs 7, 9 |
 
@@ -91,6 +96,7 @@ SDK's bridge API directly, with no fallbacks of its own: `openNodeInstallation`
 
 | Document | What |
 |---|---|
+| `docs/devel/release-chain.md` | the release chain (E-052): `release.yml` order, dry-run vs Developer ID, secrets of the environment `release`, the artifact manifest |
 | `docs/devel/testing/helper-live-checklist.md` | the owner's live EventKit check of the helper (TCC, `live-check.mjs`, `sign-dev.sh`), linked to the R-001 live run |
 | `docs/devel/testing/verification-run.md` | the owner's first live run of the bridge (R-023): pair, verify, dry-run, approve, run, the checklist on iPhone and in Obsidian |
 
@@ -99,6 +105,7 @@ SDK's bridge API directly, with no fallbacks of its own: `openNodeInstallation`
 | Document | What |
 |---|---|
 | `docs/reference/app-ipc-v1.md` | the shell ↔ host channel v1: transport, commands, events, restart and shutdown |
+| `docs/reference/diag-schema-v1.md` | Export diagnostics: what the zip holds (`diag-schema v1`), what is sealed by HMAC, what is never read |
 
 ## Guides
 
@@ -114,8 +121,11 @@ SDK's bridge API directly, with no fallbacks of its own: `openNodeInstallation`
 |---|---|
 | `scripts/bundle-host.mjs` | the host as one ESM file for the app (esbuild; better-sqlite3 external, Automerge `/slim` with its wasm inlined, initialized by `cli.ts`) |
 | `scripts/app/build-dev-app.sh`, `scripts/app/smoke.sh` | a development `LFCP Bridge.app` (native slice, ad-hoc; `TEST_HOOKS=1` for the smoke's hooks) and its L5 smoke |
-| `scripts/app/package-app.sh`, `scripts/app/node-darwin.sha256` | the release `LFCP Bridge.app` and its DMG: universal, Node pinned by `.node-version` and these SHA-256, better-sqlite3 subtree, signed inside out (ad-hoc or `SIGN_IDENTITY`), Sparkle keys in `Info.plist` |
+| `scripts/app/package-app.sh`, `scripts/app/make-dmg.sh`, `scripts/app/node-darwin.sha256` | the release `LFCP Bridge.app` and its DMG (`PACKAGE_DMG=0`: the app only, for `release.yml`): universal, Node pinned by `.node-version` and these SHA-256, better-sqlite3 subtree, signed inside out (ad-hoc or `SIGN_IDENTITY`), Sparkle keys in `Info.plist` |
 | `scripts/app/check-app.sh`, `scripts/app/check-no-test-hooks.sh` | T§2 L5 on the packaged app where it lies: Info.plist, universal Mach-O loadable on 15.0, signature and entitlements, Node and ABI, no test hooks, `bridge.mjs --self-test` |
+| `scripts/release/artifact-manifest.mjs` | the artifact manifest (A§9.1): `keygen`, `build` after the staple, `cdhashes` before/after, `check` of a bundle against it |
+| `scripts/release/l5-identity.sh`, `scripts/release/l5-identity.mjs` | the L5 job `l5-identity` (CI only): trust this run's key in the job's build, certify it, seed the gate's cache, the T§3 artifact identity checks |
+| `scripts/release/signing-keychain.sh`, `scripts/release/notarize.sh` | `release.yml`'s throwaway keychain (Developer ID from secrets, or a self-signed Dev identity) and notarytool + stapler |
 | `scripts/sdk-ts-pack.mjs` | the SDK pin: packs the eight `@openlfcp/*` packages of the sdk-ts commit in `sdk-ts.lock` into `vendor/sdk-ts/`, byte-identical on every system (`docs/devel/sdk-pin.md`); `--self-test` |
 | `scripts/check-release-deps.mjs` | refuses a release whose SDK is not exact npm versions (`sdk-ts.lock`, `file:`/`link:`, overrides); run by `sign-release.sh` and by `app.yml` on tags, for E-052 |
 | `scripts/bridge-db.mjs` | `status` / `backup` / `migrate --to <N>` of `bridge.sqlite` (up and down; needs STOP and no `run`; backs up to a new file first, never over one); `--self-test` |

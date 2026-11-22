@@ -49,6 +49,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   var state = ShellState()
   var helloVersion: String?
   var replies = (ok: 0, failed: 0)
+  /// The write gate's code checks answered (codeIdentity sent; the L5 smoke reads it).
+  var codeChecks = 0
   /// Why the app is quitting: the host's shutdown reason.
   var terminateReason: ShutdownReason = .quit
   /// Set when the host has ended at termination (the L5 smoke reads it).
@@ -121,6 +123,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     switch event {
     case .hello(let version, _):
       helloVersion = version
+    case .codeCheck(let id, let paths):
+      // The write gate (A§9.1): Security.framework reads the bundle, off the main queue.
+      let bundle = Bundle.main.bundleURL
+      DispatchQueue.global(qos: .utility).async { [weak self] in
+        let report = CodeCheck.run(bundle: bundle, paths: paths)
+        DispatchQueue.main.async {
+          if case .failed(let why) = report { self?.log.info("shell: code check failed: \(why)") }
+          if self?.supervisor.send(.codeIdentity(requestId: id, report)) != nil {
+            self?.codeChecks += 1
+          }
+        }
+      }
     case .reply(let id, let ok, let code):
       if ok {
         replies.ok += 1

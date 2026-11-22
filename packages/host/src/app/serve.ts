@@ -10,8 +10,10 @@
 // |                  | own stop gate), what is in flight finishes, exit 0. Never STOP — update, |
 // |                  | quit and logout continue at the next start (A§6.3)                      |
 // | openURL{url}     | accepted; the handoff itself is E-031. The URL is never logged          |
-// | answer, export,  | not_implemented until E-042, E-045, E-034                               |
-// | remove           |                                                                         |
+// | export{path}     | the diagnostics zip (src/diag/export.ts) at path: absolute, .zip         |
+// | answer, remove   | not_implemented until E-042, E-034                                      |
+// | codeIdentity     | the answer to a codeCheck event (the write gate, A§9.1): taken at once,  |
+// |                  | never behind the queue (a start or a support command may be waiting on it)|
 //
 // stdin closing (the shell is gone) and SIGTERM/SIGINT are a shutdown too: a host without its
 // shell would be an orphan that nobody can pause.
@@ -22,6 +24,8 @@
 // an effect in flight stays `effecting` for the next start's recovery (§5.7), and the lock's pid
 // is dead, so the next host takes it over.
 
+import { isAbsolute } from "node:path";
+import type { CodeIdentity } from "../artifact/gate.js";
 import { resume, stop, stopState } from "../db/stop.js";
 import { EXIT } from "../exit.js";
 import type { RunningProcess } from "../runtime.js";
@@ -46,6 +50,14 @@ export type EndReason = "update" | "quit" | "logout" | "stdin_closed" | "SIGTERM
 
 type RunProcess = RunningProcess;
 
+/** The shell's code checks (A§9.1 (3)–(5)) for `paths`, bundle-relative Mach-O files. */
+export interface ShellCode {
+  identity(paths: readonly string[]): Promise<CodeIdentity>;
+}
+
+/** How long the host waits for the shell's codeIdentity (its checks read the whole bundle). */
+export const CODE_CHECK_WAIT_MS = 60_000;
+
 /** Runs one support command (commands.ts) with the run process of the moment, if any. */
 export type SupportRun = (
   argv: readonly string[],
@@ -62,7 +74,7 @@ export interface AppHostOptions {
    * Starts the run process (Runtime.startProcess). `shuttingDown` turns true at the shutdown: the
    * executor starts no effect from then on, also inside the start's own first pass.
    */
-  readonly start: (shuttingDown: () => boolean) => Promise<RunProcess>;
+  readonly start: (shuttingDown: () => boolean, shell: ShellCode) => Promise<RunProcess>;
   /** The bindings for the status event. */
   readonly sections: () => readonly SectionStatus[];
   /** One line to stdout (without "\n"). */
@@ -74,6 +86,9 @@ export interface AppHostOptions {
   readonly exit?: (code: number) => void;
   /** The support commands (support.sock); without it they are refused. */
   readonly support?: SupportRun;
+  /** Export diagnostics… (A§11): writes the zip at path; without it export is not_implemented. */
+  readonly exportDiagnostics?: (path: string) => void;
+  readonly codeCheckWaitMs?: number;
 }
 
 /** A safe detail for a failed command: the error's code, never its message (paths, values). */
@@ -93,6 +108,8 @@ export class AppHost {
   /** The support command running now: the shutdown waits for it, within its deadline. */
   #active: Promise<void> | undefined;
   #ending: EndReason | undefined;
+  #codeSeq = 0;
+  readonly #codeWaits = new Map<string, (r: CodeIdentity | Error) => void>();
   #ended!: (r: EndReason) => void;
   /** Resolves when the host has shut down in time (the process exits with 0 then). */
   readonly ended: Promise<EndReason>;
@@ -104,6 +121,15 @@ export class AppHost {
     });
     this.#splitter = new LineSplitter(
       (line) => {
+        const code = parseCommand(line);
+        if (code.ok && code.envelope.command.cmd === "codeIdentity") {
+          this.#ok(code.envelope.id);
+          const c = code.envelope.command;
+          const wait = this.#codeWaits.get(c.requestId);
+          this.#codeWaits.delete(c.requestId);
+          wait?.("error" in c.identity ? new Error(c.identity.error) : c.identity);
+          return;
+        }
         // A support command may hold the queue for long: a shutdown never waits behind it — its
         // reply, the stop of effects and the deadline start at once (review #35-3).
         if (this.#active !== undefined) {
@@ -126,6 +152,24 @@ export class AppHost {
     this.#status();
     await this.#startProcess();
   }
+
+  /** The shell's code checks: a codeCheck event, answered by codeIdentity (or the deadline). */
+  readonly shell: ShellCode = {
+    identity: (paths) =>
+      new Promise((resolve, reject) => {
+        const id = `c${++this.#codeSeq}`;
+        const timer = setTimeout(() => {
+          this.#codeWaits.delete(id);
+          reject(new Error("the shell did not answer the code check"));
+        }, this.#o.codeCheckWaitMs ?? CODE_CHECK_WAIT_MS);
+        this.#codeWaits.set(id, (r) => {
+          clearTimeout(timer);
+          if (r instanceof Error) reject(r);
+          else resolve(r);
+        });
+        this.#emit({ type: "codeCheck", id, paths });
+      }),
+  };
 
   /** Bytes from stdin. */
   input(chunk: string): void {
@@ -218,7 +262,7 @@ export class AppHost {
     this.#reason = undefined;
     const run = (async () => {
       try {
-        const p = await this.#o.start(() => this.#ending !== undefined);
+        const p = await this.#o.start(() => this.#ending !== undefined, this.shell);
         if (this.#ending !== undefined) {
           // Started after the shutdown: stop it at once (bounded by the shutdown's deadline).
           this.#o.log("app: run process started after shutdown; stopping it");
@@ -304,8 +348,25 @@ export class AppHost {
         this.#o.log("app: openURL received");
         this.#ok(id, { handled: false });
         return;
-      case "answer":
       case "export":
+        if (this.#o.exportDiagnostics === undefined) {
+          this.#fail(id, "not_implemented", c.cmd);
+          return;
+        }
+        if (!isAbsolute(c.path) || !c.path.endsWith(".zip")) {
+          this.#fail(id, "bad_arguments", "path");
+          return;
+        }
+        // Synchronous: the reads see one state of bridge.sqlite. The path is never logged.
+        this.#o.exportDiagnostics(c.path);
+        this.#o.log("app: diagnostics exported");
+        this.#ok(id, { path: c.path });
+        return;
+      case "codeIdentity":
+        // Taken before the queue (the constructor); a late one is only acknowledged.
+        this.#ok(id);
+        return;
+      case "answer":
       case "remove":
         this.#fail(id, "not_implemented", c.cmd);
         return;
@@ -371,6 +432,7 @@ export async function serveApp(o: {
   readonly signals?: boolean;
   readonly shutdownWaitMs?: number;
   readonly exit?: (code: number) => void;
+  readonly exportDiagnostics?: AppHostOptions["exportDiagnostics"];
   /** support.sock (src/app/support.ts) and its commands. */
   readonly support?: {
     readonly path: string;
@@ -395,6 +457,7 @@ export async function serveApp(o: {
     ...(o.shutdownWaitMs === undefined ? {} : { shutdownWaitMs: o.shutdownWaitMs }),
     ...(o.exit === undefined ? {} : { exit: o.exit }),
     ...(o.support === undefined ? {} : { support: o.support.run }),
+    ...(o.exportDiagnostics === undefined ? {} : { exportDiagnostics: o.exportDiagnostics }),
   });
   // Not fatal: the menu works without it; support sees the log line.
   const server =

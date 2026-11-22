@@ -7,11 +7,11 @@
 // Unknown outcomes are never bypassed automatically (review PR 6 r2):
 // - createList answer lost → recover: done → take its list; not_started → retry the same opKey;
 //   unknown → bootstrap_ops.list = unknown_outcome. A person picks the list by id
-//   (`bind --resolve-list <id>`) or `none` (rename the lists with that title first, then a new
+//   (`bind --resolve-list <binding> <id>`) or `none` (rename the lists with that title first, then a new
 //   attempt). A title match never assigns a list (B17).
 // - marker answer lost → recover the same way; unknown → bootstrap_ops.marker = unknown_outcome,
 //   even when a marker with the exact url is visible (B19: only recover=done is accepted). The
-//   visible markers are shown as evidence; a person picks one by id (`bind --resolve-marker <id>`)
+//   visible markers are shown as evidence; a person picks one by id (`bind --resolve-marker <binding> <id>`)
 //   or `none` (delete such markers first, then a new attempt with a new opKey).
 // There is no --adopt-list (B17): the bootstrap only binds a list it created.
 
@@ -298,7 +298,7 @@ export class Bootstrap {
     return this.resume(bindingId);
   }
 
-  /** `bind --retry-marker`: the person says no marker was written. */
+  /** `bind --retry-marker <binding>`: the person says no marker was written. */
   retryMarker(bindingId: string): Promise<BindOutcome> {
     return this.resolveMarker(bindingId, "none");
   }
@@ -542,7 +542,7 @@ export class Bootstrap {
     this.#d.journal.append("warn", "bootstrap.marker.unknown", {
       bindingId: b.id,
       params: {
-        text: "Whether the ownership marker was written is unknown. Check Reminders, then choose it by id (bind --resolve-marker <id>) or answer none.",
+        text: "Whether the ownership marker was written is unknown. Check Reminders, then choose it by id (bind --resolve-marker <binding> <id>) or answer none.",
       },
     });
     return "unknown";
@@ -630,7 +630,7 @@ export class Bootstrap {
     this.#d.journal.append("warn", "bootstrap.list.unknown", {
       bindingId: b.id,
       params: {
-        text: `Whether the list "${b.target_title}" was created is unknown. Choose it by id (bind --resolve-list <id>) or answer none.`,
+        text: `Whether the list "${b.target_title}" was created is unknown. Choose it by id (bind --resolve-list <binding> <id>) or answer none.`,
       },
     });
     return this.#unknownList(b);

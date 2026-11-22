@@ -25,6 +25,8 @@ public enum ShellCommand: Equatable, Sendable {
   case shutdown(ShutdownReason)
   /// A lfcp-bridge:// URL, handed over as it came. It may carry a link secret: never log it.
   case openURL(String)
+  /// The answer to the host's codeCheck{id} (the write gate, A§9.1 (3)–(5)).
+  case codeIdentity(requestId: String, CodeReport)
 
   public var name: String {
     switch self {
@@ -35,6 +37,7 @@ public enum ShellCommand: Equatable, Sendable {
     case .remove: return "remove"
     case .shutdown: return "shutdown"
     case .openURL: return "openURL"
+    case .codeIdentity: return "codeIdentity"
     }
   }
 
@@ -52,8 +55,19 @@ public enum ShellCommand: Equatable, Sendable {
       o["ack"] = ack
     case .shutdown(let r): o["reason"] = r.rawValue
     case .openURL(let url): o["url"] = url
+    case .codeIdentity(let requestId, let report):
+      o["requestId"] = requestId
+      switch report {
+      case .failed(let error): o["error"] = error
+      case .identity(let i):
+        o["arch"] = i.arch
+        o["valid"] = i.valid
+        if let d = i.detail { o["detail"] = d }
+        o["shell"] = i.shell
+        o["nested"] = i.nested.map { ["path": $0.path, "cdhash": $0.cdhash] }
+      }
     }
-    // Only strings, an Int and a Bool: serialization cannot fail.
+    // Only strings, an Int, a Bool and arrays of string maps: serialization cannot fail.
     let data = (try? JSONSerialization.data(
       withJSONObject: o, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data("{}".utf8)
     return String(decoding: data, as: UTF8.self)
@@ -85,6 +99,8 @@ public enum HostEvent: Equatable, Sendable {
   case needsAttention(bindingId: String, code: String?)
   /// id nil: the host could not read the line far enough to know its id.
   case reply(id: String?, ok: Bool, errorCode: String?)
+  /// The write gate asks for the code checks of A§9.1 (3)–(5); paths are bundle-relative Mach-O.
+  case codeCheck(id: String, paths: [String])
   /// A v1 line of a type (or a status state) this shell does not know: a newer host.
   case unknown(type: String)
 
@@ -117,6 +133,9 @@ public enum HostEvent: Equatable, Sendable {
     case "needsAttention":
       guard let b = str("bindingId") else { return nil }
       return .needsAttention(bindingId: b, code: str("code"))
+    case "codeCheck":
+      guard let id = str("id"), let paths = o["paths"] as? [String] else { return nil }
+      return .codeCheck(id: id, paths: paths)
     case "reply":
       guard let ok = o["ok"] as? Bool else { return nil }
       let error = o["error"] as? [String: Any]

@@ -2,8 +2,9 @@
 // each (§11). Until then a command answers "not available in this build"
 // (exit 2), and `status` lists it the same way.
 
-import { mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join } from "node:path";
 import { retire05 } from "./app/legacy.js";
 import { type AppIo, serveApp } from "./app/serve.js";
 import {
@@ -13,11 +14,20 @@ import {
   shellExecutable,
   shellPeerUid,
 } from "./app/support.js";
+import { keptGate } from "./artifact/write-gate.js";
 import { type BindOutcome, Bootstrap } from "./bootstrap.js";
-import { bridgePaths, loadConfig, saveConfig } from "./config.js";
+import { bridgePaths } from "./config.js";
 import { HOLD_REASONS, type HoldReason } from "./db/holds.js";
 import { Journal } from "./db/journal.js";
 import { resume, stop, stopState } from "./db/stop.js";
+import { recordHostCrash } from "./diag/crash.js";
+import { errorCode } from "./diag/errors.js";
+import {
+  type DiagnosticsSource,
+  defaultExportDir,
+  defaultExportPath,
+  exportDiagnostics,
+} from "./diag/export.js";
 import { type Check, doctor, worst } from "./doctor.js";
 import { Runs } from "./executor/safe-mode.js";
 import { EXIT, type ExitCode } from "./exit.js";
@@ -29,6 +39,7 @@ import {
 } from "./launchd.js";
 import { MigrationError, type MigrationRow, Migrations } from "./migration.js";
 import {
+  acceptImportAmbiguous,
   acceptOutcome,
   candidates,
   ignoreReminder,
@@ -51,7 +62,6 @@ import {
 } from "./run/cli.js";
 import { bumpControl } from "./run/process.js";
 import { machineRuntime, type RunningProcess, type Runtime } from "./runtime.js";
-import { decideRecord, parseVerificationReport } from "./verification.js";
 
 export interface CommandInfo {
   readonly name: string;
@@ -99,7 +109,7 @@ export const COMMANDS: readonly CommandInfo[] = Object.freeze([
   { name: "refused", summary: "refused intents", pr: "7" },
   {
     name: "verify",
-    summary: "the verification run of the owner; --record <report.json> sets writesVerified",
+    summary: "a verification binding (--section): its own list, writes as in 0.5 (A§9.4)",
     pr: "9",
     ready: true,
   },
@@ -123,6 +133,12 @@ export const COMMANDS: readonly CommandInfo[] = Object.freeze([
     name: "certification-test",
     summary: "on|off: the certification test mode (E-050)",
     pr: "E-006",
+    ready: true,
+  },
+  {
+    name: "export",
+    summary: "export diagnostics: a zip to send to support yourself (--out <file.zip>)",
+    pr: "E-045",
     ready: true,
   },
 ] satisfies CommandInfo[]);
@@ -161,6 +177,61 @@ export interface CliEnvironment {
    * executable of LFCP_BRIDGE_APP; none outside the app).
    */
   readonly support?: { readonly uid?: number; readonly peerUid?: PeerUid };
+}
+
+/** A person's decision on an unknown bootstrap outcome (A§7.3), in either syntax. */
+const BIND_USAGE =
+  "lfcp-bridge bind --resolve-list <binding> <list id>|none | --resolve-marker <binding> <marker id>|none | --retry-marker <binding>";
+
+/**
+ * `bind` on an existing binding. A§7.3 (0.6): `--resolve-list <b> <listId|none>`,
+ * `--resolve-marker <b> <markerId|none>`, `--retry-marker <b>`. 0.5, still accepted:
+ * `--binding <b> --resolve-list <id>`, `--binding <b> --resolve-marker <id>`,
+ * `--binding <b> --retry-marker`, and `--binding <b>` alone (continue the bootstrap).
+ * undefined: not a decision (`bind <section>` binds a new one).
+ */
+function bindDecision(
+  positional: readonly string[],
+  opts: ReadonlyMap<string, string | true>,
+):
+  | {
+      readonly bindingId: string;
+      readonly kind: "resolve-list" | "resolve-marker" | "retry-marker" | "resume";
+      readonly choice?: string;
+    }
+  | undefined {
+  const kinds = ["resolve-list", "resolve-marker", "retry-marker"] as const;
+  const binding = opts.get("binding");
+  if (typeof binding === "string") {
+    for (const kind of kinds) {
+      const v = opts.get(kind);
+      if (v === undefined) continue;
+      return {
+        bindingId: binding,
+        kind,
+        ...(typeof v === "string" ? { choice: v } : {}),
+      };
+    }
+    return { bindingId: binding, kind: "resume" };
+  }
+  for (const kind of kinds) {
+    const v = opts.get(kind);
+    if (v === undefined) continue;
+    // The binding is the option's value; a missing one is a usage error, never `bind <section>`.
+    return {
+      bindingId: typeof v === "string" ? v : "",
+      kind,
+      ...(positional[0] === undefined ? {} : { choice: positional[0] }),
+    };
+  }
+  return undefined;
+}
+
+/** Only these `bind`s go through support.sock: binding a section is the plugin's (A§7.3). */
+function isBindDecision(args: readonly string[]): boolean {
+  const { positional, opts } = options(args);
+  const d = bindDecision(positional, opts);
+  return d !== undefined && d.kind !== "resume";
 }
 
 /** --name value / --flag parsing for the commands below. */
@@ -274,12 +345,27 @@ async function appCommand(
       `run --app: the LaunchAgent of lfcp-bridge 0.5 was removed${sameHome ? "" : "; it used another data directory, which is left as it is"}`,
     );
   }
+  // A crash of the host leaves its signature, never its message (A§11, src/diag/crash.ts).
+  const onCrash = (e: unknown) => recordHostCrash(rt.paths.home, e);
+  process.on("uncaughtExceptionMonitor", onCrash);
+  try {
+    return await serveAppCommand(rt, env, startProcess);
+  } finally {
+    process.off("uncaughtExceptionMonitor", onCrash);
+  }
+}
+
+async function serveAppCommand(
+  rt: Runtime,
+  env: CliEnvironment,
+  startProcess: NonNullable<Runtime["startProcess"]>,
+): Promise<ExitCode> {
   const r = await serveApp({
     home: rt.paths.home,
     version: VERSION,
     // Taken by appMain before the runtime opened bridge.sqlite; released there after it is closed.
     lock: () => () => {},
-    start: startProcess,
+    start: (shuttingDown, shell) => startProcess(shuttingDown, { shell, version: VERSION }),
     sections: () =>
       (
         rt.db
@@ -288,6 +374,10 @@ async function appCommand(
           )
           .all() as { id: string; target_title: string | null; state: string }[]
       ).map((b) => ({ bindingId: b.id, title: b.target_title ?? "", state: b.state })),
+    // The menu's Export diagnostics… (E-008): the zip at the path the person chose.
+    exportDiagnostics: (path) => {
+      exportDiagnostics(diagnosticsSource(rt), path);
+    },
     io: env.app ?? {
       input: process.stdin,
       write: (line) => process.stdout.write(`${line}\n`),
@@ -323,6 +413,7 @@ export const SUPPORT_COMMANDS: readonly string[] = [
   "links",
   "safe-mode",
   "certification-test",
+  "export",
 ];
 
 /**
@@ -339,16 +430,13 @@ async function supportCommand(
 ): Promise<ExitCode> {
   const [name = "", sub] = argv;
   const journal = new Journal(rt.db, Date.now, undefined, SUPPORT_AUTHOR);
-  const bindOpts = ["resolve-list", "resolve-marker", "retry-marker"];
   let code: ExitCode;
   if (!SUPPORT_COMMANDS.includes(name)) {
     io.err(`not a support command: ${name} (${SUPPORT_COMMANDS.join(", ")})`);
     code = EXIT.USAGE;
-  } else if (name === "bind" && !bindOpts.some((k) => options(argv.slice(1)).opts.has(k))) {
-    code = usage(
-      io,
-      "lfcp-bridge bind --binding <binding> --resolve-list <id>|none | --resolve-marker <id>|none | --retry-marker",
-    );
+  } else if (name === "bind" && !isBindDecision(argv.slice(1))) {
+    // Only decisions on an unknown outcome (A§7.3): binding a section is the plugin's.
+    code = usage(io, BIND_USAGE);
   } else {
     const support: Runtime = {
       ...rt,
@@ -394,16 +482,12 @@ function bindResult(r: BindOutcome, env: CliEnvironment): ExitCode {
               r.candidates ?? []
             )
               .map((c) => `  ${c.id}  ${c.title}`)
-              .join(
-                "\n",
-              )}\nChoose: lfcp-bridge bind --binding ${r.bindingId} --resolve-list <id>|none`
+              .join("\n")}\nChoose: lfcp-bridge bind --resolve-list ${r.bindingId} <id>|none`
           : `binding ${r.bindingId}: whether the ownership marker was written is unknown. Markers with its url in the list:\n${(
               r.markers ?? []
             )
               .map((m) => `  ${m.ref.id ?? m.ref.externalId}  ${m.title}`)
-              .join(
-                "\n",
-              )}\nChoose: lfcp-bridge bind --binding ${r.bindingId} --resolve-marker <id>|none`,
+              .join("\n")}\nChoose: lfcp-bridge bind --resolve-marker ${r.bindingId} <id>|none`,
       );
       return EXIT.NEEDS_PERSON;
     case "refused":
@@ -414,51 +498,6 @@ function bindResult(r: BindOutcome, env: CliEnvironment): ExitCode {
           ? EXIT.USAGE
           : EXIT.NEEDS_PERSON;
   }
-}
-
-/**
- * `verify --record <report.json>` (§7.6): a green verification report sets writesVerified for the
- * helper that runs here and this macOS. Refused, config unchanged: a red or empty report, no
- * verification binding, no helper, or a report made with another helper or macOS.
- */
-async function recordCommand(
-  rt: Runtime,
-  file: string | true | undefined,
-  env: CliEnvironment,
-): Promise<ExitCode> {
-  if (typeof file !== "string") return usage(env, "lfcp-bridge verify --record <report.json>");
-  let text: string;
-  try {
-    text = readFileSync(file, "utf8");
-  } catch (e) {
-    env.err(`cannot read ${file}: ${(e as Error).message}`);
-    return EXIT.NOT_FOUND;
-  }
-  const report = parseVerificationReport(text);
-  if (typeof report === "string") {
-    env.err(`${file}: ${report} (docs/devel/testing/verification-report.template.json)`);
-    return EXIT.USAGE;
-  }
-  const binding = rt.db
-    .prepare("SELECT 1 FROM bindings WHERE verification = 1 AND state <> 'removed' LIMIT 1")
-    .get();
-  const decision = decideRecord(loadConfig(rt.paths.config), report, {
-    running: await rt.helperIdentity?.(),
-    verificationBinding: binding !== undefined,
-  });
-  if (decision.kind === "refused") {
-    env.err(
-      `verify --record refused (${decision.reason}): ${decision.detail}; writesVerified unchanged`,
-    );
-    return EXIT.NEEDS_PERSON;
-  }
-  saveConfig(rt.paths.config, decision.config);
-  const r = decision.record;
-  env.out(`writesVerified: helper ${r.helperVersion} on macOS ${r.macOS}, recorded ${r.at}`);
-  env.out(
-    "normal bindings may now write with this helper on this macOS; another helper build or macOS resets it",
-  );
-  return EXIT.OK;
 }
 
 const QUARANTINE_USAGE = `lfcp-bridge quarantine [list] [--binding <binding>]
@@ -590,8 +629,13 @@ async function run(
     }
     case "bind":
     case "verify": {
-      if (name === "verify" && opts.has("record"))
-        return recordCommand(rt, opts.get("record"), env);
+      if (name === "verify" && opts.has("record")) {
+        // A§9.1, E-051: writes follow the manifests of the artifact and its certification.
+        env.err(
+          "verify --record is gone: writes are on when this build is certified for this macOS (lfcp-bridge status)",
+        );
+        return EXIT.USAGE;
+      }
       const transport = await rt.openTransport();
       const boot = new Bootstrap({
         db: rt.db,
@@ -600,16 +644,20 @@ async function run(
         instanceId: rt.config.bridgeInstanceId,
         stopped,
       });
-      const bindingId = opts.get("binding");
-      if (typeof bindingId === "string") {
-        const choice = opts.get("resolve-list");
-        if (typeof choice === "string")
-          return bindResult(await boot.resolveList(bindingId, choice), env);
-        const marker = opts.get("resolve-marker");
-        if (typeof marker === "string")
-          return bindResult(await boot.resolveMarker(bindingId, marker), env);
-        if (opts.get("retry-marker") === true)
-          return bindResult(await boot.retryMarker(bindingId), env);
+      const decision = bindDecision(positional, opts);
+      if (decision !== undefined) {
+        const { bindingId, kind, choice } = decision;
+        if (bindingId === "") return usage(env, BIND_USAGE);
+        if (kind === "resolve-list" || kind === "resolve-marker") {
+          if (choice === undefined) return usage(env, BIND_USAGE);
+          return bindResult(
+            await (kind === "resolve-list"
+              ? boot.resolveList(bindingId, choice)
+              : boot.resolveMarker(bindingId, choice)),
+            env,
+          );
+        }
+        if (kind === "retry-marker") return bindResult(await boot.retryMarker(bindingId), env);
         return bindResult(await boot.resume(bindingId), env);
       }
       const section = name === "verify" ? opts.get("section") : positional[0];
@@ -671,9 +719,9 @@ async function run(
     case "status": {
       const s = stopState(rt.paths.home);
       env.out(`STOP: ${s === undefined ? "no" : `yes${s.at ? ` (since ${s.at})` : ""}`}`);
-      const wv = rt.config.writesVerified;
+      const cert = keptGate(rt.db);
       env.out(
-        `writesVerified: ${wv ? `helper ${wv.helperVersion} on macOS ${wv.macOS} (recorded ${wv.at}; another helper or macOS resets it)` : "no (dry run only; lfcp-bridge verify --record <report.json>)"}`,
+        `cert.state: ${cert === undefined ? "not checked yet (preview)" : `${cert.state}${cert.state === "certified" ? "" : " (preview)"}: ${cert.detail} (${cert.reason}, ${cert.at})`}`,
       );
       const rows = rt.db
         .prepare(
@@ -717,6 +765,18 @@ async function run(
             env,
             `lfcp-bridge resume --accept <${HOLD_REASONS.join("|")}> --binding <id>`,
           );
+        if (accept === "import_ambiguous" && rt.holds.has(binding, "import_ambiguous")) {
+          // Owner Q-3: the pending imports without a reminder are released with the acceptance.
+          const r = await acceptImportAmbiguous(rt.db, await rt.openTransport(), binding, {
+            journal: rt.journal,
+          });
+          if (r.kind === "refused") {
+            env.err(`resume --accept import_ambiguous refused: ${r.text}`);
+            return EXIT.NEEDS_PERSON;
+          }
+          env.out(r.text);
+          return EXIT.OK;
+        }
         env.out(
           rt.holds.accept(binding, accept as HoldReason)
             ? `hold ${accept} lifted and accepted on ${binding}: the next pass goes through`
@@ -735,6 +795,26 @@ async function run(
     }
     case "links":
       return linksCommand(rt, opts.get("binding"), env);
+    case "export": {
+      const out = opts.get("out");
+      if (out === true || (out !== undefined && (!isAbsolute(out) || !out.endsWith(".zip"))))
+        return usage(env, "lfcp-bridge export [--out </absolute/path.zip>]");
+      if (out === undefined) defaultExportDir(rt.paths.home);
+      const path = out ?? defaultExportPath(rt.paths.home);
+      let bytes: number;
+      try {
+        ({ bytes } = exportDiagnostics(diagnosticsSource(rt), path));
+      } catch (e) {
+        // A symlink or a directory at the path, a missing folder: its code, never the path's text.
+        env.err(`export: not written (${errorCode(e)}): choose a new file in an existing folder`);
+        return EXIT.NEEDS_PERSON;
+      }
+      env.out(`diagnostics exported (${bytes} bytes): ${path}`);
+      env.out(
+        "titles, URLs, paths and error texts are replaced by one-time HMACs; send the file to support yourself",
+      );
+      return EXIT.OK;
+    }
     case "safe-mode":
       if (positional[0] !== "reset") return usage(env, "lfcp-bridge safe-mode reset");
       return safeModeReset(rt, env);
@@ -984,6 +1064,19 @@ function linksCommand(
     );
   }
   return EXIT.OK;
+}
+
+/** What an export reads (A§11): the database, the data directory, macOS's crash reports. */
+function diagnosticsSource(rt: Runtime): DiagnosticsSource {
+  return {
+    db: rt.db,
+    home: rt.paths.home,
+    config: rt.config,
+    version: VERSION,
+    ...(process.platform === "darwin"
+      ? { reports: join(homedir(), "Library", "Logs", "DiagnosticReports") }
+      : {}),
+  };
 }
 
 function usage(env: Pick<CliEnvironment, "err">, line: string): ExitCode {

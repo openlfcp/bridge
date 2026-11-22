@@ -12,7 +12,8 @@ let package = Package(
   name: "lfcp-bridge-app",
   platforms: [.macOS(.v15)],
   targets: [
-    // Foundation only: everything the tests reach, with a fake host.
+    // Foundation and Security (the code checks of the write gate): everything the tests reach,
+    // with a fake host.
     .target(name: "BridgeShellCore", path: "Sources/BridgeShellCore"),
     // AppKit, ServiceManagement: the status item, SMAppService, the app delegate.
     .executableTarget(

@@ -37,8 +37,8 @@
 // and writes nothing. With it and no `permit`, it writes to Apple only through
 // the fake transport and to LFCP only through a port marked `offlineTestPort`
 // (tests, the crash suite; review PR 7 #4). The run process (PR 9b) passes
-// `permit`: the write gate of §7.6 / B16 — a verification binding, or
-// writesVerified for this helper build and macOS.
+// `permit`: the write gate of §7.6 / B16 — a verification binding, or the
+// write gate by the manifests (A§9.1, src/artifact/write-gate.ts).
 
 import { randomUUID } from "node:crypto";
 import type {
@@ -53,6 +53,7 @@ import type { SectionReplica } from "@openlfcp/shared-objects/sections";
 import type { BridgeDatabase } from "../db/database.js";
 import { Holds } from "../db/holds.js";
 import { Journal } from "../db/journal.js";
+import { errorCode } from "../diag/errors.js";
 import { BasisChangedError } from "../lfcp/commit-guard.js";
 import type { GuardedCommit, GuardedCommitResult } from "../lfcp/section-host.js";
 import { type Intent, Intents, type NewIntent } from "./intents.js";
@@ -103,6 +104,8 @@ export interface Gates {
   accessCheckedNow(installationId: string, resource: ResourceId): boolean;
   offlineCommitAllowed(installationId: string, resource: ResourceId): boolean;
   connected(installationId: string): boolean;
+  /** The write gate by the manifests (A§9.1, E-051); without it, the transport's capability. */
+  writes?(): boolean;
 }
 
 /** What only the adapter knows: the bases of a finalize, the LFCP basis. */
@@ -131,7 +134,7 @@ export interface ExecutorOptions {
   /**
    * Effects. Without `permit`, only the fake transport and an offlineTestPort write (tests,
    * the crash suite). With it (the run process, PR 9b), an effect runs when `permit` says so:
-   * the write gate of §7.6 / B16 — a verification binding, or writesVerified.
+   * the write gate of §7.6 / B16 — a verification binding, or the manifests' gate (A§9.1).
    */
   readonly effects?: {
     readonly enabled: boolean;
@@ -457,7 +460,7 @@ export class Executor {
       accessCheckedNow: g.accessCheckedNow(b.installation_id, R),
       offlineCommitAllowed: g.offlineCommitAllowed(b.installation_id, R),
       connected: g.connected(b.installation_id),
-      writesVerified: t.capabilities.writesVerified,
+      writesVerified: g.writes?.() ?? t.capabilities.writesVerified,
     };
   }
 
@@ -599,7 +602,7 @@ export class Executor {
       this.#journal.append("warn", "effect.lost", {
         bindingId: i.bindingId,
         taskId: i.taskId,
-        params: { intent: i.id, error: String(error) },
+        params: { intent: i.id, code: errorCode(error) },
       });
       return { kind: "lost" };
     }
@@ -648,8 +651,9 @@ export class Executor {
         this.#intents.end(i.id, "superseded", "basis_changed", { detail: error.detail ?? null });
         return { kind: "superseded", reason: "basis_changed" };
       }
-      this.#intents.retry(i.id, this.#now() + retryDelay(i.attempts), { error: String(error) });
-      return { kind: "retry", reason: String(error) };
+      const code = errorCode(error);
+      this.#intents.retry(i.id, this.#now() + retryDelay(i.attempts), { code });
+      return { kind: "retry", reason: code };
     }
     this.#o.crash?.("after_effect", i);
     this.#intents.applied(i.id, receipt);

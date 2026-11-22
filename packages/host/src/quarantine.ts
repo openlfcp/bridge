@@ -20,20 +20,28 @@
 //     link <reminder> <task> — this one is the Task's; the other candidates are ignored.
 //     ignore <reminder> <task> — this one is not; the next pass matches again.
 // - import_ambiguous: the hold (§6.2) — a pending import's reminder is not found. Listed with its
-//   pending imports; the design names no finer decision than accepting the hold.
+//   pending imports. `resume --accept import_ambiguous` (owner Q-3, revising R2-8) releases the
+//   pending imports whose reminder is not found now: the link becomes the tombstone `unlinked`
+//   (import_released) without the reminder's keys, the prepared create_task is superseded, the
+//   hold is lifted — the next pass does not set it again and new reminders are imported. A
+//   reminder that comes back later is a new import (a possible duplicate: the person checks for
+//   duplicates before accepting, the runbook's step).
 //
 // Every decision is journaled (quarantine.resolved) and, for an intent, recorded in
 // intent_resolutions (what N8's quiescence reads).
 
-import type {
-  AppleItem,
-  AppleOpSuccess,
-  FindQuery,
-  RemindersTransport,
-  WritableSet,
-  WrittenFields,
+import {
+  type AppleItem,
+  type AppleOpSuccess,
+  type FindQuery,
+  isMarkerUrl,
+  type RemindersTransport,
+  type WritableSet,
+  type WrittenFields,
 } from "@openlfcp/bridge-reminders";
+import { parseTaskLink } from "@openlfcp/bridge-reminders/adapter";
 import type { BridgeDatabase } from "./db/database.js";
+import { Holds } from "./db/holds.js";
 import type { Journal } from "./db/journal.js";
 import type { IntentHandler } from "./executor/executor.js";
 import { type Intent, Intents } from "./executor/intents.js";
@@ -621,6 +629,123 @@ export async function ignoreReminder(
     kind: "resolved",
     text: `ignored: "${item.title}" is not the Task's; the next pass matches the Task again`,
   };
+}
+
+/**
+ * `resume --accept import_ambiguous --binding <b>` (see the header): the pending imports of `b` whose
+ * reminder is not in its list now are released, then the hold is lifted, in one transaction. The
+ * reminder is looked for as matching does (§5.4: the Task's link URL, the external id, the cached
+ * id, the ignored copies left out), so what is released is exactly what sets the hold. Refused —
+ * nothing written, the hold stays — when the list cannot be read completely, or when such an
+ * import is already on its way to LFCP (effecting, applied: its outcome decides, not a person).
+ */
+export async function acceptImportAmbiguous(
+  db: BridgeDatabase,
+  transport: Pick<RemindersTransport, "snapshot">,
+  bindingId: string,
+  o: DecisionPorts,
+): Promise<Resolution> {
+  const now = o.now ?? Date.now;
+  const holds = new Holds(db, now);
+  if (!holds.has(bindingId, "import_ambiguous"))
+    return { kind: "resolved", text: `no hold import_ambiguous on ${bindingId}` };
+  const b = db
+    .prepare("SELECT target_ref, resource_id FROM bindings WHERE id = ?")
+    .get(bindingId) as { target_ref: string | null; resource_id: string } | undefined;
+  if (b?.target_ref == null) return { kind: "refused", text: `binding ${bindingId} has no list` };
+  const snap = await transport
+    .snapshot(b.target_ref as Parameters<RemindersTransport["snapshot"]>[0])
+    .catch(() => undefined);
+  if (snap === undefined || !snap.complete)
+    return {
+      kind: "refused",
+      text: "the list could not be read completely in Reminders (lfcp-bridge doctor); try again",
+    };
+  const links = db
+    .prepare(
+      "SELECT task_id, state, rem_external_id, rem_id_cache, ignored_external_ids_json FROM links WHERE binding_id = ?",
+    )
+    .all(bindingId) as {
+    task_id: string;
+    state: string;
+    rem_external_id: string | null;
+    rem_id_cache: string | null;
+    ignored_external_ids_json: string;
+  }[];
+  const ignored = new Set(
+    links.flatMap((l) => JSON.parse(l.ignored_external_ids_json) as string[]),
+  );
+  // The same candidates as matching (adapter/matching.ts): no markers, no ignored copies, a Task
+  // link only when its section is absent or this binding's.
+  const live = snap.items.filter(
+    (i) =>
+      !isMarkerUrl(i.linkUrl) && (i.ref.externalId === undefined || !ignored.has(i.ref.externalId)),
+  );
+  const ownTask = (url: string | undefined) => {
+    const t = parseTaskLink(url);
+    return t !== undefined && (t.section === undefined || t.section === b.resource_id)
+      ? t.taskId
+      : undefined;
+  };
+  const found = (l: (typeof links)[number]) =>
+    live.some(
+      (i) =>
+        ownTask(i.linkUrl) === l.task_id ||
+        (l.rem_external_id !== null && i.ref.externalId === l.rem_external_id) ||
+        (l.rem_id_cache !== null && i.ref.id === l.rem_id_cache),
+    );
+  const vanished = links.filter((l) => l.state === "pending_lfcp_create" && !found(l));
+  const at = new Date(now()).toISOString();
+  return db
+    .transaction((): Resolution => {
+      const sending = (taskId: string) =>
+        db
+          .prepare(
+            "SELECT 1 FROM intents WHERE binding_id = ? AND task_id = ? AND kind = 'create_task' AND state IN ('effecting','applied')",
+          )
+          .get(bindingId, taskId) !== undefined;
+      const busy = vanished.filter((l) => sending(l.task_id));
+      if (busy.length > 0)
+        return {
+          kind: "refused",
+          text: `${busy.length} import(s) are being sent to LFCP; try again when they finish`,
+        };
+      for (const l of vanished) {
+        db.prepare(
+          `UPDATE links SET state = 'unlinked', state_reason = 'import_released', rem_external_id = NULL,
+             rem_id_cache = NULL, updated_at = ? WHERE binding_id = ? AND task_id = ? AND state = 'pending_lfcp_create'`,
+        ).run(at, bindingId, l.task_id);
+        // The imports of a pass go one after the other (`after` the previous one's Task): one
+        // planned after this Task now goes where this one would have gone.
+        const own = db
+          .prepare(
+            `SELECT json_extract(payload_json, '$.intents[0].after') AS after FROM intents
+              WHERE binding_id = ? AND task_id = ? AND kind = 'create_task' AND state = 'prepared'`,
+          )
+          .get(bindingId, l.task_id) as { after: string | null } | undefined;
+        if (own !== undefined)
+          db.prepare(
+            `UPDATE intents SET payload_json = json_set(payload_json, '$.intents[0].after', ?)
+              WHERE binding_id = ? AND kind = 'create_task' AND state = 'prepared'
+                AND json_extract(payload_json, '$.intents[0].after') = ?`,
+          ).run(own.after, bindingId, l.task_id);
+        db.prepare(
+          `UPDATE intents SET state = 'superseded', state_reason = 'import_released'
+            WHERE binding_id = ? AND task_id = ? AND kind = 'create_task' AND state = 'prepared'`,
+        ).run(bindingId, l.task_id);
+        o.journal.append("warn", "link.unlinked", {
+          bindingId,
+          taskId: l.task_id,
+          params: { reason: "import_released" },
+        });
+      }
+      holds.accept(bindingId, "import_ambiguous");
+      return {
+        kind: "resolved",
+        text: `hold import_ambiguous lifted and accepted on ${bindingId}: ${vanished.length} pending import(s) without a reminder released; the next pass goes through`,
+      };
+    })
+    .immediate();
 }
 
 /** For a person: a reminder id, shortened. */

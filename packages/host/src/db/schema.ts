@@ -13,7 +13,8 @@
 // Version 6: durable acceptances of anomaly snapshots (A§7.1, E18).
 // Version 7: authorizations of exact inverse sets, a person's decisions, ignored imports (A§7.1–7.2).
 // Version 8: the items of a decision, each finished on its own (A§7.2 "writes finished").
-// Version 9: the durable execution of requests and answers of `C`, and a binding's generation and
+// Version 9: the cache of the artifact and certification manifests (A§9.1–9.2, E-051).
+// Version 10: the durable execution of requests and answers of `C`, and a binding's generation and
 // last complete check (A§3.4–3.5).
 //
 // Beyond §3: STRICT tables, NOT NULL where a row has no meaning without the
@@ -451,14 +452,38 @@ const V8: Migration = {
   down: ["DROP TABLE decision_items"],
 };
 
-// Version 9 (A§3.4, E-030): every request (`rid`) and answer (`aid`) of `C` the host has seen, written
+// Version 9 (A§9.1–9.2, E-051): the write gate's copies of the signed manifests, as downloaded.
+// artifact_manifest: artifact-manifest.json of a build, by its manifestSha256 (the one running
+// and, around an update, the next). certification_manifest: the one public certification manifest
+// with the greatest `seq` seen — a smaller one is never taken (A§9.2). The text is kept as signed;
+// a reader verifies it again. Down drops both: the next start downloads them again.
+const V9: Migration = {
+  version: 9,
+  name: "manifest cache",
+  up: [
+    `CREATE TABLE artifact_manifest (
+      manifest_sha256 TEXT PRIMARY KEY,
+      text TEXT NOT NULL,
+      stored_at TEXT NOT NULL
+    ) STRICT, WITHOUT ROWID`,
+    `CREATE TABLE certification_manifest (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      seq INTEGER NOT NULL CHECK (seq >= 0),
+      text TEXT NOT NULL,
+      stored_at TEXT NOT NULL
+    ) STRICT`,
+  ],
+  down: ["DROP TABLE certification_manifest", "DROP TABLE artifact_manifest"],
+};
+
+// Version 10 (A§3.4, E-030): every request (`rid`) and answer (`aid`) of `C` the host has seen, written
 // before any effect, in the transaction that plans its effects (`effect_ids_json`). A row is never
 // deleted: an id seen again — after the map is cleaned up, after a crash — is not executed again.
 // `state` is the event's (A§3.3), `accepted` standing for `received`. The binding gains its
 // `generation` (a request for another generation is `stale`) and `last_complete_check_at` (A§3.5).
 // Down drops the table and both columns (an older bridge does not read `C`).
-const V9: Migration = {
-  version: 9,
+const V10: Migration = {
+  version: 10,
   name: "control_exec, binding generation and last complete check",
   up: [
     `CREATE TABLE control_exec (
@@ -495,7 +520,18 @@ const V9: Migration = {
 };
 
 /** Every migration, in order. */
-export const MIGRATIONS: readonly Migration[] = Object.freeze([V1, V2, V3, V4, V5, V6, V7, V8, V9]);
+export const MIGRATIONS: readonly Migration[] = Object.freeze([
+  V1,
+  V2,
+  V3,
+  V4,
+  V5,
+  V6,
+  V7,
+  V8,
+  V9,
+  V10,
+]);
 
 /** The schema version this build writes. */
 export const SCHEMA_VERSION = MIGRATIONS.length;
