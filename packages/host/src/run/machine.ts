@@ -420,6 +420,7 @@ export async function machineProcess(o: {
       if (p.control === undefined) continue;
       const client = new ControlClient({
         db,
+        installation: p.id,
         port: p.control,
         service: () => ({
           instance: config.bridgeInstanceId,

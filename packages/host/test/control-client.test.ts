@@ -23,6 +23,8 @@ import {
 
 const R1 = "11".repeat(32);
 const REF1 = Buffer.from(R1, "hex").toString("base64url");
+const R2 = "22".repeat(32);
+const REF2 = Buffer.from(R2, "hex").toString("base64url");
 const T0 = Date.parse("2026-11-19T10:00:00Z");
 const root = new Uint8Array(32).fill(7) as unknown as PrincipalId;
 
@@ -95,9 +97,10 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-const client = (port: ControlPort, ops: Record<string, OpHandler> = {}) =>
+const client = (port: ControlPort, ops: Record<string, OpHandler> = {}, installation = "i1") =>
   new ControlClient({
     db,
+    installation,
     port,
     ops,
     service: () => ({ instance: "x", kind: "reminders" }),
@@ -257,5 +260,31 @@ describe("ControlClient", () => {
     expect(db.prepare("SELECT state FROM control_exec WHERE id = 'r'").get()).toEqual({
       state: "applied",
     });
+  });
+
+  it("publishes and resolves only the bindings of its own installation", async () => {
+    db.prepare(
+      "INSERT INTO installations (id, dir, principal, root, label, created_at) VALUES ('i2', 'j', 'p', 'r', 'l', 'x')",
+    ).run();
+    db.prepare(
+      "INSERT INTO bindings (id, installation_id, resource_id, adapter, transport, target_ref, target_title, state, created_at) VALUES ('b2', 'i2', ?, 'apple-reminders', 'eventkit', 't2', 'Private', 'active', 'x')",
+    ).run(R2);
+    const c = fakeC();
+    const seen: (string | null)[] = [];
+    c.s.requests.r = request("check", { binding: REF2 });
+    await client(c.port, {
+      check: {
+        run: async ({ row }) => {
+          seen.push(row.binding);
+          return { state: "applied" };
+        },
+      },
+    }).tick();
+    expect(Object.keys(c.s.bindings)).toEqual([REF1]);
+    expect(seen).not.toContain("b2");
+    const d = fakeC();
+    await client(d.port, {}, "i2").tick();
+    expect(Object.keys(d.s.bindings)).toEqual([REF2]);
+    expect(d.s.bindings[REF2]).toMatchObject({ list: "Private" });
   });
 });

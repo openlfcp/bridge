@@ -65,6 +65,8 @@ export interface OpHandler {
 
 export interface ControlClientOptions {
   readonly db: BridgeDatabase;
+  /** The installation owning this `C` (A§3: one `C` per bridge instance × root): only its bindings. */
+  readonly installation: string;
   readonly port: ControlPort;
   readonly exec?: ControlExec;
   /** Handlers by op; their names are `service.protocol.ops`. */
@@ -158,8 +160,10 @@ export class ControlClient {
   #local(ref: string | undefined): string | undefined {
     if (ref === undefined) return undefined;
     const rows = this.#o.db
-      .prepare("SELECT id, resource_id AS r FROM bindings WHERE state <> 'removed'")
-      .all() as { id: string; r: string }[];
+      .prepare(
+        "SELECT id, resource_id AS r FROM bindings WHERE installation_id = ? AND state <> 'removed'",
+      )
+      .all(this.#o.installation) as { id: string; r: string }[];
     return rows.find((b) => resourceRef(b.r) === ref)?.id ?? ref;
   }
 
@@ -329,9 +333,15 @@ export class ControlClient {
     const rows = this.#o.db
       .prepare(
         `SELECT id, resource_id AS r, state, target_title AS list, filter_mode AS filter
-           FROM bindings WHERE state <> 'removed' ORDER BY id`,
+           FROM bindings WHERE installation_id = ? AND state <> 'removed' ORDER BY id`,
       )
-      .all() as { id: string; r: string; state: string; list: string | null; filter: string }[];
+      .all(this.#o.installation) as {
+      id: string;
+      r: string;
+      state: string;
+      list: string | null;
+      filter: string;
+    }[];
     for (const b of rows) {
       const ref = resourceRef(b.r);
       const st = bindingStatus(this.#o.db, b.id);

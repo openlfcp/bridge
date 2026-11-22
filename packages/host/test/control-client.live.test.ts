@@ -148,6 +148,7 @@ describe.skipIf(skip !== undefined)("ControlClient, live", { timeout: 180_000 },
     const gates = new Map<string, () => void>();
     const client = new ControlClient({
       db,
+      installation: "i1",
       port: bridgeC,
       ops: {
         check: {
