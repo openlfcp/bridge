@@ -90,6 +90,7 @@ SDK's bridge API directly, with no fallbacks of its own: `openNodeInstallation`
 | `build`, `draft` (`release.yml`) | the release chain (`docs/devel/release-chain.md`): sign, notarize (Developer ID), manifest, DMG, draft release |
 | `l5-identity` (`release.yml`) | T§3 artifact identity at L5 on the job's own Dev-signed build: the write gate certified, then preview for a changed byte, a re-signed host, another helper (`scripts/release/l5-identity.sh`) |
 | `swift-test`, `smoke` (`app.yml`) | the shell's `swift test`; L5 smoke of a development `.app` (`scripts/app/smoke.sh`) |
+| `year` (`c-year.yml`) | nightly: the synthetic year of `C` against the reference server, held to the budget of A§3.5 (`docs/devel/testing/c-year.md`) |
 | `crash`, `e2e` | with PRs 7, 9 |
 
 ## Testing
@@ -97,6 +98,7 @@ SDK's bridge API directly, with no fallbacks of its own: `openNodeInstallation`
 | Document | What |
 |---|---|
 | `docs/devel/release-chain.md` | the release chain (E-052): `release.yml` order, dry-run vs Developer ID, secrets of the environment `release`, the artifact manifest |
+| `docs/devel/testing/c-year.md` | the synthetic year of `C` (E-030, T§3): what it writes, the four measures of A§3.5, `pnpm c-year`, the nightly job |
 | `docs/devel/testing/helper-live-checklist.md` | the owner's live EventKit check of the helper (TCC, `live-check.mjs`, `sign-dev.sh`), linked to the R-001 live run |
 | `docs/devel/testing/verification-run.md` | the owner's first live run of the bridge (R-023): pair, verify, dry-run, approve, run, the checklist on iPhone and in Obsidian |
 

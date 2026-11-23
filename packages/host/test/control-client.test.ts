@@ -207,7 +207,7 @@ describe("ControlClient", () => {
     expect(c.s.events.a).toMatchObject({ state: "rejected", code: "snapshot_changed" });
   });
 
-  it("status: heartbeat every 30 minutes; a binding at most once a minute", async () => {
+  it("status: heartbeat every 30 minutes; a binding's lifecycle at once, at most once a minute", async () => {
     const c = fakeC();
     const cc = client(c.port);
     await cc.tick();
@@ -217,22 +217,70 @@ describe("ControlClient", () => {
     now += HEARTBEAT_MS - 1000;
     await cc.tick();
     expect(c.commits.length).toBe(n);
-    db.prepare(
-      "UPDATE bindings SET last_complete_check_at = '2026-11-19T11:00:00.123Z' WHERE id = 'b1'",
-    ).run();
     now += 1000;
     await cc.tick();
-    expect(c.s.status).toMatchObject({ heartbeatAt: "2026-11-19T10:30:00Z" });
-    expect(c.s.bindings[REF1]).toMatchObject({ lastCompleteCheckAt: "2026-11-19T11:00:00Z" });
-    db.prepare(
-      "UPDATE bindings SET last_complete_check_at = '2026-11-19T12:00:00.000Z' WHERE id = 'b1'",
-    ).run();
+    expect(c.commits.at(-1)).toEqual([
+      { intent: "status.put", fields: { heartbeatAt: "2026-11-19T10:30:00Z" } },
+    ]);
+    const rename = (t: string) =>
+      db.prepare("UPDATE bindings SET target_title = ? WHERE id = 'b1'").run(t);
+    rename("One");
+    await cc.tick();
+    // Only the field that changed; the heartbeat rides on the unit.
+    expect(c.commits.at(-1)).toEqual([
+      { intent: "binding.put", binding: REF1, fields: { list: "One" } },
+    ]);
+    rename("Two");
     now += BINDING_WRITE_MS - 1000;
     await cc.tick();
-    expect(c.s.bindings[REF1]).toMatchObject({ lastCompleteCheckAt: "2026-11-19T11:00:00Z" });
+    expect(c.s.bindings[REF1]).toMatchObject({ list: "One" });
     now += 1000;
     await cc.tick();
-    expect(c.s.bindings[REF1]).toMatchObject({ lastCompleteCheckAt: "2026-11-19T12:00:00Z" });
+    expect(c.s.bindings[REF1]).toMatchObject({ list: "Two" });
+    expect(c.s.status).toMatchObject({ heartbeatAt: "2026-11-19T10:31:00Z" });
+  });
+
+  it("a binding's check and pending ride on the next unit or the heartbeat; the heartbeat on any unit", async () => {
+    const c = fakeC();
+    const cc = client(c.port, {
+      check: {
+        run: async ({ effect }) => (effect() ? { state: "applied" } : { repeat: "network" }),
+      },
+    });
+    await cc.tick();
+    const n = c.commits.length;
+    const check = (at: string) =>
+      db.prepare("UPDATE bindings SET last_complete_check_at = ? WHERE id = 'b1'").run(at);
+    check("2026-11-19T10:05:00.123Z");
+    now += 10 * 60_000;
+    await cc.tick();
+    expect(c.commits.length).toBe(n);
+    // A request's events: the check and the heartbeat go with them.
+    c.s.requests.r = request("check");
+    await cc.tick();
+    await cc.tick();
+    expect(c.s.events.r).toMatchObject({ state: "applied" });
+    expect(c.s.bindings[REF1]).toMatchObject({ lastCompleteCheckAt: "2026-11-19T10:05:00Z" });
+    expect(c.s.status).toMatchObject({ heartbeatAt: "2026-11-19T10:10:00Z" });
+    expect(c.commits.slice(n).every((u) => u.some((i) => i.intent === "event.put"))).toBe(true);
+    // Nothing else to write: the check waits for the heartbeat, 30 minutes after the last unit.
+    const m = c.commits.length;
+    check("2026-11-19T10:15:00.000Z");
+    now = T0 + 10 * 60_000 + HEARTBEAT_MS - 1000;
+    await cc.tick();
+    expect(c.commits.length).toBe(m);
+    now += 1000;
+    await cc.tick();
+    expect(c.commits.slice(m)).toEqual([
+      [
+        {
+          intent: "binding.put",
+          binding: REF1,
+          fields: { lastCompleteCheckAt: "2026-11-19T10:15:00Z" },
+        },
+        { intent: "status.put", fields: { heartbeatAt: "2026-11-19T10:40:00Z" } },
+      ],
+    ]);
   });
 
   it("cleans what is final for 7 days; control_exec stays, so the id is not run again", async () => {
