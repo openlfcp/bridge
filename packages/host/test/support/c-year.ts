@@ -58,6 +58,7 @@ import {
   sealKeyPackage,
   signControlRecord,
 } from "@openlfcp/wire";
+import Database from "better-sqlite3";
 import type { BridgeDatabase } from "../../src/db/database.js";
 import {
   ControlClient,
@@ -168,6 +169,37 @@ export function treeBytes(dir: string): number {
     n += e.isDirectory() ? treeBytes(p) : statSync(p).size;
   }
   return n;
+}
+
+/**
+ * The history of C on the server (A§3.5, the owner's measure): the stored bytes of C's Data Units
+ * and Snapshots — the length of each object the reference server keeps, read from its database
+ * (`<state_dir>/server.sqlite3`) once it has stopped. Not the size of the database file.
+ */
+export function historyBytes(
+  stateDir: string,
+  C: ResourceId,
+): { readonly units: number; readonly snapshots: number; readonly total: number } {
+  const db = new Database(join(stateDir, "server.sqlite3"), {
+    readonly: true,
+    fileMustExist: true,
+  });
+  try {
+    const id = Buffer.from(toHex(C), "hex");
+    const sum = (table: "data_units" | "snapshots") =>
+      (
+        db
+          .prepare(
+            `SELECT COALESCE(SUM(length(bytes)), 0) AS n FROM ${table} WHERE resource_id = ?`,
+          )
+          .get(id) as { n: number }
+      ).n;
+    const units = sum("data_units");
+    const snapshots = sum("snapshots");
+    return { units, snapshots, total: units + snapshots };
+  } finally {
+    db.close();
+  }
 }
 
 function partyFrom(seeds: PersonalSeeds): Party {

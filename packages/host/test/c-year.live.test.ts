@@ -10,17 +10,26 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { openBridgeDatabase } from "../src/index.js";
-import { coldConnect, synthesizeYear, treeBytes } from "./support/c-year.js";
+import { coldConnect, historyBytes, synthesizeYear, treeBytes } from "./support/c-year.js";
 import { type LiveServer, serverSkip, startServer } from "./support/server.js";
 
 const MiB = 1024 * 1024;
-/** A§3.5, for a year. */
+/**
+ * A§3.5, for a year. `historyBytes` — "history of C ≤ 20 MiB on the server" — is the stored bytes of
+ * C's Data Units and Snapshots (the owner's decision), not the server's database file.
+ */
 const BUDGET = {
-  serverBytes: 20 * MiB,
+  historyBytes: 20 * MiB,
   coldMs: 10_000,
   maxRssBytes: 200 * MiB,
   admissionMs: 5_000,
 } as const;
+/**
+ * The budgets that wait on sdk-ts (admission and the cold client's time and memory): a release
+ * blocker under A§3.5 until the bridge pins the fixed sdk-ts. LFCP_C_REPORT_ONLY=sdk reports them
+ * without failing the run (the nightly job); the history budget and the dedup evidence still fail it.
+ */
+const sdkReportOnly = process.env.LFCP_C_REPORT_ONLY === "sdk";
 
 const year = process.env.LFCP_C_YEAR === "1";
 const days = Number(process.env.LFCP_C_DAYS ?? (year ? 365 : 8));
@@ -61,9 +70,13 @@ describe.skipIf(skip !== undefined)("synthetic year of C, live", () => {
       const admission = await y.admitHistory();
       // What the server keeps, its write-ahead log checkpointed: stopped, not disposed.
       await live.stop();
+      const history = historyBytes(live.stateDir, y.C);
       const figures = {
         days,
         transitionsPerDay,
+        historyBytes: history.total,
+        historyUnitBytes: history.units,
+        historySnapshotBytes: history.snapshots,
         serverBytes: treeBytes(live.stateDir),
         serverFiles: Object.fromEntries(
           readdirSync(live.stateDir, { recursive: true, withFileTypes: true })
@@ -84,6 +97,7 @@ describe.skipIf(skip !== undefined)("synthetic year of C, live", () => {
         admittedUnits: admission.units,
         wallMs: y.wallMs,
         budget: BUDGET,
+        sdkReportOnly,
       };
       console.log(JSON.stringify(figures));
       const report = process.env.LFCP_C_REPORT;
@@ -99,10 +113,14 @@ describe.skipIf(skip !== undefined)("synthetic year of C, live", () => {
       expect(y.controlExec.rows).toBe(y.counts.questions);
       expect(admission.units).toBe(y.units.bridge + y.units.root);
       // The budget is the year's; a shorter one is within it too.
-      expect(figures.serverBytes).toBeLessThanOrEqual(BUDGET.serverBytes);
-      expect(cold.coldMs).toBeLessThanOrEqual(BUDGET.coldMs);
-      expect(cold.maxRssBytes).toBeLessThanOrEqual(BUDGET.maxRssBytes);
-      expect(admission.ms).toBeLessThanOrEqual(BUDGET.admissionMs);
+      expect(history.units).toBeGreaterThan(0);
+      expect(history.snapshots).toBeGreaterThan(0);
+      expect(history.total).toBeLessThanOrEqual(BUDGET.historyBytes);
+      if (!sdkReportOnly) {
+        expect(cold.coldMs).toBeLessThanOrEqual(BUDGET.coldMs);
+        expect(cold.maxRssBytes).toBeLessThanOrEqual(BUDGET.maxRssBytes);
+        expect(admission.ms).toBeLessThanOrEqual(BUDGET.admissionMs);
+      }
     } finally {
       db.close();
       rmSync(dir, { recursive: true, force: true });

@@ -21,13 +21,22 @@ questions a week per binding.
 
 | Measure | How | Budget (A§3.5) |
 |---|---|---|
-| History on the server | bytes of the server's `state_dir`, the server stopped (write-ahead log checkpointed) | ≤ 20 MiB |
+| History of `C` on the server | the stored bytes of `C`'s Data Units and Snapshots: `SUM(length(bytes))` over `data_units` and `snapshots` of `C` in the server's `server.sqlite3`, the server stopped | ≤ 20 MiB |
 | Cold connection | `c-year-cold.mjs`, its own process: a new personal device of the root, nothing stored, until it reads the last status | ≤ 10 s |
 | Peak memory | that process's `maxRSS` | ≤ 200 MiB |
 | Admission of the whole history | `replayStored` of every unit the bridge holds through a fresh profile | ≤ 5 s |
 | Dedup evidence | every answer the cleanup removed from `C` keeps its `applied` `control_exec` row (A§3.4 step 5) | all |
 
-Over budget fails the run: a release blocker (A§3.5). The answer is less writing, never fewer
+"History of `C` ≤ 20 MiB" counts the objects the server keeps for `C`, not the size of its database
+file (the owner's decision for A§3.5). The figures also give the size of the server's `state_dir`, for
+reference only.
+
+Over budget fails the run: a release blocker (A§3.5). Admission, the cold connection and its memory
+depend on sdk-ts (validating `ServiceControl` at admission); until the bridge pins an sdk-ts that
+meets them, `LFCP_C_REPORT_ONLY=sdk` reports those three without failing. The nightly job sets it; the
+history budget and the dedup evidence always fail the run.
+
+The answer to the history budget is less writing, never fewer
 `control_exec` rows: the `ControlClient` writes only the fields that changed, and the heartbeat and a
 binding's progress fields (`lastCompleteCheckAt`, `pending`) ride on the next unit it writes anyway, or on
 the heartbeat 30 minutes after the last unit.
