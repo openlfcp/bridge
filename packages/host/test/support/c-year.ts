@@ -126,15 +126,35 @@ export interface ColdResult {
   readonly maxRssBytes: number;
 }
 
-/** Runs c-year-cold.mjs as a new personal device of the year's root. */
-export async function coldConnect(url: string, y: YearResult): Promise<ColdResult> {
+/** The cold client did not finish (crashed, or past its time): the figures are unknown. */
+export interface ColdFailure {
+  readonly failed: string;
+  readonly elapsedMs: number;
+}
+
+/**
+ * Runs c-year-cold.mjs as a new personal device of the year's root. A child that fails or runs out
+ * of time is a result, not an exception: those budgets wait on sdk-ts (report-only), and the run
+ * must still check the history and the dedup evidence and write its figures.
+ */
+export async function coldConnect(url: string, y: YearResult): Promise<ColdResult | ColdFailure> {
   const arg = JSON.stringify({ url, C: toHex(y.C), ...y.personal, heartbeatAt: y.lastHeartbeatAt });
   const script = fileURLToPath(new URL("./c-year-cold.mjs", import.meta.url));
-  const { stdout } = await promisify(execFile)(process.execPath, [script, arg], {
-    timeout: 600_000,
-    maxBuffer: 1 << 20,
-  });
-  return JSON.parse(stdout.trim().split("\n").at(-1) as string) as ColdResult;
+  const started = performance.now();
+  try {
+    const { stdout } = await promisify(execFile)(process.execPath, [script, arg], {
+      timeout: 600_000,
+      maxBuffer: 1 << 20,
+    });
+    return JSON.parse(stdout.trim().split("\n").at(-1) as string) as ColdResult;
+  } catch (e) {
+    const err = e as { stderr?: string; killed?: boolean; message?: string };
+    const why = err.killed === true ? "killed after the timeout" : (err.message ?? String(e));
+    return {
+      failed: `${why}${err.stderr ? `: ${err.stderr.slice(-2000)}` : ""}`,
+      elapsedMs: Math.round(performance.now() - started),
+    };
+  }
 }
 
 const iso = (ms: number) => `${new Date(ms).toISOString().slice(0, 19)}Z`;

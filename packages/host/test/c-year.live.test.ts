@@ -90,9 +90,11 @@ describe.skipIf(skip !== undefined)("synthetic year of C, live", () => {
         unitBytes: y.bytes,
         counts: y.counts,
         controlExec: y.controlExec,
-        coldMs: cold.coldMs,
-        coldAdmissionMs: cold.admissionMs,
-        maxRssBytes: cold.maxRssBytes,
+        // null: the cold client failed (coldFailed says how); never within the budget.
+        coldMs: "failed" in cold ? null : cold.coldMs,
+        coldAdmissionMs: "failed" in cold ? null : cold.admissionMs,
+        maxRssBytes: "failed" in cold ? null : cold.maxRssBytes,
+        coldFailed: "failed" in cold ? cold.failed : null,
         admissionMs: admission.ms,
         admittedUnits: admission.units,
         wallMs: y.wallMs,
@@ -117,8 +119,10 @@ describe.skipIf(skip !== undefined)("synthetic year of C, live", () => {
       expect(history.snapshots).toBeGreaterThan(0);
       expect(history.total).toBeLessThanOrEqual(BUDGET.historyBytes);
       if (!sdkReportOnly) {
-        expect(cold.coldMs).toBeLessThanOrEqual(BUDGET.coldMs);
-        expect(cold.maxRssBytes).toBeLessThanOrEqual(BUDGET.maxRssBytes);
+        expect("failed" in cold ? cold.failed : undefined).toBeUndefined();
+        const ok = cold as Exclude<typeof cold, { failed: string }>;
+        expect(ok.coldMs).toBeLessThanOrEqual(BUDGET.coldMs);
+        expect(ok.maxRssBytes).toBeLessThanOrEqual(BUDGET.maxRssBytes);
         expect(admission.ms).toBeLessThanOrEqual(BUDGET.admissionMs);
       }
     } finally {

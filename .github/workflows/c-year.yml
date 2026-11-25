@@ -107,14 +107,14 @@ jobs:
           f="$LFCP_C_REPORT"
           [ -f "$f" ] || { echo "No figures: the run did not finish." >> "$GITHUB_STEP_SUMMARY"; exit 0; }
           jq -r --arg r "${{ matrix.runner }}" '
-            def mib: . / 1048576 * 100 | round / 100;
+            def mib: if . == null then "failed" else . / 1048576 * 100 | round / 100 end;
             def mark($v; $b): if $v <= $b then "ok" else "over" end;
-            def sdk($v; $b; $only): if $v <= $b then "ok" elif $only then "over: sdk-ts, report only" else "over" end;
+            def sdk($v; $b; $only): if $v == null then (if $only then "failed: sdk-ts, report only" else "failed" end) elif $v <= $b then "ok" elif $only then "over: sdk-ts, report only" else "over" end;
             "### C year on \($r): \(.days) days, \(.transitionsPerDay) transitions/day",
             "",
             "| Measure | Value | Budget | |", "|---|---|---|---|",
             "| History of C on the server (units \(.historyUnitBytes | mib) + Snapshots \(.historySnapshotBytes | mib) MiB) | \(.historyBytes | mib) MiB | \(.budget.historyBytes | mib) MiB | \(mark(.historyBytes; .budget.historyBytes)) |",
-            "| Cold connection | \(.coldMs) ms | \(.budget.coldMs) ms | \(sdk(.coldMs; .budget.coldMs; .sdkReportOnly)) |",
+            "| Cold connection | \(.coldMs // "failed") ms | \(.budget.coldMs) ms | \(sdk(.coldMs; .budget.coldMs; .sdkReportOnly)) |",
             "| Peak memory of the cold client | \(.maxRssBytes | mib) MiB | \(.budget.maxRssBytes | mib) MiB | \(sdk(.maxRssBytes; .budget.maxRssBytes; .sdkReportOnly)) |",
             "| Admission of the whole history | \(.admissionMs) ms (\(.admittedUnits) units) | \(.budget.admissionMs) ms | \(sdk(.admissionMs; .budget.admissionMs; .sdkReportOnly)) |",
             "| control_exec: answers cleaned / kept | \(.controlExec.cleaned) / \(.controlExec.kept) | equal | \(if .controlExec.cleaned == .controlExec.kept then "ok" else "broken" end) |",
