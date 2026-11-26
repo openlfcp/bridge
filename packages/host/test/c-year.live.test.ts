@@ -54,6 +54,7 @@ describe.skipIf(skip !== undefined)("synthetic year of C, live", () => {
     const live = server as LiveServer;
     const dir = mkdtempSync(join(tmpdir(), "lfcp-c-year-"));
     const db = openBridgeDatabase(join(dir, "bridge.sqlite"));
+    const t0 = Date.now();
     try {
       const y = await synthesizeYear({
         url: live.url,
@@ -61,12 +62,15 @@ describe.skipIf(skip !== undefined)("synthetic year of C, live", () => {
         days,
         transitionsPerDay,
         onWeek: (w, units) => {
-          if (year) console.log(`week ${w}: ${units} units`);
+          if (year)
+            console.log(`week ${w}: ${units} units, ${Math.round((Date.now() - t0) / 1000)} s`);
         },
       });
       let cold: Awaited<ReturnType<typeof coldConnect>>;
       try {
+        const c0 = Date.now();
         cold = await coldConnect(live.url, y);
+        if (year) console.log(`cold client: ${Math.round((Date.now() - c0) / 1000)} s`);
       } finally {
         await y.stop();
       }

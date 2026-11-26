@@ -44,6 +44,11 @@ The answer to the history budget is less writing, never fewer
 binding's progress fields (`lastCompleteCheckAt`, `pending`) ride on the next unit it writes anyway, or on
 the heartbeat 30 minutes after the last unit.
 
+The cold client runs in its own process with a 30-minute timeout (`COLD_TIMEOUT_MS`), far above the
+10 s budget: a slow cold connection is a figure, only one that never ends fails the run, and the error
+says how the process ended (killed at the timeout, killed by a signal, or its exit code and stderr).
+The year prints its progress once a simulated week with the elapsed time, and the cold client's time.
+
 ## Running it
 
 `pnpm c-year` (`LFCP_C_YEAR=1`, `LFCP_REQUIRE_LIVE=1`) with `LFCP_SERVER_BIN` set (see Live tests in
