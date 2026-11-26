@@ -23,13 +23,16 @@ questions a week per binding.
 |---|---|---|
 | History of `C` on the server | the stored bytes of `C`'s Data Units and Snapshots: `SUM(length(bytes))` over `data_units` and `snapshots` of `C` in the server's `server.sqlite3`, the server stopped | ≤ 20 MiB |
 | Cold connection | `c-year-cold.mjs`, its own process: a new personal device of the root, nothing stored, until it reads the last status | ≤ 10 s |
-| Peak memory | that process's `maxRSS` | ≤ 200 MiB |
+| Peak memory | that process's `maxRSS` | ≤ 640 MiB (0.6) |
 | Admission of the whole history | `replayStored` of every unit the bridge holds through a fresh profile | ≤ 5 s |
 | Dedup evidence | every answer the cleanup removed from `C` keeps its `applied` `control_exec` row (A§3.4 step 5) | all |
 
 "History of `C` ≤ 20 MiB" counts the objects the server keeps for `C`, not the size of its database
 file (the owner's decision for A§3.5). The figures also give the size of the server's `state_dir`, for
 reference only.
+
+The peak memory budget for 0.6 is 640 MiB for a one-year history: the owner's decision of 2026-11-25
+(A§3.5, answer C). The 200 MiB whole-process figure of A§3.5 is the goal for later phases.
 
 Over budget fails the run: a release blocker (A§3.5). Admission, the cold connection and its memory
 depend on sdk-ts (validating `ServiceControl` at admission); until the bridge pins an sdk-ts that

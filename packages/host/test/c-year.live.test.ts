@@ -17,11 +17,14 @@ const MiB = 1024 * 1024;
 /**
  * A§3.5, for a year. `historyBytes` — "history of C ≤ 20 MiB on the server" — is the stored bytes of
  * C's Data Units and Snapshots (the owner's decision), not the server's database file.
+ * `maxRssBytes` — the cold client's peak RSS over a one-year history — is 640 MiB for 0.6: the
+ * owner's decision of 2026-11-25 (A§3.5, answer C). The 200 MiB whole-process figure of A§3.5 is
+ * the goal for later phases, not the 0.6 budget.
  */
 const BUDGET = {
   historyBytes: 20 * MiB,
   coldMs: 10_000,
-  maxRssBytes: 200 * MiB,
+  maxRssBytes: 640 * MiB,
   admissionMs: 5_000,
 } as const;
 /**

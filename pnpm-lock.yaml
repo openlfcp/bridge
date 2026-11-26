@@ -342,7 +342,7 @@ packages:
     engines: {node: '>=24'}
 
   '@openlfcp/shared-objects@file:vendor/sdk-ts/openlfcp-shared-objects-0.6.0.tgz':
-    resolution: {integrity: sha512-wl6BIQe1SqI5bHGYQyyVqFW8jVTfeEfP66JfKb8ExDbT4ym0669oFIH9NtmMGBpjhhRLnChgvr4f+SVsd39V4Q==, tarball: file:vendor/sdk-ts/openlfcp-shared-objects-0.6.0.tgz}
+    resolution: {integrity: sha512-XIHafAGmmPD9weRmcjHyFjmEm/MZ4SNfn6F9FggcUJumXKo/kLe87lqmbVZIRwbRgirGBCc4qTDf34Ef6+87iQ==, tarball: file:vendor/sdk-ts/openlfcp-shared-objects-0.6.0.tgz}
     version: 0.6.0
     engines: {node: '>=24'}
 
