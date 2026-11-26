@@ -6,11 +6,9 @@ name: C year
 # ControlClient and sdk-ts against the reference server at server.lock, then held to the budget of
 # A§3.5: the history of C on the server (the stored bytes of C's units and Snapshots), a new
 # personal client's cold connection and peak memory, the admission of the whole history;
-# control_exec keeps the dedup evidence through the cleanup. The history budget and the dedup
-# evidence fail the job. Admission, cold connection and memory wait on sdk-ts: the job reports them
-# (LFCP_C_REPORT_ONLY=sdk) and marks them over budget, without failing, until the bridge pins the
-# fixed sdk-ts; then drop LFCP_C_REPORT_ONLY. The figures are the artifact and the job summary
-# (`pnpm c-year`, docs/devel/testing/c-year.md).
+# control_exec keeps the dedup evidence through the cleanup. Any measure over budget, or broken
+# dedup evidence, fails the job: a release blocker (A§3.5, T§3). The figures are the artifact and
+# the job summary (`pnpm c-year`, docs/devel/testing/c-year.md).
 on:
   schedule:
     # Nightly, the whole year.
@@ -23,19 +21,6 @@ on:
       transitions:
         description: Transitions a day per binding
         default: "20"
-  # Its own files changed: a month, to check the job and see the trend where it changes.
-  push:
-    paths:
-      - ".github/workflows/c-year.yml"
-      - "packages/host/test/c-year.live.test.ts"
-      - "packages/host/test/support/c-year*"
-      - "packages/host/src/control/client.ts"
-  pull_request:
-    paths:
-      - ".github/workflows/c-year.yml"
-      - "packages/host/test/c-year.live.test.ts"
-      - "packages/host/test/support/c-year*"
-      - "packages/host/src/control/client.ts"
 
 permissions:
   contents: read
@@ -52,8 +37,6 @@ jobs:
       LFCP_C_DAYS: ${{ github.event_name == 'schedule' && '365' || github.event_name == 'workflow_dispatch' && inputs.days || '30' }}
       LFCP_C_TRANSITIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.transitions || '20' }}
       LFCP_C_REPORT: ${{ github.workspace }}/build/c-year/figures.json
-      # Report-only until sdk-ts is fixed and pinned (A§3.5 release blocker).
-      LFCP_C_REPORT_ONLY: sdk
       LFCP_SERVER_BIN: ${{ github.workspace }}/vendor/server-src/target/release/lfcp-server
     steps:
       - uses: actions/checkout@v5
@@ -109,14 +92,13 @@ jobs:
           jq -r --arg r "${{ matrix.runner }}" '
             def mib: . / 1048576 * 100 | round / 100;
             def mark($v; $b): if $v <= $b then "ok" else "over" end;
-            def sdk($v; $b; $only): if $v <= $b then "ok" elif $only then "over: sdk-ts, report only" else "over" end;
             "### C year on \($r): \(.days) days, \(.transitionsPerDay) transitions/day",
             "",
             "| Measure | Value | Budget | |", "|---|---|---|---|",
             "| History of C on the server (units \(.historyUnitBytes | mib) + Snapshots \(.historySnapshotBytes | mib) MiB) | \(.historyBytes | mib) MiB | \(.budget.historyBytes | mib) MiB | \(mark(.historyBytes; .budget.historyBytes)) |",
-            "| Cold connection | \(.coldMs) ms | \(.budget.coldMs) ms | \(sdk(.coldMs; .budget.coldMs; .sdkReportOnly)) |",
-            "| Peak memory of the cold client | \(.maxRssBytes | mib) MiB | \(.budget.maxRssBytes | mib) MiB | \(sdk(.maxRssBytes; .budget.maxRssBytes; .sdkReportOnly)) |",
-            "| Admission of the whole history | \(.admissionMs) ms (\(.admittedUnits) units) | \(.budget.admissionMs) ms | \(sdk(.admissionMs; .budget.admissionMs; .sdkReportOnly)) |",
+            "| Cold connection | \(.coldMs) ms | \(.budget.coldMs) ms | \(mark(.coldMs; .budget.coldMs)) |",
+            "| Peak memory of the cold client | \(.maxRssBytes | mib) MiB | \(.budget.maxRssBytes | mib) MiB | \(mark(.maxRssBytes; .budget.maxRssBytes)) |",
+            "| Admission of the whole history | \(.admissionMs) ms (\(.admittedUnits) units) | \(.budget.admissionMs) ms | \(mark(.admissionMs; .budget.admissionMs)) |",
             "| control_exec: answers cleaned / kept | \(.controlExec.cleaned) / \(.controlExec.kept) | equal | \(if .controlExec.cleaned == .controlExec.kept then "ok" else "broken" end) |",
             "",
             "Server database file, for reference (not the budget): \(.serverBytes | mib) MiB.",

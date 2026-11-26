@@ -126,15 +126,57 @@ export interface ColdResult {
   readonly maxRssBytes: number;
 }
 
+/**
+ * How long the cold client may run before it is killed. Far above the 10 s budget, so that an
+ * over-budget cold connection still yields its figures before the budget check fails the run.
+ */
+export const COLD_TIMEOUT_MS = 1_800_000;
+
+/** How long before the kill the cold client stops waiting and reports its progress. */
+const COLD_MARGIN_MS = 60_000;
+
 /** Runs c-year-cold.mjs as a new personal device of the year's root. */
-export async function coldConnect(url: string, y: YearResult): Promise<ColdResult> {
-  const arg = JSON.stringify({ url, C: toHex(y.C), ...y.personal, heartbeatAt: y.lastHeartbeatAt });
-  const script = fileURLToPath(new URL("./c-year-cold.mjs", import.meta.url));
-  const { stdout } = await promisify(execFile)(process.execPath, [script, arg], {
-    timeout: 600_000,
-    maxBuffer: 1 << 20,
+export async function coldConnect(
+  url: string,
+  y: YearResult,
+  timeoutMs = COLD_TIMEOUT_MS,
+): Promise<ColdResult> {
+  const arg = JSON.stringify({
+    url,
+    C: toHex(y.C),
+    ...y.personal,
+    heartbeatAt: y.lastHeartbeatAt,
+    // The client gives up a little before the kill, so it can say how far it got.
+    waitMs: Math.max(timeoutMs - COLD_MARGIN_MS, timeoutMs / 2),
   });
+  const script = fileURLToPath(new URL("./c-year-cold.mjs", import.meta.url));
+  const started = Date.now();
+  let stdout: string;
+  try {
+    ({ stdout } = await promisify(execFile)(process.execPath, [script, arg], {
+      timeout: timeoutMs,
+      maxBuffer: 1 << 20,
+    }));
+  } catch (e) {
+    throw new Error(coldFailure(e, Date.now() - started, timeoutMs), { cause: e });
+  }
   return JSON.parse(stdout.trim().split("\n").at(-1) as string) as ColdResult;
+}
+
+/**
+ * Why the cold client failed, in words: execFile's own message is only "Command failed: <argv>",
+ * which hid a kill at the timeout in the nightly runs of 2026-11-24 and 2026-11-25.
+ */
+export function coldFailure(e: unknown, elapsedMs: number, timeoutMs: number): string {
+  const x = e as { killed?: boolean; signal?: string | null; code?: unknown; stderr?: unknown };
+  const how =
+    x.killed === true && elapsedMs >= timeoutMs
+      ? `killed with ${x.signal ?? "a signal"} at the ${timeoutMs / 1000} s timeout`
+      : typeof x.signal === "string"
+        ? `killed with ${x.signal} (out of memory or the runner)`
+        : `exited with ${String(x.code)}`;
+  const stderr = typeof x.stderr === "string" ? x.stderr.trim().slice(-2000) : "";
+  return `the cold client ${how} after ${Math.round(elapsedMs / 1000)} s${stderr === "" ? "" : `:\n${stderr}`}`;
 }
 
 const iso = (ms: number) => `${new Date(ms).toISOString().slice(0, 19)}Z`;
