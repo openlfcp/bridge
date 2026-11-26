@@ -27,13 +27,6 @@ const BUDGET = {
   maxRssBytes: 640 * MiB,
   admissionMs: 5_000,
 } as const;
-/**
- * The budgets that wait on sdk-ts (admission and the cold client's time and memory): a release
- * blocker under A§3.5 until the bridge pins the fixed sdk-ts. LFCP_C_REPORT_ONLY=sdk reports them
- * without failing the run (the nightly job); the history budget and the dedup evidence still fail it.
- */
-const sdkReportOnly = process.env.LFCP_C_REPORT_ONLY === "sdk";
-
 const year = process.env.LFCP_C_YEAR === "1";
 const days = Number(process.env.LFCP_C_DAYS ?? (year ? 365 : 8));
 const transitionsPerDay = Number(process.env.LFCP_C_TRANSITIONS ?? (year ? 20 : 2));
@@ -104,7 +97,6 @@ describe.skipIf(skip !== undefined)("synthetic year of C, live", () => {
         admittedUnits: admission.units,
         wallMs: y.wallMs,
         budget: BUDGET,
-        sdkReportOnly,
       };
       console.log(JSON.stringify(figures));
       const report = process.env.LFCP_C_REPORT;
@@ -122,12 +114,11 @@ describe.skipIf(skip !== undefined)("synthetic year of C, live", () => {
       // The budget is the year's; a shorter one is within it too.
       expect(history.units).toBeGreaterThan(0);
       expect(history.snapshots).toBeGreaterThan(0);
+      // Over budget fails the run: a release blocker (A§3.5, T§3). There is no report-only mode.
       expect(history.total).toBeLessThanOrEqual(BUDGET.historyBytes);
-      if (!sdkReportOnly) {
-        expect(cold.coldMs).toBeLessThanOrEqual(BUDGET.coldMs);
-        expect(cold.maxRssBytes).toBeLessThanOrEqual(BUDGET.maxRssBytes);
-        expect(admission.ms).toBeLessThanOrEqual(BUDGET.admissionMs);
-      }
+      expect(cold.coldMs).toBeLessThanOrEqual(BUDGET.coldMs);
+      expect(cold.maxRssBytes).toBeLessThanOrEqual(BUDGET.maxRssBytes);
+      expect(admission.ms).toBeLessThanOrEqual(BUDGET.admissionMs);
     } finally {
       db.close();
       rmSync(dir, { recursive: true, force: true });

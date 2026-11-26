@@ -127,8 +127,8 @@ export interface ColdResult {
 }
 
 /**
- * How long the cold client may run before it is killed. Far above the 10 s budget: an over-budget
- * cold connection is a figure to report (LFCP_C_REPORT_ONLY=sdk), only one that never ends fails.
+ * How long the cold client may run before it is killed. Far above the 10 s budget, so that an
+ * over-budget cold connection still yields its figures before the budget check fails the run.
  */
 export const COLD_TIMEOUT_MS = 1_800_000;
 

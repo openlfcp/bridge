@@ -34,10 +34,10 @@ reference only.
 The peak memory budget for 0.6 is 640 MiB for a one-year history: the owner's decision of 2026-11-25
 (A§3.5, answer C). The 200 MiB whole-process figure of A§3.5 is the goal for later phases.
 
-Over budget fails the run: a release blocker (A§3.5). Admission, the cold connection and its memory
-depend on sdk-ts (validating `ServiceControl` at admission); until the bridge pins an sdk-ts that
-meets them, `LFCP_C_REPORT_ONLY=sdk` reports those three without failing. The nightly job sets it; the
-history budget and the dedup evidence always fail the run.
+Over budget fails the run: a release blocker (A§3.5, T§3). Every measure above fails it, the nightly
+job included; there is no report-only mode. Admission, the cold connection and its memory depend on
+sdk-ts (validating `ServiceControl` at admission), so until the bridge pins an sdk-ts that meets them
+on a one-year history, the nightly year fails.
 
 The answer to the history budget is less writing, never fewer
 `control_exec` rows: the `ControlClient` writes only the fields that changed, and the heartbeat and a
@@ -45,8 +45,8 @@ binding's progress fields (`lastCompleteCheckAt`, `pending`) ride on the next un
 the heartbeat 30 minutes after the last unit.
 
 The cold client runs in its own process with a 30-minute timeout (`COLD_TIMEOUT_MS`), far above the
-10 s budget: a slow cold connection is a figure, only one that never ends fails the run, and the error
-says how the process ended (killed at the timeout, killed by a signal, or its exit code and stderr).
+10 s budget: a slow cold connection still gives its figures before the budget check fails the run, and
+the error says how the process ended (killed at the timeout, killed by a signal, or its exit code and stderr).
 The client itself stops waiting one minute before the kill and reports how far it got: the time of each
 phase (chain, DEKs, start), the units admitted and the time spent admitting them, the state of `C`, the
 last heartbeat it read, and its peak memory.
