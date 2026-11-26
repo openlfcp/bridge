@@ -31,10 +31,8 @@ questions a week per binding.
 file (the owner's decision for A§3.5). The figures also give the size of the server's `state_dir`, for
 reference only.
 
-Over budget fails the run: a release blocker (A§3.5). Admission, the cold connection and its memory
-depend on sdk-ts (validating `ServiceControl` at admission); until the bridge pins an sdk-ts that
-meets them, `LFCP_C_REPORT_ONLY=sdk` reports those three without failing. The nightly job sets it; the
-history budget and the dedup evidence always fail the run.
+Over budget fails the run: a release blocker (A§3.5). There is no report-only switch; a failed cold
+client fails the run with its exit code and stderr in the message.
 
 The answer to the history budget is less writing, never fewer
 `control_exec` rows: the `ControlClient` writes only the fields that changed, and the heartbeat and a

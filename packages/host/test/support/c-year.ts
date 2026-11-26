@@ -134,8 +134,8 @@ export interface ColdFailure {
 
 /**
  * Runs c-year-cold.mjs as a new personal device of the year's root. A child that fails or runs out
- * of time is a result, not an exception: those budgets wait on sdk-ts (report-only), and the run
- * must still check the history and the dedup evidence and write its figures.
+ * of time is a result, not an exception, so the run still writes its figures; the test then fails
+ * with the child's exit code and stderr.
  */
 export async function coldConnect(url: string, y: YearResult): Promise<ColdResult | ColdFailure> {
   const arg = JSON.stringify({ url, C: toHex(y.C), ...y.personal, heartbeatAt: y.lastHeartbeatAt });
@@ -148,10 +148,16 @@ export async function coldConnect(url: string, y: YearResult): Promise<ColdResul
     });
     return JSON.parse(stdout.trim().split("\n").at(-1) as string) as ColdResult;
   } catch (e) {
-    const err = e as { stderr?: string; killed?: boolean; message?: string };
+    const err = e as {
+      stderr?: string;
+      killed?: boolean;
+      code?: number | string;
+      signal?: string;
+      message?: string;
+    };
     const why = err.killed === true ? "killed after the timeout" : (err.message ?? String(e));
     return {
-      failed: `${why}${err.stderr ? `: ${err.stderr.slice(-2000)}` : ""}`,
+      failed: `${why} (exit code ${err.code ?? "none"}, signal ${err.signal ?? "none"}), stderr: ${err.stderr?.slice(-4000) || "(empty)"}`,
       elapsedMs: Math.round(performance.now() - started),
     };
   }
