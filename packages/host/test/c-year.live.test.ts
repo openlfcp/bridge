@@ -87,6 +87,7 @@ describe.skipIf(skip !== undefined)("synthetic year of C, live", () => {
         coldMs: "failed" in cold ? null : cold.coldMs,
         coldAdmissionMs: "failed" in cold ? null : cold.admissionMs,
         maxRssBytes: "failed" in cold ? null : cold.maxRssBytes,
+        coldDetail: cold,
         coldFailed: "failed" in cold ? cold.failed : null,
         admissionMs: admission.ms,
         admittedUnits: admission.units,

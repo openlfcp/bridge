@@ -57,9 +57,14 @@ const profile = new ServiceControlDataProfile({
       : serviceControlSignerClass(serviceControlSignerFacts(u.control, u.actor)),
 });
 let admissionMs = 0;
+let admittedCalls = 0;
+let admittedUnits = 0;
+const events = [];
 const timed =
   (f) =>
   (...a) => {
+    admittedCalls++;
+    admittedUnits += Array.isArray(a[0]) ? a[0].length : 1;
     const t = performance.now();
     try {
       return f(...a);
@@ -103,6 +108,11 @@ const port = serviceControlPort({
   resource: C,
   synchronised: () => client.resourceState(C) === "LIVE",
 });
+client.on((e) => {
+  if (e.type === "snapshot-loaded" || e.type === "error" || e.type === "snapshot-published")
+    events.push({ type: e.type, atMs: Math.round(performance.now() - started) });
+});
+const chainMs = Math.round(performance.now() - started);
 client.start();
 const stopDriver = startSyncDriver(
   client,
@@ -121,6 +131,10 @@ process.stdout.write(
   `${JSON.stringify({
     coldMs: Math.round(coldMs),
     admissionMs: Math.round(admissionMs),
+    chainMs,
+    admittedCalls,
+    admittedUnits,
+    events,
     maxRssBytes: process.resourceUsage().maxRSS * 1024,
   })}\n`,
 );

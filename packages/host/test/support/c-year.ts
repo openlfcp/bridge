@@ -124,6 +124,11 @@ export interface ColdResult {
   readonly coldMs: number;
   readonly admissionMs: number;
   readonly maxRssBytes: number;
+  /** Where the time went: the chain, units admitted, Snapshot events (diagnostics, not budgets). */
+  readonly chainMs?: number;
+  readonly admittedCalls?: number;
+  readonly admittedUnits?: number;
+  readonly events?: readonly { type: string; atMs: number }[];
 }
 
 /** The cold client did not finish (crashed, or past its time): the figures are unknown. */
