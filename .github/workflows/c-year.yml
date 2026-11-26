@@ -21,19 +21,6 @@ on:
       transitions:
         description: Transitions a day per binding
         default: "20"
-  # Its own files changed: a month, to check the job and see the trend where it changes.
-  push:
-    paths:
-      - ".github/workflows/c-year.yml"
-      - "packages/host/test/c-year.live.test.ts"
-      - "packages/host/test/support/c-year*"
-      - "packages/host/src/control/client.ts"
-  pull_request:
-    paths:
-      - ".github/workflows/c-year.yml"
-      - "packages/host/test/c-year.live.test.ts"
-      - "packages/host/test/support/c-year*"
-      - "packages/host/src/control/client.ts"
 
 permissions:
   contents: read
