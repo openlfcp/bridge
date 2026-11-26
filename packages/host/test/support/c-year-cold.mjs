@@ -3,7 +3,10 @@
 // and the tail — and is ready when it reads the status the bridge wrote last. It prints one JSON
 // line: the time to ready, the time its profile spent admitting units, the peak memory (maxRSS).
 //
-//   node c-year-cold.mjs '{"url":…,"C":<hex>,"signing":<hex>,"agreement":<hex>,"heartbeatAt":…}'
+//   node c-year-cold.mjs '{"url":…,"C":<hex>,"signing":<hex>,"agreement":<hex>,"heartbeatAt":…,"waitMs":…}'
+//
+// It gives up `waitMs` after its start (the parent's timeout less a margin) and then says how far it
+// got: the time of each phase, the units admitted, the state of `C`.
 
 import {
   connectionNetwork,
@@ -33,6 +36,11 @@ import {
 
 const o = JSON.parse(process.argv[2] ?? "{}");
 const started = performance.now();
+const deadline = Date.now() + (o.waitMs ?? 300_000);
+const phases = {};
+const phase = (name) => {
+  phases[name] = Math.round(performance.now() - started);
+};
 const C = fromHex(o.C);
 const key = importSigningKey(Buffer.from(o.signing, "hex"));
 const agreement = importAgreementKey(Buffer.from(o.agreement, "hex"));
@@ -42,7 +50,9 @@ const secrets = new InMemorySecretStore();
 
 const ch = await connectionNetwork({ now: () => Date.now() }).connect(signer, o.url);
 const chain = await syncChain(storage, ch, C);
+phase("chainMs");
 await fetchDeks(storage, secrets, ch, chain, { signer, agreement });
+phase("deksMs");
 ch.close();
 if ((await loadControlChain(storage, C))?.kind !== "linear") throw new Error("no chain of C");
 
@@ -57,14 +67,16 @@ const profile = new ServiceControlDataProfile({
       : serviceControlSignerClass(serviceControlSignerFacts(u.control, u.actor)),
 });
 let admissionMs = 0;
+let admittedUnits = 0;
 const timed =
-  (f) =>
+  (f, count) =>
   (...a) => {
     const t = performance.now();
     try {
       return f(...a);
     } finally {
       admissionMs += performance.now() - t;
+      admittedUnits += count(...a);
     }
   };
 const snapshot = profile.snapshotBinding();
@@ -86,8 +98,14 @@ client.open({
       {
         dataProfile: profile.dataProfile,
         codecFor: (u) => profile.codecFor(u),
-        apply: timed((u, v) => profile.apply(u, v)),
-        applyBatch: timed((units) => profile.applyBatch(units)),
+        apply: timed(
+          (u, v) => profile.apply(u, v),
+          () => 1,
+        ),
+        applyBatch: timed(
+          (units) => profile.applyBatch(units),
+          (units) => units.length,
+        ),
         exclude: (ids) => profile.exclude(ids),
         has: (id) => profile.has(id),
         reset: () => profile.reset(),
@@ -109,9 +127,20 @@ const stopDriver = startSyncDriver(
   { now: () => Date.now(), setInterval, clearInterval },
   100,
 );
-const deadline = Date.now() + 300_000;
+phase("startMs");
 while (port.state()?.status?.heartbeatAt !== o.heartbeatAt) {
-  if (Date.now() > deadline) throw new Error("the cold client never read the last status");
+  if (Date.now() > deadline) {
+    const progress = {
+      ...phases,
+      waitedMs: Math.round(performance.now() - started),
+      admissionMs: Math.round(admissionMs),
+      admittedUnits,
+      state: client.resourceState(C),
+      lastHeartbeatAt: port.state()?.status?.heartbeatAt ?? null,
+      maxRssBytes: process.resourceUsage().maxRSS * 1024,
+    };
+    throw new Error(`the cold client never read the last status: ${JSON.stringify(progress)}`);
+  }
   await new Promise((r) => setTimeout(r, 20));
 }
 const coldMs = performance.now() - started;

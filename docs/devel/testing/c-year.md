@@ -47,6 +47,9 @@ the heartbeat 30 minutes after the last unit.
 The cold client runs in its own process with a 30-minute timeout (`COLD_TIMEOUT_MS`), far above the
 10 s budget: a slow cold connection is a figure, only one that never ends fails the run, and the error
 says how the process ended (killed at the timeout, killed by a signal, or its exit code and stderr).
+The client itself stops waiting one minute before the kill and reports how far it got: the time of each
+phase (chain, DEKs, start), the units admitted and the time spent admitting them, the state of `C`, the
+last heartbeat it read, and its peak memory.
 The year prints its progress once a simulated week with the elapsed time, and the cold client's time.
 
 ## Running it

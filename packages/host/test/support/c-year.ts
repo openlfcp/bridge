@@ -132,13 +132,23 @@ export interface ColdResult {
  */
 export const COLD_TIMEOUT_MS = 1_800_000;
 
+/** How long before the kill the cold client stops waiting and reports its progress. */
+const COLD_MARGIN_MS = 60_000;
+
 /** Runs c-year-cold.mjs as a new personal device of the year's root. */
 export async function coldConnect(
   url: string,
   y: YearResult,
   timeoutMs = COLD_TIMEOUT_MS,
 ): Promise<ColdResult> {
-  const arg = JSON.stringify({ url, C: toHex(y.C), ...y.personal, heartbeatAt: y.lastHeartbeatAt });
+  const arg = JSON.stringify({
+    url,
+    C: toHex(y.C),
+    ...y.personal,
+    heartbeatAt: y.lastHeartbeatAt,
+    // The client gives up a little before the kill, so it can say how far it got.
+    waitMs: Math.max(timeoutMs - COLD_MARGIN_MS, timeoutMs / 2),
+  });
   const script = fileURLToPath(new URL("./c-year-cold.mjs", import.meta.url));
   const started = Date.now();
   let stdout: string;
