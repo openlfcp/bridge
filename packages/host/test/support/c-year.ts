@@ -1,10 +1,11 @@
 // The synthetic year of `C` (A§3.5, T§3, E26 №8): a year of C's history written through the real
 // sdk-ts APIs against the reference server, by the writers 0.6 has:
 //
-// - the bridge: the host's own ControlClient (heartbeat every 30 min, binding transitions at most
-//   once a minute per binding, events, question resolution, the 7-day cleanup) on a simulated
-//   clock, with what the ControlClient does not write yet committed through the same port — a
-//   preview at each turn-on and the questions (E-033/E-042 write them);
+// - the bridge: the host's own ControlClient (a heartbeat after 30 minutes without a unit, binding
+//   transitions at most once a minute per binding, one unit per tick, events, question resolution,
+//   the 7-day cleanup) on a simulated clock, with what the ControlClient does not write yet
+//   committed through the same port — a preview at each turn-on and the questions (E-033/E-042
+//   write them);
 // - the plugin (the root): answers to the questions and a Snapshot of C once a week.
 //
 // A transition is a complete check of the binding (lastCompleteCheckAt moves): one binding.put of
