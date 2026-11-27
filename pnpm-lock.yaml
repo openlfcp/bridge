@@ -327,7 +327,7 @@ packages:
     engines: {node: '>= 20.19.0'}
 
   '@openlfcp/client@file:vendor/sdk-ts/openlfcp-client-0.6.0.tgz':
-    resolution: {integrity: sha512-4sJr9f3At0N0X+YJsTvwGCZtgGy+j8QBWS/Sq2+uK8aAP+3S3Go3qp+S8tW94SEFceNCqqHHZ6uPUGYRyzpeIw==, tarball: file:vendor/sdk-ts/openlfcp-client-0.6.0.tgz}
+    resolution: {integrity: sha512-ZVQtRb9ibgF71wCc9IyNACn6OsU+FNqQHKB+d+CMRvIBZVsTc4tKYIQpfmZ1CxJUWwsymgwqzHcGeWAp3mJaNg==, tarball: file:vendor/sdk-ts/openlfcp-client-0.6.0.tgz}
     version: 0.6.0
     engines: {node: '>=24'}
 
@@ -337,12 +337,12 @@ packages:
     engines: {node: '>=24'}
 
   '@openlfcp/crypto@file:vendor/sdk-ts/openlfcp-crypto-0.6.0.tgz':
-    resolution: {integrity: sha512-cd0JmGwFAfsOZBiMcmjH32XMUrNjgHUiHAV9gG9OeUlrS92wJGULwlrPQ3NiF9+Sv0oUgFNP4B1EhRFwEXlLuw==, tarball: file:vendor/sdk-ts/openlfcp-crypto-0.6.0.tgz}
+    resolution: {integrity: sha512-3YLfyTb6KHOI3ur1bTzWrM3C9IydFw5OU+vT0Iq/4vkPgp5KKTd5bnjJmTZCIFr4DSM7/4+8pIPmujNeVOSUDA==, tarball: file:vendor/sdk-ts/openlfcp-crypto-0.6.0.tgz}
     version: 0.6.0
     engines: {node: '>=24'}
 
   '@openlfcp/shared-objects@file:vendor/sdk-ts/openlfcp-shared-objects-0.6.0.tgz':
-    resolution: {integrity: sha512-XIHafAGmmPD9weRmcjHyFjmEm/MZ4SNfn6F9FggcUJumXKo/kLe87lqmbVZIRwbRgirGBCc4qTDf34Ef6+87iQ==, tarball: file:vendor/sdk-ts/openlfcp-shared-objects-0.6.0.tgz}
+    resolution: {integrity: sha512-ZYuZTUauMtNy1uiOzJne8zDQ/atBRtO4jpSm6OnfXnmbwnRRm6GY6Bd+SC+bjT8vdpLv+7D7IHPwNnaq/0QiPA==, tarball: file:vendor/sdk-ts/openlfcp-shared-objects-0.6.0.tgz}
     version: 0.6.0
     engines: {node: '>=24'}
 
@@ -358,7 +358,7 @@ packages:
     engines: {node: '>=24'}
 
   '@openlfcp/wire@file:vendor/sdk-ts/openlfcp-wire-0.6.0.tgz':
-    resolution: {integrity: sha512-xviLm8ZspeWvpDHx8+lNT8hSXfx6tYHcddWn6SpXK6NEmG4ByFvni35+k6UQsQdjpGlTYtgP2yyhceBZaonaHA==, tarball: file:vendor/sdk-ts/openlfcp-wire-0.6.0.tgz}
+    resolution: {integrity: sha512-dxdm6Pwv4dGc9Y8aLQO2m80mKNYT99CWi2Y3RUvbnzS0vohOokK/x3oMIKzEYo1xrS0LQ5Rk3QBZyDEWvkzirg==, tarball: file:vendor/sdk-ts/openlfcp-wire-0.6.0.tgz}
     version: 0.6.0
     engines: {node: '>=24'}
 
