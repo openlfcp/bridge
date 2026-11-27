@@ -61,5 +61,5 @@ JSON file for the figures. A whole year takes hours: run it in CI, not locally.
 Every `pnpm test` with a server runs eight sparse days (past the cleanup) through the same checks.
 
 `.github/workflows/c-year.yml` runs the year nightly on `macos-15`, `macos-15-intel` and `macos-26`
-(the server built at `server.lock`, the SDK packed at `sdk-ts.lock`), 30 days when its own files change,
-any length by `workflow_dispatch`. The figures are the job summary and the `c-year-<runner>` artifact.
+(the server built at `server.lock`, the SDK packed at `sdk-ts.lock`), nightly (`schedule`) for the whole year,
+and any length by `workflow_dispatch`. The figures are the job summary and the `c-year-<runner>` artifact.
