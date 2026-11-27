@@ -151,7 +151,10 @@ export class ControlClient {
   /** A row to run again not before `at`, after `tries` repeatable outcomes in a row. */
   readonly #retry = new Map<string, { tries: number; at: number }>();
   readonly #bindingWritten = new Map<string, number>();
-  /** When the host last wrote a unit to `C`; before its first, `status.heartbeatAt` stands in. */
+  /**
+   * When the host last wrote a unit to `C`, kept in `meta` so a restart does not forget it; before
+   * its first, `status.heartbeatAt` stands in.
+   */
   #wroteAt: number | undefined;
   #queue: Promise<void> = Promise.resolve();
   #recovered = false;
@@ -456,7 +459,7 @@ export class ControlClient {
       | { state?: string; since?: string; heartbeatAt?: string; message?: string }
       | undefined;
     const changed = cur?.state !== st.state || cur?.message !== st.message;
-    const wroteAt = this.#wroteAt ?? Date.parse(cur?.heartbeatAt ?? "");
+    const wroteAt = this.#lastWrite() ?? Date.parse(cur?.heartbeatAt ?? "");
     const due = cur?.heartbeatAt === undefined || !(now - wroteAt < HEARTBEAT_MS);
     if (!(writing || changed || due || out.length > 0)) return out;
     for (const l of lazy) {
@@ -483,5 +486,26 @@ export class ControlClient {
     const r = await this.#o.port.commit(intents, `brg-c:${randomUUID()}`);
     if (r.kind === "rejected") throw new Error(`C refused the change: ${JSON.stringify(r)}`);
     this.#wroteAt = this.#now();
+    this.#o.db
+      .prepare(
+        "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+      )
+      .run(this.#wroteKey(), String(this.#wroteAt));
+  }
+
+  #wroteKey(): string {
+    return `control_wrote_at:${this.#o.installation}`;
+  }
+
+  /** When the host last wrote a unit to `C`, across restarts; `undefined` before its first. */
+  #lastWrite(): number | undefined {
+    if (this.#wroteAt === undefined) {
+      const row = this.#o.db
+        .prepare("SELECT value FROM meta WHERE key = ?")
+        .get(this.#wroteKey()) as { value: string } | undefined;
+      const t = Number(row?.value);
+      if (row !== undefined && Number.isFinite(t)) this.#wroteAt = t;
+    }
+    return this.#wroteAt;
   }
 }

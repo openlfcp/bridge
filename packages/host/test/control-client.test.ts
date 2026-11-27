@@ -277,6 +277,29 @@ describe("ControlClient", () => {
     expect(c.commits.length).toBe(n + 2);
   });
 
+  it("a restart remembers the host's last unit: no heartbeat before 30 idle minutes", async () => {
+    const c = fakeC();
+    const before = client(c.port);
+    await before.tick();
+    now = T0 + 20 * 60_000;
+    db.prepare("UPDATE bindings SET target_title = 'One' WHERE id = 'b1'").run();
+    await before.tick();
+    await before.stop();
+    const n = c.commits.length;
+    // A new client 10 minutes after the last unit: nothing.
+    now = T0 + HEARTBEAT_MS;
+    const after = client(c.port);
+    await after.tick();
+    expect(c.commits.length).toBe(n);
+    // 30 idle minutes after the last unit: the heartbeat, alone.
+    now = T0 + 20 * 60_000 + HEARTBEAT_MS;
+    await after.tick();
+    expect(c.commits.slice(n)).toEqual([
+      [{ intent: "status.put", fields: { heartbeatAt: "2026-11-19T10:50:00Z" } }],
+    ]);
+    await after.stop();
+  });
+
   it("one tick writes one unit: status, heartbeat, a binding's transition and events together", async () => {
     const c = fakeC();
     let state = "running";
