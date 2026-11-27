@@ -207,7 +207,7 @@ describe("ControlClient", () => {
     expect(c.s.events.a).toMatchObject({ state: "rejected", code: "snapshot_changed" });
   });
 
-  it("status: heartbeat every 30 minutes; a binding's lifecycle at once, at most once a minute", async () => {
+  it("status: a heartbeat after 30 idle minutes; a binding's lifecycle at once, at most once a minute", async () => {
     const c = fakeC();
     const cc = client(c.port);
     await cc.tick();
@@ -226,7 +226,7 @@ describe("ControlClient", () => {
       db.prepare("UPDATE bindings SET target_title = ? WHERE id = 'b1'").run(t);
     rename("One");
     await cc.tick();
-    // Only the field that changed; the heartbeat rides on the unit.
+    // Only the field that changed.
     expect(c.commits.at(-1)).toEqual([
       { intent: "binding.put", binding: REF1, fields: { list: "One" } },
     ]);
@@ -236,11 +236,96 @@ describe("ControlClient", () => {
     expect(c.s.bindings[REF1]).toMatchObject({ list: "One" });
     now += 1000;
     await cc.tick();
-    expect(c.s.bindings[REF1]).toMatchObject({ list: "Two" });
-    expect(c.s.status).toMatchObject({ heartbeatAt: "2026-11-19T10:31:00Z" });
+    // The unit is a sign of life: no heartbeat rides on it.
+    expect(c.commits.at(-1)).toEqual([
+      { intent: "binding.put", binding: REF1, fields: { list: "Two" } },
+    ]);
+    expect(c.s.status).toMatchObject({ heartbeatAt: "2026-11-19T10:30:00Z" });
   });
 
-  it("a binding's check and pending ride on the next unit or the heartbeat; the heartbeat on any unit", async () => {
+  it("no heartbeat while the host wrote another unit within 30 minutes; one after 30 idle minutes", async () => {
+    const c = fakeC();
+    const cc = client(c.port);
+    await cc.tick();
+    expect(c.s.status).toMatchObject({ heartbeatAt: "2026-11-19T10:00:00Z" });
+    const rename = (t: string) =>
+      db.prepare("UPDATE bindings SET target_title = ? WHERE id = 'b1'").run(t);
+    now = T0 + 20 * 60_000;
+    rename("One");
+    await cc.tick();
+    // 30 minutes after the heartbeat, but 10 after the last unit: nothing.
+    const n = c.commits.length;
+    now = T0 + HEARTBEAT_MS;
+    await cc.tick();
+    now = T0 + 20 * 60_000 + HEARTBEAT_MS - 1000;
+    await cc.tick();
+    expect(c.commits.length).toBe(n);
+    expect(c.s.status).toMatchObject({ heartbeatAt: "2026-11-19T10:00:00Z" });
+    // 30 idle minutes after the last unit: the heartbeat, alone.
+    now += 1000;
+    await cc.tick();
+    expect(c.commits.slice(n)).toEqual([
+      [{ intent: "status.put", fields: { heartbeatAt: "2026-11-19T10:50:00Z" } }],
+    ]);
+    // Idle again: the next one 30 minutes later.
+    now += HEARTBEAT_MS - 1000;
+    await cc.tick();
+    expect(c.commits.length).toBe(n + 1);
+    now += 1000;
+    await cc.tick();
+    expect(c.s.status).toMatchObject({ heartbeatAt: "2026-11-19T11:20:00Z" });
+    expect(c.commits.length).toBe(n + 2);
+  });
+
+  it("one tick writes one unit: status, heartbeat, a binding's transition and events together", async () => {
+    const c = fakeC();
+    let state = "running";
+    const cc = new ControlClient({
+      db,
+      installation: "i1",
+      port: c.port,
+      ops: { check: { run: async () => ({ state: "applied" }) } },
+      service: () => ({ instance: "x", kind: "reminders" }),
+      status: () => ({ state }),
+      now: () => now,
+    });
+    await cc.tick();
+    expect(c.commits).toHaveLength(1);
+    expect(c.commits[0]?.map((i) => i.intent)).toEqual([
+      "service.put",
+      "binding.put",
+      "status.put",
+    ]);
+    // 30 idle minutes later, in one tick: a status change, a binding's transition, a stale
+    // request's event and the heartbeat.
+    now += HEARTBEAT_MS;
+    state = "paused";
+    db.prepare("UPDATE bindings SET target_title = 'One' WHERE id = 'b1'").run();
+    // For an older generation: stale at admission, its events in this tick.
+    c.s.requests.r = request("check", { generation: 5 });
+    await cc.tick();
+    expect(c.commits).toHaveLength(2);
+    expect(c.commits[1]).toEqual([
+      {
+        intent: "event.put",
+        id: "r",
+        state: "stale",
+        code: "stale_generation",
+        at: "2026-11-19T10:30:00Z",
+      },
+      { intent: "binding.put", binding: REF1, fields: { list: "One" } },
+      {
+        intent: "status.put",
+        fields: {
+          state: "paused",
+          since: "2026-11-19T10:30:00Z",
+          heartbeatAt: "2026-11-19T10:30:00Z",
+        },
+      },
+    ]);
+  });
+
+  it("a binding's check and pending ride on the next unit or the heartbeat; the heartbeat on no other unit", async () => {
     const c = fakeC();
     const cc = client(c.port, {
       check: {
@@ -255,14 +340,20 @@ describe("ControlClient", () => {
     now += 10 * 60_000;
     await cc.tick();
     expect(c.commits.length).toBe(n);
-    // A request's events: the check and the heartbeat go with them.
+    // A request's events: the check goes with them; the heartbeat does not.
     c.s.requests.r = request("check");
     await cc.tick();
     await cc.tick();
     expect(c.s.events.r).toMatchObject({ state: "applied" });
     expect(c.s.bindings[REF1]).toMatchObject({ lastCompleteCheckAt: "2026-11-19T10:05:00Z" });
-    expect(c.s.status).toMatchObject({ heartbeatAt: "2026-11-19T10:10:00Z" });
+    expect(c.s.status).toMatchObject({ heartbeatAt: "2026-11-19T10:00:00Z" });
     expect(c.commits.slice(n).every((u) => u.some((i) => i.intent === "event.put"))).toBe(true);
+    expect(
+      c.commits
+        .slice(n)
+        .flat()
+        .some((i) => i.intent === "status.put"),
+    ).toBe(false);
     // Nothing else to write: the check waits for the heartbeat, 30 minutes after the last unit.
     const m = c.commits.length;
     check("2026-11-19T10:15:00.000Z");

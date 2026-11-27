@@ -6,10 +6,12 @@
 // - admits every new `requests/<rid>` and `answers/<aid>` through control_exec (A§3.4 steps 1–2:
 //   author, generation, an answer's question and snapshotHash) before any effect, and runs the
 //   accepted ones by their handler, which asks `effect()` before each effect (A§3.3, B19);
-// - writes `events` from control_exec (forward only), `questions.resolved` for an applied answer,
-//   `service` when it differs, `status` on a change or the 30-minute heartbeat, `bindings/<X>` on a
-//   change but at most once a minute per binding (A§3.5) — only the fields that changed; the
-//   heartbeat and a binding's progress fields ride on the next unit written anyway (E-030d);
+// - writes, in one unit per tick, `events` from control_exec (forward only), `questions.resolved`
+//   for an applied answer, `service` when it differs, `status` on a change, `bindings/<X>` on a
+//   change but at most once a minute per binding (A§3.5) — only the fields that changed; a
+//   binding's progress fields ride on the next unit written anyway (E-030d);
+// - writes the heartbeat (`status.heartbeatAt`) only when the host has written no unit to `C` for
+//   30 minutes: any unit the host writes is a sign of life (E-030 cold connect, option 2);
 // - deletes, once an hour, what has been final for 7 days (§9). control_exec is never touched: an
 //   id seen again after the cleanup is a duplicate (A§3.4 step 5).
 //
@@ -149,6 +151,8 @@ export class ControlClient {
   /** A row to run again not before `at`, after `tries` repeatable outcomes in a row. */
   readonly #retry = new Map<string, { tries: number; at: number }>();
   readonly #bindingWritten = new Map<string, number>();
+  /** When the host last wrote a unit to `C`; before its first, `status.heartbeatAt` stands in. */
+  #wroteAt: number | undefined;
   #queue: Promise<void> = Promise.resolve();
   #recovered = false;
   #cleanedAt = Number.NEGATIVE_INFINITY;
@@ -396,8 +400,9 @@ export class ControlClient {
   /**
    * `service`, `status` and `bindings/<X>` (A§3.5), only the fields that differ from `C`. A
    * binding's lifecycle fields go at once (at most once a minute per binding); its progress fields
-   * (LAZY) and the heartbeat ride on the next unit the host writes anyway, or on the heartbeat 30
-   * minutes after the last write: the budget of `C`'s history (A§3.5, E-030d).
+   * (LAZY) ride on the next unit the host writes anyway. The heartbeat is written only when the
+   * host has written no unit for 30 minutes, and takes the progress fields with it: the budget of
+   * `C`'s history (A§3.5, E-030d).
    */
   #publish(
     s: ServiceControlValidation,
@@ -451,7 +456,8 @@ export class ControlClient {
       | { state?: string; since?: string; heartbeatAt?: string; message?: string }
       | undefined;
     const changed = cur?.state !== st.state || cur?.message !== st.message;
-    const due = !(now - Date.parse(cur?.heartbeatAt ?? "") < HEARTBEAT_MS);
+    const wroteAt = this.#wroteAt ?? Date.parse(cur?.heartbeatAt ?? "");
+    const due = cur?.heartbeatAt === undefined || !(now - wroteAt < HEARTBEAT_MS);
     if (!(writing || changed || due || out.length > 0)) return out;
     for (const l of lazy) {
       if (l.intent === "binding.put") this.#bindingWritten.set(l.binding, now);
@@ -461,7 +467,7 @@ export class ControlClient {
       {
         state: st.state,
         since: changed || cur?.since === undefined ? at : cur.since,
-        heartbeatAt: at,
+        ...(due ? { heartbeatAt: at } : {}),
       },
       cur,
     );
@@ -476,5 +482,6 @@ export class ControlClient {
   async #commit(intents: readonly ServiceControlIntent[]): Promise<void> {
     const r = await this.#o.port.commit(intents, `brg-c:${randomUUID()}`);
     if (r.kind === "rejected") throw new Error(`C refused the change: ${JSON.stringify(r)}`);
+    this.#wroteAt = this.#now();
   }
 }

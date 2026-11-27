@@ -1,6 +1,7 @@
 // L2 of E-030c against the Rust reference server: the root's `C`, the bridge registered in it as
 // a service device with the base approval; the bridge's ControlClient publishes service, status
-// (heartbeat) and a binding's status at most once a minute, reads requests, answers and cancels
+// (the heartbeat only after 30 idle minutes) and a binding's status at most once a minute, one
+// unit per tick, reads requests, answers and cancels
 // through control_exec, carries a cancel to the effect by A§3.3, and cleans what is final for
 // 7 days while control_exec keeps the evidence. Skipped without LFCP_SERVER_BIN.
 
@@ -144,12 +145,24 @@ describe.skipIf(skip !== undefined)("ControlClient, live", { timeout: 180_000 },
       "INSERT INTO bindings (id, installation_id, resource_id, adapter, transport, state, created_at) VALUES ('b1', 'i1', ?, 'apple-reminders', 'eventkit', 'active', 'x')",
     ).run(R1);
     let now = T0;
+    // The bridge's units, by the tick that wrote them.
+    const units: ServiceControlIntent[][] = [];
+    const unitAt: number[] = [];
+    const port: ControlPort = {
+      state: () => bridgeC.state(),
+      authorOf: (c, k) => bridgeC.authorOf(c, k),
+      commit: (intents, op) => {
+        units.push([...intents]);
+        unitAt.push(now);
+        return bridgeC.commit(intents, op);
+      },
+    };
     const effects: string[] = [];
     const gates = new Map<string, () => void>();
     const client = new ControlClient({
       db,
       installation: "i1",
-      port: bridgeC,
+      port,
       ops: {
         check: {
           run: async ({ row, effect }) => {
@@ -197,9 +210,13 @@ describe.skipIf(skip !== undefined)("ControlClient, live", { timeout: 180_000 },
       expect(s0?.service).toMatchObject({ kind: "reminders", protocol: { ops: ["check"] } });
       expect(s0?.status).toMatchObject({ state: "running", heartbeatAt: iso(T0) });
       expect(s0?.bindings[REF1]).toMatchObject({ state: "active", generation: 0 });
+      // service, binding and status: one unit.
+      expect(units.map((u) => u.map((i) => i.intent))).toEqual([
+        ["service.put", "binding.put", "status.put"],
+      ]);
 
-      // ≤1 write a minute per binding (its lifecycle fields); the heartbeat rides on it, and
-      // comes alone 30 minutes after the last unit.
+      // ≤1 write a minute per binding (its lifecycle fields); no heartbeat rides on it: any unit
+      // is a sign of life, and the heartbeat comes alone 30 minutes after the last unit.
       const rename = (t: string) =>
         db.prepare("UPDATE bindings SET target_title = ? WHERE id = 'b1'").run(t);
       rename("One");
@@ -207,17 +224,30 @@ describe.skipIf(skip !== undefined)("ControlClient, live", { timeout: 180_000 },
       await client.tick();
       // Changed, but written less than a minute ago: not written (its own view shows it at once).
       expect(bridgeC.state()?.bindings[REF1]?.list).not.toBe("One");
+      expect(units).toHaveLength(1);
       now = T0 + BINDING_WRITE_MS;
       await tickUntil(
         "the binding written after a minute",
         seen((s) => s.bindings[REF1]?.list === "One"),
       );
-      expect(rootC.state()?.status?.heartbeatAt).toBe(iso(T0 + BINDING_WRITE_MS));
+      expect(units.slice(1)).toEqual([
+        [{ intent: "binding.put", binding: REF1, fields: { list: "One" } }],
+      ]);
+      expect(rootC.state()?.status?.heartbeatAt).toBe(iso(T0));
+      // 30 minutes after the heartbeat, but not after the last unit: no heartbeat.
+      now = T0 + HEARTBEAT_MS;
+      await client.tick();
+      now = T0 + BINDING_WRITE_MS + HEARTBEAT_MS - 1000;
+      await client.tick();
+      expect(units).toHaveLength(2);
       now = T0 + BINDING_WRITE_MS + HEARTBEAT_MS;
       await tickUntil(
         "a heartbeat",
         seen((s) => s.status?.heartbeatAt === iso(T0 + BINDING_WRITE_MS + HEARTBEAT_MS)),
       );
+      expect(units.slice(2)).toEqual([
+        [{ intent: "status.put", fields: { heartbeatAt: iso(now) } }],
+      ]);
 
       // Requests and cancels (A§3.3).
       const request = (generation = 0) => ({
@@ -306,6 +336,22 @@ describe.skipIf(skip !== undefined)("ControlClient, live", { timeout: 180_000 },
         "requests cleaned",
         seen((s) => Object.values(rids).every((r) => !(r in s.requests) && !(r in s.events))),
       );
+      // Over the whole run: at most one unit carrying status or a binding at any one time, the
+      // binding written at most once a minute, and no heartbeat but the first one, the idle one
+      // and the one 8 idle days later.
+      const carrying = unitAt.filter((_, k) =>
+        units[k]?.some((i) => i.intent === "status.put" || i.intent === "binding.put"),
+      );
+      expect(new Set(carrying).size).toBe(carrying.length);
+      const bindingAt = unitAt.filter((_, k) => units[k]?.some((i) => i.intent === "binding.put"));
+      for (let k = 1; k < bindingAt.length; k++)
+        expect((bindingAt[k] as number) - (bindingAt[k - 1] as number)).toBeGreaterThanOrEqual(
+          BINDING_WRITE_MS,
+        );
+      const beats = units
+        .flat()
+        .filter((i) => i.intent === "status.put" && "heartbeatAt" in i.fields);
+      expect(beats).toHaveLength(3);
       const kept = db
         .prepare("SELECT id FROM control_exec ORDER BY id")
         .all()
